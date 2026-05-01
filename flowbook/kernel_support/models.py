@@ -6,7 +6,6 @@ during cell execution, including:
 
 - TrackingData: Variable access patterns (reads, writes, column-level tracking)
 - ExecutionProfile: Timing and profiling information
-- MonotonicityViolation: Details when monotonicity constraints are violated
 - ExecutionContext: Pre-execution state and configuration
 
 These models ensure type safety and provide automatic serialization/deserialization
@@ -77,6 +76,22 @@ class TrackingData(BaseModel):
             "equality for these variables, not just column value equality. "
             "e.g., {'df': {'columns', 'shape'}, 'data[\"train\"]': {'describe'}}"
         ),
+    )
+    row_mutations: Set[str] = Field(
+        default_factory=set,
+        description="Variable paths of DataFrames that had rows added or removed",
+    )
+    index_mutations: Set[str] = Field(
+        default_factory=set,
+        description="Variable paths of DataFrames that had their index mutated",
+    )
+    dtype_changes: Dict[str, Set[str]] = Field(
+        default_factory=dict,
+        description="Variable path → columns whose dtype changed",
+    )
+    column_deletions: Dict[str, Set[str]] = Field(
+        default_factory=dict,
+        description="Variable path → columns that were deleted",
     )
     file_reads_before_writes: Set[str] = Field(
         default_factory=set,
@@ -283,39 +298,6 @@ class ExecutionProfile(BaseModel):
     env_after: Dict[str, str] = Field(
         default_factory=dict, description="Variable types after execution"
     )
-
-
-class MonotonicityViolation(BaseModel):
-    """
-    Details of a monotonicity constraint violation.
-
-    When monotonicity enforcement is enabled, cells that modify read-before-write
-    variables are rejected and their effects rolled back. This model captures
-    the details of such violations for error reporting.
-
-    Attributes:
-        violated_vars: List of variable names that were incorrectly modified
-        diff_details: Human-readable description of the differences
-        error_summary: Short summary for error message
-    """
-
-    violated_vars: List[str] = Field(
-        ..., description="Variables that were modified in violation of monotonicity"
-    )
-    diff_details: str = Field(
-        ..., description="Human-readable details of the differences found"
-    )
-    error_summary: str = Field(..., description="Short summary for error reporting")
-
-    def to_error_result(self, execution_count: int) -> dict:
-        """Convert to kernel error result format."""
-        return {
-            "status": "error",
-            "execution_count": execution_count,
-            "ename": "MonotonicityError",
-            "evalue": self.error_summary,
-            "traceback": [self.diff_details],
-        }
 
 
 class ExecutionContext(BaseModel):

@@ -274,10 +274,10 @@ class TestConflictRelationWithLocRef:
         r = ReadLoc.col(LocRef(42, "df2"), "price")
         assert write_conflicts_read(w, r) is False
 
-    def test_col_add_attr_same_locref(self):
-        """ColAdd with same loc_id conflicts with structural attr."""
-        w = WriteLoc.col_add(LocRef(42, "df"), "new_col")
-        r = ReadLoc.attr(LocRef(42, "df"), "columns")
+    def test_col_cols_same_locref(self):
+        """Col with same loc_id conflicts with Cols read."""
+        w = WriteLoc.col(LocRef(42, "df"), "new_col")
+        r = ReadLoc.cols("df", qualifier=LocRef(42, "df"))
         assert write_conflicts_read(w, r) is True
 
     def test_rows_col_same_locref(self):

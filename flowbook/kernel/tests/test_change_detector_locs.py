@@ -59,7 +59,7 @@ class TestColumnAdded:
         result = changes_to_write_locs([
             ColumnAdded(variable="df", column="new_col"),
         ])
-        assert result == frozenset({WriteLoc.col_add("df", "new_col")})
+        assert result == frozenset({WriteLoc.col("df", "new_col")})
 
     def test_multiple_columns_added(self):
         result = changes_to_write_locs([
@@ -67,8 +67,8 @@ class TestColumnAdded:
             ColumnAdded(variable="df", column="b"),
         ])
         assert result == frozenset({
-            WriteLoc.col_add("df", "a"),
-            WriteLoc.col_add("df", "b"),
+            WriteLoc.col("df", "a"),
+            WriteLoc.col("df", "b"),
         })
 
 
@@ -77,7 +77,7 @@ class TestColumnRemoved:
         result = changes_to_write_locs([
             ColumnRemoved(variable="df", column="old_col"),
         ])
-        assert result == frozenset({WriteLoc.col_del("df", "old_col")})
+        assert result == frozenset({WriteLoc.col("df", "old_col")})
 
 
 class TestRowsAdded:
@@ -110,21 +110,18 @@ class TestIndexChanged:
             IndexChanged(variable="df"),
         ])
         assert result == frozenset({
-            WriteLoc.attr("df", "index"),
-            WriteLoc.attr("df", "axes"),  # Derived: axes = [index, columns]
+            WriteLoc.rows("df"),
         })
 
 
 class TestDtypeChanged:
-    def test_dtype_changed_produces_col_and_attr(self):
+    def test_dtype_changed_produces_col_and_cols(self):
         result = changes_to_write_locs([
             DtypeChanged(variable="df", column="x", old_dtype="int64", new_dtype="float64"),
         ])
         assert result == frozenset({
             WriteLoc.col("df", "x"),
-            WriteLoc.attr("df", "dtypes"),
-            WriteLoc.attr("df", "values"),  # Derived: array representation changes
-            WriteLoc.attr("df", "T"),  # Derived: transpose of values
+            WriteLoc.cols("df"),
         })
 
     def test_dtype_changed_multiple_columns(self):
@@ -135,9 +132,7 @@ class TestDtypeChanged:
         assert result == frozenset({
             WriteLoc.col("df", "x"),
             WriteLoc.col("df", "y"),
-            WriteLoc.attr("df", "dtypes"),
-            WriteLoc.attr("df", "values"),
-            WriteLoc.attr("df", "T"),
+            WriteLoc.cols("df"),
         })
 
 
@@ -159,8 +154,7 @@ class TestMixedChanges:
         assert result == frozenset({
             WriteLoc.var("x"),
             WriteLoc.col("df", "price"),
-            WriteLoc.col_add("df", "new"),
+            WriteLoc.col("df", "new"),
             WriteLoc.rows("df2"),
-            WriteLoc.attr("df3", "index"),
-            WriteLoc.attr("df3", "axes"),
+            WriteLoc.rows("df3"),
         })

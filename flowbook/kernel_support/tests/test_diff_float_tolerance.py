@@ -227,8 +227,9 @@ def run_diagnostic():
 
 if __name__ == "__main__":
     import sys
+    from pathlib import Path
     # Move to parent directory to avoid circular import with types.py
-    sys.path.insert(0, '/Users/freund/other/FlowBook')
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
     run_diagnostic()
 
     # Run the tests

@@ -7,8 +7,8 @@ import textwrap
 import numpy as np
 
 from io import StringIO
-from types import *
-from typing import *
+from types import FrameType
+from typing import Any, Dict, Set, Union
 
 from flowbook.kernel_support.extended_types import get_type_model
 from flowbook.kernel_support.checkpoint import filter_user_namespace
@@ -48,8 +48,7 @@ def _extract_locals(frame: FrameType) -> Set[str]:
         parameter_symbols.discard(None)
 
         return (finder.defined_symbols | parameter_symbols) & locals.keys()
-    except:
-        # ipes
+    except (OSError, SyntaxError, TypeError):
         return set()
 
 
@@ -162,7 +161,7 @@ def _format_limited(
             return "'" + result + "'"
         else:
             return result
-    except:
+    except Exception:
         return "<unrepresentable>"
 
 

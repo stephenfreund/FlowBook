@@ -5,11 +5,7 @@
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
 import { ISignal, Signal } from '@lumino/signaling';
 
-export type FlowbookKernelType =
-  | 'flowbook_kernel'
-  | 'experimental_kernel'
-  | 'other'
-  | 'none';
+export type FlowbookKernelType = 'flowbook_kernel' | 'other' | 'none';
 
 export interface IKernelChangeInfo {
   notebook: NotebookPanel;
@@ -49,22 +45,12 @@ export class KernelDetector {
     return this.getKernelType(notebook) === 'flowbook_kernel';
   }
 
-  /**
-   * Check if notebook is using experimental_kernel
-   */
-  isExperimentalKernel(notebook: NotebookPanel): boolean {
-    return this.getKernelType(notebook) === 'experimental_kernel';
-  }
-
   private _classifyKernel(kernelName: string | undefined): FlowbookKernelType {
     if (!kernelName) {
       return 'none';
     }
     if (kernelName === 'flowbook_kernel') {
       return 'flowbook_kernel';
-    }
-    if (kernelName === 'experimental_kernel') {
-      return 'experimental_kernel';
     }
     return 'other';
   }

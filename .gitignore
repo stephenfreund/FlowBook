@@ -1,16 +1,20 @@
 .keys
 _ipython*
 *.bak
+.jupyter_ystore.db
+.virtual_documents/
 
 # Ignore all files in examples except .ipynb notebooks
 examples/**
 !examples/**/*.ipynb
 !examples/**/
+examples/**/.virtual_documents/
 
 *.bundle.*
 lib/
 node_modules/
 *.log
+*.pdf
 .eslintcache
 .stylelintcache
 *.egg-info/
@@ -19,6 +23,9 @@ node_modules/
 flowbook/labextension
 # Version file is handled by hatchling
 flowbook/_version.py
+
+# Benchmark output
+flowbook-times.json
 
 # Created by https://www.gitignore.io/api/python
 # Edit at https://www.gitignore.io/?templates=python
@@ -132,3 +139,4 @@ dmypy.json
 # Claude Code local files
 .claude/settings.local.json
 .claude/agent-memory/
+.mcp.json

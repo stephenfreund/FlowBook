@@ -832,22 +832,13 @@ class HeapSizer:
             total += self._sizeof(backing, owned_only)
             return total
 
-        # For ArrowExtensionArray, extract the PyArrow chunked array
-        if hasattr(arr, '_ndarray'):
-            # StringArray, IntegerArray, etc. have _ndarray
-            backing_id = id(arr._ndarray)
-            if backing_id in self._seen_ids:
-                return total  # Already counted
-            self._seen_ids.add(backing_id)
-            try:
-                if hasattr(arr, 'memory_usage'):
-                    return total + int(arr.memory_usage())
-                if hasattr(arr, 'nbytes'):
-                    return total + int(arr.nbytes)
-            except Exception:
-                pass
+        # PyArrow-backed (ArrowStringArray, ArrowExtensionArray) — pandas 3.x default
+        # for dtype='string'. Dedupe by Arrow buffer address since copies typically
+        # share buffers without exposing a numpy view.
+        if hasattr(arr, '_pa_array'):
+            return total + self._sizeof_pa_array(arr._pa_array)
 
-        # Fallback: use memory_usage or nbytes directly
+        # Fallback: use memory_usage or nbytes directly (no dedup possible)
         try:
             if hasattr(arr, 'memory_usage'):
                 return total + int(arr.memory_usage())
@@ -856,6 +847,21 @@ class HeapSizer:
         except Exception:
             pass
         return sys.getsizeof(arr)
+
+    def _sizeof_pa_array(self, pa_array) -> int:
+        """Size pyarrow Array/ChunkedArray, deduping by buffer.address."""
+        chunks = pa_array.chunks if hasattr(pa_array, 'chunks') else [pa_array]
+        total = 0
+        for chunk in chunks:
+            for buf in chunk.buffers():
+                if buf is None:        # null bitmap may be absent
+                    continue
+                key = buf.address      # OS address — stable, shared across copies
+                if key in self._seen_ids:
+                    continue
+                self._seen_ids.add(key)
+                total += buf.size
+        return total
 
     def _sizeof_list(self, lst: list, owned_only: bool) -> int:
         """Measure list memory including elements."""

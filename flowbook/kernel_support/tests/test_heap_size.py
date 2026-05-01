@@ -8,6 +8,27 @@ import pandas as pd
 from flowbook.kernel_support.heap_size import HeapSizer, sizeof, NamespaceSize
 
 
+def _backing_keys(arr) -> set:
+    """Return the dedup keys HeapSizer would use for an ExtensionArray's data.
+
+    Works on both numpy-backed (StringArray._ndarray) and pyarrow-backed
+    (ArrowStringArray._pa_array) ExtensionArrays. Returns a set of int keys
+    so the same identity can be compared across copies.
+    """
+    if hasattr(arr, '_ndarray'):
+        return {id(arr._ndarray)}
+    if hasattr(arr, '_pa_array'):
+        pa_arr = arr._pa_array
+        chunks = pa_arr.chunks if hasattr(pa_arr, 'chunks') else [pa_arr]
+        return {
+            buf.address
+            for chunk in chunks
+            for buf in chunk.buffers()
+            if buf is not None
+        }
+    raise AssertionError(f"Unknown ExtensionArray backing for {type(arr).__name__}")
+
+
 class TestNumPyArrays:
     """Tests for numpy array memory measurement."""
 
@@ -1011,26 +1032,28 @@ class TestExtensionArrayDeduplication:
         # Second measurement of same object should be 0 (already counted)
         assert size2 == 0
 
-    def test_string_array_underlying_ndarray_tracked(self):
-        """StringArray's underlying _ndarray should be tracked for dedup."""
-        arr = pd.array(['hello', 'world'] * 1000, dtype='string')
+    def test_string_array_backing_buffer_tracked(self):
+        """StringArray's underlying buffers should be tracked for dedup.
 
-        # Verify it has _ndarray attribute
-        assert hasattr(arr, '_ndarray'), "StringArray should have _ndarray"
+        Pandas <3.0 default backs dtype='string' with numpy (StringArray._ndarray);
+        pandas >=3.0 default backs it with pyarrow (ArrowStringArray._pa_array).
+        Either way, HeapSizer should add the backing identity to _seen_ids on
+        first measurement so subsequent copies dedupe.
+        """
+        arr = pd.array(['hello', 'world'] * 1000, dtype='string')
+        expected_keys = _backing_keys(arr)
+        assert expected_keys, "Expected non-empty backing-key set"
 
         sizer = HeapSizer()
         size1 = sizer.sizeof(arr)
+        assert size1 > 0
+        # All backing identities should now be tracked for dedup.
+        assert expected_keys.issubset(sizer._seen_ids), \
+            f"Expected backing keys {expected_keys} in _seen_ids"
 
-        # Create a new wrapper around the same _ndarray (simulates CoW sharing)
-        # This is what happens when df.copy(deep=False) is used
-        arr2 = pd.array(['different'], dtype='string')  # Just to get the type
-        # Now measure the underlying array directly
-        sizer2 = HeapSizer()
-        underlying_size = sizer2.sizeof(arr._ndarray)
-        underlying_size2 = sizer2.sizeof(arr._ndarray)
-
-        assert underlying_size > 0
-        assert underlying_size2 == 0, "Same _ndarray should be deduplicated"
+        # A second measurement of an array sharing the same backing yields ~0.
+        size2 = sizer.sizeof(arr)
+        assert size2 == 0, "Same array should be deduplicated"
 
     def test_dataframe_stringdtype_column_dedup(self):
         """DataFrame with StringDtype columns should deduplicate across measurements."""
@@ -1047,23 +1070,25 @@ class TestExtensionArrayDeduplication:
         assert size2 == 0, "Same DataFrame should return 0 on second measurement"
 
     def test_dataframe_copy_shares_string_column_data(self):
-        """DataFrame.copy(deep=False) should share StringDtype column data."""
+        """deepcopy should preserve backing-buffer identity for StringDtype columns.
+
+        Whether StringDtype is numpy-backed (StringArray._ndarray) or
+        pyarrow-backed (ArrowStringArray._pa_array), the FlowBook custom deepcopy
+        must keep the underlying data shared so checkpoint overhead stays small.
+        """
         from flowbook.kernel_support.deepcopy import deepcopy
 
         df = pd.DataFrame({
             'name': pd.array(['Alice'] * 5000, dtype='string'),
         })
 
-        # Simulate checkpoint deepcopy
         df_copy = deepcopy(df, {})
 
-        # The underlying _ndarray should be shared
         orig_arr = df._mgr.arrays[0]
         copy_arr = df_copy._mgr.arrays[0]
 
-        assert hasattr(orig_arr, '_ndarray'), "Expected StringArray with _ndarray"
-        assert orig_arr._ndarray is copy_arr._ndarray, \
-            "Deepcopy should share underlying _ndarray for StringArray"
+        assert _backing_keys(orig_arr) == _backing_keys(copy_arr), \
+            "Deepcopy should share backing buffers for StringDtype"
 
     def test_checkpoint_deduplication_stringdtype(self):
         """Cross-checkpoint measurement should deduplicate shared StringDtype arrays."""
@@ -1416,6 +1441,44 @@ class TestExtensionArrayRegression:
         assert total < expected_max, \
             f"Total memory ({total:,}) exceeds expected max ({expected_max:,}). " \
             f"Breakdown: orig={orig_size:,}, ckpt1={ckpt1_size:,}, ckpt2={ckpt2_size:,}"
+
+    def test_arrow_chunked_array_dedup(self):
+        """Multi-chunk pa.ChunkedArray buffers should each dedupe by address."""
+        pa = pytest.importorskip("pyarrow")
+
+        chunked = pa.chunked_array([
+            pa.array(['hello'] * 1000, type=pa.string()),
+            pa.array(['world'] * 1000, type=pa.string()),
+        ])
+        # Wrap in a pandas ArrowExtensionArray via ArrowDtype.
+        ext = pd.array(chunked.to_pylist(), dtype=pd.ArrowDtype(pa.string()))
+
+        sizer = HeapSizer()
+        size1 = sizer.sizeof(ext)
+        size2 = sizer.sizeof(ext)
+
+        assert size1 > 0
+        assert size2 == 0, "Identical ArrowExtensionArray should dedupe"
+
+        # All buffer addresses should be in _seen_ids.
+        keys = _backing_keys(ext)
+        assert keys.issubset(sizer._seen_ids)
+
+    def test_arrow_buffer_address_stability(self):
+        """pa.Buffer.address must be stable across attribute reads (sanity).
+
+        The Arrow dedup path keys on buf.address; if accessing .buffers() or
+        .address ever returned different ids per call, dedup would silently
+        break. This pins the invariant the fix relies on.
+        """
+        pa = pytest.importorskip("pyarrow")
+
+        ext = pd.array(['a', 'b', 'c'] * 100, dtype=pd.ArrowDtype(pa.string()))
+        chunks = ext._pa_array.chunks
+        addrs1 = [b.address for c in chunks for b in c.buffers() if b is not None]
+        addrs2 = [b.address for c in chunks for b in c.buffers() if b is not None]
+        assert addrs1 == addrs2, "Buffer addresses must be stable across calls"
+        assert addrs1, "Expected at least one non-null buffer"
 
 
 # ============================================================================

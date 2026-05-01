@@ -6,10 +6,9 @@ import json
 import pprint
 import asyncio
 import traceback
-import uuid
 import tornado
 import concurrent.futures
-from jupyter_server.base.handlers import APIHandler, JupyterHandler
+from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
 
 from flowbook.server.registry import CommandRegistry
@@ -17,8 +16,8 @@ from flowbook.server.kernel_manager import (
     FlowbookKernelClient,
     KernelConnectionManager,
 )
-from flowbook.server.message_broadcaster import get_broadcaster, get_broadcast_stream
-from flowbook.util.output import error, log, stream_output
+from flowbook.kernel_discovery import read_discovery, write_discovery
+from flowbook.util.output import error, log
 
 
 # Global kernel manager instance
@@ -59,13 +58,6 @@ class FlowbookCommandHandler(APIHandler):
 
             command = self.registry.get_command(command_name)
 
-            # Create config from server settings
-            from flowbook.server.config import FlowbookConfig
-            config = FlowbookConfig(
-                model=self.serverapp.web_app.settings["flowbook"].model,  
-                fast_model=self.serverapp.web_app.settings["flowbook"].fast_model,
-            )
-
             kernel_client = None
             if command.requires_kernel:
                 if not kernel_id:
@@ -88,36 +80,26 @@ class FlowbookCommandHandler(APIHandler):
                     )
                     return
 
-            # Clear previous messages and execute command with output streaming to clients
-            # Run in executor to prevent blocking the event loop and allow SSE to flush
-            get_broadcaster().clear()
-
+            # Run the command in an executor to keep the event loop responsive.
             def run_command():
-                with stream_output(get_broadcast_stream()):
-                    log(f"Executing command {command_name}")
-                    log(f"Selected cell IDs: {selected_cell_ids}")
-                    # Create event loop for the thread
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        result = loop.run_until_complete(command.process(
-                            notebook_content,
-                            kernel_client=kernel_client,
-                            selected_cell_ids=selected_cell_ids,
-                            config=config,
-                            **params
-                        ))
-                        return result
-                    finally:
-                        loop.close()
+                log(f"Executing command {command_name}")
+                log(f"Selected cell IDs: {selected_cell_ids}")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    result = loop.run_until_complete(command.process(
+                        notebook_content,
+                        kernel_client=kernel_client,
+                        selected_cell_ids=selected_cell_ids,
+                        **params
+                    ))
+                    return result
+                finally:
+                    loop.close()
 
-            # Run in thread executor
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
-            executor.shutdown(wait=False)
-
-            # Send END message to signal command completion
-            get_broadcaster().end()
+            executor.shutdown(wait=True)
 
             # Serialize ProcessingResult to JSON
             # Use model_dump() to convert Pydantic model to dict, then json.dumps
@@ -168,60 +150,101 @@ class KernelConnectionFileHandler(APIHandler):
             self.finish(json.dumps({"error": f"Kernel not found: {str(e)}"}))
 
 
-class MessageStreamHandler(JupyterHandler):
-    """Handler for Server-Sent Events (SSE) message streaming."""
+class KernelDiscoveryHandler(APIHandler):
+    """Handler for kernel discovery — check if MCP has a kernel running for a notebook."""
 
-    def initialize(self):
-        """Initialize the handler."""
-        self.broadcaster = get_broadcaster()
-        self.client_id = str(uuid.uuid4())
-        self.queue = None
+    def _resolve_notebook_path(self, path: str) -> str:
+        """Resolve a notebook path to an absolute canonical path.
+
+        Handles tilde expansion in both the path and the server root directory,
+        then resolves relative paths against the server root.
+
+        Raises:
+            ValueError: If the resolved path escapes the server root directory.
+        """
+        import os
+
+        path = os.path.expanduser(path)
+        root = self.settings.get("server_root_dir", "")
+        if root:
+            root = os.path.expanduser(root)
+        if not os.path.isabs(path):
+            if root:
+                path = os.path.join(root, path)
+        resolved = os.path.abspath(path)
+        if root:
+            abs_root = os.path.abspath(root)
+            if resolved != abs_root and not resolved.startswith(abs_root + os.sep):
+                raise ValueError(f"Path escapes server root directory")
+        return resolved
 
     @tornado.web.authenticated
-    async def get(self):
-        """Stream messages to the client via SSE."""
-        # Set headers for SSE
-        self.set_header('Content-Type', 'text/event-stream')
-        self.set_header('Cache-Control', 'no-cache')
-        self.set_header('Connection', 'keep-alive')
-        self.set_header('X-Accel-Buffering', 'no')
+    async def get(self, path):
+        """Check for an existing kernel discovery file.
 
-        # Register this client with the broadcaster
-        self.queue = self.broadcaster.register_client(self.client_id)
+        Args:
+            path: Notebook path (relative to server root or absolute).
+        """
+        abs_path = self._resolve_notebook_path(path)
+        disc = read_discovery(abs_path)
 
+        if disc:
+            self.finish(json.dumps(disc))
+        else:
+            self.set_status(404)
+            self.finish(json.dumps({"error": "No kernel found for this notebook"}))
+
+    def _get_kernel_pid(self, connection_file: str):
+        """Look up the kernel process PID and absolute connection file path.
+
+        Extracts the kernel UUID from the connection file name (kernel-{UUID}.json)
+        and queries the Jupyter kernel manager for the actual process PID and
+        the full path to the connection file.
+
+        Returns:
+            (pid, connection_file) tuple. Falls back to (0, original) on failure.
+        """
+        import os
+        import re
+
+        # Extract kernel UUID from connection file name
+        match = re.match(r"kernel-([0-9a-f-]+)\.json", os.path.basename(connection_file))
+        if not match:
+            return 0, connection_file
+
+        kernel_id = match.group(1)
         try:
-            # Send initial connection message
-            self.write(f'data: {{"type":"connected","client_id":"{self.client_id}"}}\n\n')
-            await self.flush()
+            km = self.settings["serverapp"].kernel_manager
+            kernel = km.get_kernel(kernel_id)
+            pid = getattr(kernel.provisioner, "pid", 0) or 0
+            # Use the kernel manager's full connection file path
+            abs_conn = getattr(kernel, "connection_file", connection_file)
+            return pid, abs_conn
+        except Exception:
+            return 0, connection_file
 
-            # Stream messages from the queue
-            while True:
-                try:
-                    # Wait for a message with timeout
-                    message = await asyncio.wait_for(self.queue.get(), timeout=30.0)
+    @tornado.web.authenticated
+    async def put(self, path):
+        """Write a kernel discovery file (called by JupyterLab when it starts a kernel).
 
-                    # Send the message as SSE event
-                    self.write(f'data: {message.to_json()}\n\n')
-                    await self.flush()
+        Request body: {"connection_file": "...", "kernel_name": "...", "pid": 123}
+        """
+        data = self.get_json_body()
+        abs_path = self._resolve_notebook_path(path)
+        connection_file = data.get("connection_file", "")
 
-                except asyncio.TimeoutError:
-                    # Send keepalive comment every 30 seconds
-                    self.write(': keepalive\n\n')
-                    await self.flush()
-                except Exception as e:
-                    self.log.error(f"Error streaming message: {e}")
-                    break
+        # Look up actual kernel PID and full connection file path
+        # (frontend sends pid=0 and a bare filename)
+        pid, connection_file = self._get_kernel_pid(connection_file)
 
-        except Exception as e:
-            self.log.error(f"SSE connection error: {e}")
-        finally:
-            # Unregister client on disconnect
-            self.broadcaster.unregister_client(self.client_id)
-
-    def on_connection_close(self):
-        """Handle client disconnection."""
-        if self.client_id:
-            self.broadcaster.unregister_client(self.client_id)
+        disc_path = write_discovery(
+            notebook_path=abs_path,
+            connection_file=connection_file,
+            kernel_name=data.get("kernel_name", "flowbook_kernel"),
+            pid=pid,
+            started_by="jupyterlab",
+        )
+        self.finish(json.dumps({"discovery_file": disc_path}))
 
 
 def setup_handlers(web_app):
@@ -253,8 +276,8 @@ def setup_handlers(web_app):
             {},
         ),
         (
-            url_path_join(base_url, "flowbook", "stream"),
-            MessageStreamHandler,
+            url_path_join(base_url, "flowbook", "kernel-discovery", "(.+)"),
+            KernelDiscoveryHandler,
             {},
         ),
     ]

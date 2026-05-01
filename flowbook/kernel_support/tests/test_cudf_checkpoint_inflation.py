@@ -77,7 +77,13 @@ def _patch_cudf_detection(monkeypatch):
 # Build a DataFrame mimicking first-place-single-model-lb-38-81
 # ---------------------------------------------------------------------------
 
-def _build_notebook_scale_df(n_rows: int = 4_000_000) -> pd.DataFrame:
+# Sized down from the original 4M rows so all tests fit under ~4 GB peak.
+# The dtype-inflation ratio is row-count-independent (it's a function of the
+# column dtype mix), so the assertions below still hold at this scale.
+NOTEBOOK_SCALE_ROWS = 1_000_000
+
+
+def _build_notebook_scale_df(n_rows: int = NOTEBOOK_SCALE_ROWS) -> pd.DataFrame:
     """
     Build a DataFrame matching the column structure of
     first-place-single-model-lb-38-81 after feature engineering.

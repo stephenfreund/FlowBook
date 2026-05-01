@@ -41,7 +41,7 @@ Run all cells to establish the baseline:
 run_from("A")
 ```
 
-This runs from cell A through the end, stopping on the first error or violation.
+This runs from cell @A through the end, stopping on the first error or violation.
 Note the violations reported — these are what we need to fix.
 
 ### Step 3: Fix Loop (max 10 iterations)
@@ -65,7 +65,7 @@ For each iteration:
 3. **If the actionable cell has a violation or error**, read it and fix:
 
    ```
-   get_cell(cell_id)
+   read_cell(cell_id)
    ```
 
    Categorize and fix using the taxonomy below.
@@ -103,7 +103,7 @@ Print a summary:
 
 Followed by a diagnosis blockquote for each fix:
 
-> **D**: `no_read_and_write` + `no_write_after_read` on `df['age']` — reads and writes same column, and C already read it
+> **@D**: `no_read_and_write` + `no_write_after_read` on `df['age']` — reads and writes same column, and @C already read it
 
 - Remaining violations (if any)
 - Path to the fixed notebook
@@ -120,7 +120,7 @@ Followed by a diagnosis blockquote for each fix:
 
 ```
 checkpoint()
-get_cell("B")
+read_cell("B")
 alpha_rename("B", "train", "train_combined")
 run_from(cell_id)
 ```
@@ -167,7 +167,7 @@ This converts `df.method(inplace=True)` to `df = df.method()`, making the mutati
 
 **What it looks like**: Multiple cells transform the same variable in sequence.
 **Error type**: `NO_WRITE_AFTER_READ` (backward mutation)
-**Example**: Cell B does `df = df.fillna(0)`, Cell C does `df = df.assign(feature=...)`.
+**Example**: Cell @B does `df = df.fillna(0)`, Cell @C does `df = df.assign(feature=...)`.
 
 **Fix A** — Merge tightly coupled steps:
 
@@ -189,7 +189,7 @@ run_from(cell_id)
 
 **What it looks like**: A variable holds different data at different points.
 **Error type**: `NO_WRITE_AFTER_READ`
-**Example**: `model` used for LogisticRegression in cell B, reassigned to RandomForest in cell D.
+**Example**: `model` used for LogisticRegression in cell @B, reassigned to RandomForest in cell @D.
 
 **Fix**: Rename from the point of reuse onwards.
 
@@ -235,8 +235,8 @@ restore("ckpt_abc12345")
 
 1. **Preserve functionality**: Fixes must not change what the notebook computes, only how variables are named/scoped.
 2. **Minimal changes**: Prefer the smallest change that fixes the violation. `alpha_rename` is usually sufficient.
-3. **Use the algorithmic tools**: `alpha_rename`, `remove_inplace`, `insert_deepcopy`, `mark_diagnostic`, `merge_cells`, and `move_cell` are AST-based and reliable. Prefer them over manual `edit_cell` when possible.
-4. **Use `edit_cell` for complex cases**: When the algorithmic tools don't fit (e.g., restructuring logic, adding parameters to functions), fall back to reading the cell, modifying the source manually, and using `edit_cell`.
+3. **Use the algorithmic tools**: `alpha_rename`, `remove_inplace`, `insert_deepcopy`, `mark_diagnostic`, `merge_cells`, and `move_cell` are AST-based and reliable. Prefer them over manual `edit_cell_source` when possible.
+4. **Use `edit_cell_source` for complex cases**: When the algorithmic tools don't fit (e.g., restructuring logic, adding parameters to functions), fall back to reading the cell, modifying the source manually, and using `edit_cell_source`.
 5. **Always checkpoint before fixing**: This lets you safely undo if things go wrong.
 6. **Use `run_from(cell_id)`** after each fix to re-run from the fixed cell onwards. It skips clean cells and stops on the first error or violation.
 7. **Don't fix staleness directly**: Staleness is a *symptom* of violations. Fix the violation and staleness resolves automatically. But stale cells DO need to be re-run to update the kernel state.

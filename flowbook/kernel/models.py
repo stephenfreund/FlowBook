@@ -101,13 +101,20 @@ class ReproducibilityError:
     causer_cell: Optional[str] = None
     detail: Optional[Dict[str, Any]] = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dict for JSON serialization."""
+    def to_dict(self, accepted: bool = False) -> Dict[str, Any]:
+        """Convert to dict for JSON serialization.
+
+        Args:
+            accepted: Whether the violation was accepted (continue_after_violation
+                mode) or rejected (rollback). Matches the ``accepted`` field in
+                the violation protocol message.
+        """
         result = {
             "error_type": self.error_type.value,
             "cell_id": self.cell_id,
             "locations": self.locations,
             "message": self.message,
+            "accepted": accepted,
         }
         if self.causer_cell is not None:
             result["causer_cell"] = self.causer_cell

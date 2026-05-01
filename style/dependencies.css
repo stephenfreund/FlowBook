@@ -41,16 +41,3 @@
   background-color: var(--jp-layout-color2);
   color: var(--jp-ui-font-color2);
 }
-
-/* Edge label styling */
-.flowbook-edge-label {
-  font-size: 10px;
-  font-family: var(--jp-code-font-family);
-  background-color: var(--jp-layout-color1);
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-
-.flowbook-edge-label-error {
-  color: #dc3545;
-}

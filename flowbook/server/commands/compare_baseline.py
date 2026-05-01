@@ -132,11 +132,10 @@ from jupyter_client import KernelManager
 from jupyter_client.blocking import BlockingKernelClient
 
 from flowbook import make_kernels
-from flowbook.cli.helpers import start_kernel
 from flowbook.kernel.flowbook_client import FlowbookKernelClient
 from flowbook.server.base import NotebookCommand, ProcessingResult
-from flowbook.server.config import FlowbookConfig
-from flowbook.util.output import log
+from queue import Empty
+from flowbook.util.output import log, error
 from flowbook.cli.models import (
     BaselineMemorySnapshot,
     BaselineCellMemory,
@@ -152,6 +151,28 @@ from flowbook.cli.models import (
     V5CellMemory,
     V5MemoryResult,
 )
+
+
+def _get_iopub_msg(kernel_client, timeout: float = 1.0):
+    """Get next IOPub message, returning None on timeout or error."""
+    try:
+        return kernel_client.get_iopub_msg(timeout=timeout)
+    except Empty:
+        return None
+    except Exception as e:
+        error(f"IOPub recv error: {e}")
+        return None
+
+
+def _get_shell_msg(kernel_client, timeout: float = 1.0):
+    """Get next shell message, returning None on timeout or error."""
+    try:
+        return kernel_client.get_shell_msg(timeout=timeout)
+    except Empty:
+        return None
+    except Exception as e:
+        error(f"Shell recv error: {e}")
+        return None
 
 
 def generate_comparison_filename(notebook_path: str, num_components: int = 3) -> str:
@@ -615,10 +636,11 @@ def create_baseline_kernel() -> Tuple[KernelManager, BlockingKernelClient]:
         Tuple of (KernelManager, BlockingKernelClient)
     """
     from flowbook.baseline_kernel import install_baseline_kernel
+    from flowbook.cli.helpers import start_kernel
     try:
         install_baseline_kernel()
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"Note: baseline kernel install: {e}")
 
     return start_kernel(
         "baseline_kernel",
@@ -638,6 +660,7 @@ def create_flowbook_kernel(
     Returns:
         Tuple of (KernelManager, FlowbookKernelClient)
     """
+    from flowbook.cli.helpers import start_kernel
     make_kernels()
 
     return start_kernel(
@@ -654,17 +677,16 @@ def cleanup_kernel(kernel_manager, kernel_client) -> None:
             kernel_client.kernel_info()
             time.sleep(0.5)
         except Exception:
-            pass
+            pass  # Kernel may already be dead — expected during cleanup
         try:
             kernel_client.stop_channels()
         except Exception:
-            pass
-
+            pass  # Best-effort channel cleanup
     if kernel_manager:
         try:
             kernel_manager.shutdown_kernel()
         except Exception:
-            pass
+            pass  # Best-effort shutdown
 
 
 def execute_cell_baseline(
@@ -690,9 +712,8 @@ def execute_cell_baseline(
         if timeout is not None and time.time() - start_time > timeout:
             return {"cell_runtime_ms": None, "error": f"Timeout after {timeout}s"}
 
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
 
         if msg["parent_header"].get("msg_id") != msg_id:
@@ -715,13 +736,14 @@ def execute_cell_baseline(
                 break
 
     # Get execute_reply
-    try:
-        reply = kernel_client.get_shell_msg(timeout=1.0)
-        if reply["content"]["status"] == "error" and error_msg is None:
-            error_content = reply["content"]
-            error_msg = "\n".join(error_content.get("traceback", []))
-    except Exception:
-        pass
+    reply = _get_shell_msg(kernel_client)
+    if reply is not None:
+        try:
+            if reply["content"]["status"] == "error" and error_msg is None:
+                error_content = reply["content"]
+                error_msg = "\n".join(error_content.get("traceback", []))
+        except (KeyError, TypeError):
+            pass  # Malformed reply — timing still captured below
 
     # Fallback to client-side timing if kernel metadata not available
     elapsed = time.perf_counter() - start
@@ -775,9 +797,8 @@ def execute_cell_flowbook(
                 "error": f"Timeout after {timeout}s"
             }
 
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
 
         if msg["parent_header"].get("msg_id") != msg_id:
@@ -803,13 +824,14 @@ def execute_cell_flowbook(
                 break
 
     # Get execute_reply
-    try:
-        reply = kernel_client.get_shell_msg(timeout=1.0)
-        if reply["content"]["status"] == "error" and error_msg is None:
-            error_content = reply["content"]
-            error_msg = "\n".join(error_content.get("traceback", []))
-    except Exception:
-        pass
+    reply = _get_shell_msg(kernel_client)
+    if reply is not None:
+        try:
+            if reply["content"]["status"] == "error" and error_msg is None:
+                error_content = reply["content"]
+                error_msg = "\n".join(error_content.get("traceback", []))
+        except (KeyError, TypeError):
+            pass  # Malformed reply — timing still captured below
 
     # Calculate client-side elapsed time (same methodology as baseline)
     elapsed = time.perf_counter() - start
@@ -886,18 +908,14 @@ def _wait_for_idle(kernel_client, timeout: float = 30.0) -> None:
     while True:
         if time.time() - start_time > timeout:
             return
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['header']['msg_type'] == 'status':
             if msg['content']['execution_state'] == 'idle':
                 break
     # Also drain shell reply
-    try:
-        kernel_client.get_shell_msg(timeout=1.0)
-    except Exception:
-        pass
+    _get_shell_msg(kernel_client)
 
 
 def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
@@ -931,9 +949,8 @@ def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
     while True:
         if time.time() - start_time > timeout:
             return {"total_bytes": 0, "total_mb": 0.0, "by_variable": {}, "by_type": {}}
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -952,9 +969,8 @@ def get_namespace_size(kernel_client, timeout: float = 30.0) -> Dict[str, Any]:
         import ast
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1015,9 +1031,8 @@ def get_kernel_gpu_memory_mb(kernel_client, timeout: float = 10.0) -> float:
     while True:
         if time.time() - start_time > timeout:
             return 0.0
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -1029,9 +1044,8 @@ def get_kernel_gpu_memory_mb(kernel_client, timeout: float = 10.0) -> float:
     try:
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1044,8 +1058,8 @@ def get_kernel_gpu_memory_mb(kernel_client, timeout: float = 10.0) -> float:
                 text = expr['data']['text/plain']
                 return float(text)
             break
-    except Exception:
-        pass
+    except (KeyError, TypeError, ValueError) as e:
+        log(f"Failed to parse GPU memory result: {e}")
 
     return 0.0
 
@@ -1092,9 +1106,8 @@ def get_flowbook_checkpoint_var_costs(
     while True:
         if time.time() - start_time > timeout:
             return {}
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -1107,9 +1120,8 @@ def get_flowbook_checkpoint_var_costs(
         import ast
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1174,9 +1186,8 @@ def get_flowbook_cumulative_checkpoint_size(
     while True:
         if time.time() - start_time > timeout:
             return {}
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -1189,9 +1200,8 @@ def get_flowbook_cumulative_checkpoint_size(
         import ast
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1249,9 +1259,8 @@ def get_checkpoint_overhead(
     while True:
         if time.time() - start_time > timeout:
             return {'total_mb': 0, 'by_checkpoint': {}, 'by_variable': {}, 'cumulative': {}}
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -1264,9 +1273,8 @@ def get_checkpoint_overhead(
         import ast
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1320,9 +1328,8 @@ def get_v5_memory_snapshot(kernel_client, timeout: float = 30.0) -> Dict[str, An
     while True:
         if time.time() - start_time > timeout:
             return {'user_ns_bytes': 0, 'gpu_bytes': 0, 'checkpoint_bytes': 0, 'checkpoint_vars': {}, 'gpu_checkpoint_bytes': 0, 'gpu_checkpoint_vars': {}}
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -1335,9 +1342,8 @@ def get_v5_memory_snapshot(kernel_client, timeout: float = 30.0) -> Dict[str, An
         import ast
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1389,9 +1395,8 @@ def get_logical_checkpoint_sizes(
     while True:
         if time.time() - start_time > timeout:
             return {'total_mb': 0, 'by_checkpoint': {}, 'by_variable': {}, 'by_checkpoint_by_var': {}}
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -1404,9 +1409,8 @@ def get_logical_checkpoint_sizes(
         import ast
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1467,9 +1471,8 @@ def get_flowbook_pre_post_checkpoint_sizes(
     while True:
         if time.time() - start_time > timeout:
             return {}
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -1482,9 +1485,8 @@ def get_flowbook_pre_post_checkpoint_sizes(
         import ast
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1577,9 +1579,8 @@ del _v
     while True:
         if time.time() - start_time > timeout:
             return {}
-        try:
-            msg = kernel_client.get_iopub_msg(timeout=1.0)
-        except Exception:
+        msg = _get_iopub_msg(kernel_client)
+        if msg is None:
             continue
         if msg['parent_header'].get('msg_id') != msg_id:
             continue
@@ -1592,9 +1593,8 @@ del _v
         import ast
         start_time = time.time()
         while time.time() - start_time < timeout:
-            try:
-                reply = kernel_client.get_shell_msg(timeout=1.0)
-            except Exception:
+            reply = _get_shell_msg(kernel_client)
+            if reply is None:
                 continue
             if reply['parent_header'].get('msg_id') != msg_id:
                 continue
@@ -1617,7 +1617,7 @@ del _v
     try:
         kernel_client.execute('del _overhead_breakdown', silent=True)
     except Exception:
-        pass
+        pass  # Best-effort cleanup of kernel namespace
 
     return {}
 
@@ -2506,9 +2506,8 @@ def measure_rerun_overhead(
             overhead_data = None
             start_time = time.time()
             while time.time() - start_time < timeout:
-                try:
-                    msg = kernel_client.get_iopub_msg(timeout=1.0)
-                except Exception:
+                msg = _get_iopub_msg(kernel_client)
+                if msg is None:
                     continue
 
                 if msg['parent_header'].get('msg_id') != msg_id:
@@ -2632,7 +2631,6 @@ class CompareBaselineCommand(NotebookCommand):
         notebook_content: Dict[str, Any],
         kernel_client=None,
         selected_cell_ids: Optional[List[str]] = None,
-        config: Optional[FlowbookConfig] = None,
         **kwargs,
     ) -> ProcessingResult:
         """
@@ -2647,7 +2645,6 @@ class CompareBaselineCommand(NotebookCommand):
             notebook_content: Notebook JSON
             kernel_client: Not used (we manage our own kernels)
             selected_cell_ids: Not used (we execute all cells)
-            config: Optional configuration
             **kwargs: Additional arguments (e.g., timeout, notebook_path)
 
         Returns:
@@ -3060,6 +3057,5 @@ class CompareBaselineCommand(NotebookCommand):
                 "flowbook_check_ms": last_flowbook_check,
                 "scalene_available": heapsizer_available,  # Keep field name for compatibility
             },
-            total_cost=0.0,
             total_time=total_time,
         )

@@ -1,5 +1,5 @@
 /**
- * Notebook toolbar extension for FlowBook - Run Next Stale/Unrun button
+ * Notebook toolbar extension for FlowBook - Run All Stale/Unrun button
  */
 
 import { NotebookPanel, NotebookActions } from '@jupyterlab/notebook';
@@ -10,6 +10,7 @@ import { ToolbarButton } from '@jupyterlab/apputils';
 import { stepIntoIcon } from '@jupyterlab/ui-components';
 
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
+import { IReproducibilityMetadata } from './types';
 import { KernelDetector } from '../shared/kerneldetection';
 
 /**
@@ -40,12 +41,12 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
     panel: NotebookPanel,
     _context: DocumentRegistry.IContext<DocumentRegistry.IModel>
   ): IDisposable {
-    // Create "Run Next Stale/Unrun" button
+    // Create "Run All Stale/Unrun" button
     const button = new ToolbarButton({
       icon: stepIntoIcon,
-      tooltip: 'Run next stale or unrun cell',
+      tooltip: 'Run all stale and unrun cells',
       onClick: async () => {
-        await this._runNextStaleOrUnrun(panel);
+        await this._runAllActionable(panel);
       }
     });
 
@@ -82,60 +83,76 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
   }
 
   /**
-   * Find and run the first stale or unrun code cell in document order
+   * Run all stale and unrun code cells in document order.
+   * Stops on hard error always. Stops on violation if continue_after_violation is false.
+   * User can cancel mid-loop via kernel interrupt.
    */
-  private async _runNextStaleOrUnrun(panel: NotebookPanel): Promise<void> {
+  private async _runAllActionable(panel: NotebookPanel): Promise<void> {
     const notebook = panel.content;
-    const widgets = notebook.widgets;
+    const maxIterations = 500;
 
-    // Get stale cells from staleness manager if available
-    let staleCells: ReadonlySet<string> = new Set();
-    if (this._highlighter) {
-      const stalenessManager = this._highlighter.getStalenessManager(panel);
-      staleCells = stalenessManager.staleCells;
+    for (let iter = 0; iter < maxIterations; iter++) {
+      // Find next actionable cell
+      let staleCells: ReadonlySet<string> = new Set();
+      if (this._highlighter) {
+        const stalenessManager = this._highlighter.getStalenessManager(panel);
+        staleCells = stalenessManager.staleCells;
+      }
+
+      let targetWidgetIdx = -1;
+      const widgets = notebook.widgets;
+      for (let i = 0; i < widgets.length; i++) {
+        const cell = widgets[i];
+        if (cell.model.type !== 'code') {
+          continue;
+        }
+        const codeModel = cell.model as ICodeCellModel;
+        const source = codeModel.sharedModel.getSource();
+        if (!source || source.trim() === '') {
+          continue;
+        }
+        const cellId = cell.model.id;
+        const needsRun =
+          staleCells.has(cellId) || codeModel.executionCount === null;
+        if (needsRun) {
+          targetWidgetIdx = i;
+          break;
+        }
+      }
+
+      if (targetWidgetIdx < 0) {
+        break;
+      }
+
+      // Run the cell
+      notebook.activeCellIndex = targetWidgetIdx;
+      notebook.scrollToCell(widgets[targetWidgetIdx]);
+      await NotebookActions.run(notebook, panel.sessionContext);
+
+      // Check for hard error
+      const cell = widgets[targetWidgetIdx];
+      const outputs = (cell.model as ICodeCellModel).outputs;
+      let hasError = false;
+      if (outputs) {
+        for (let j = 0; j < outputs.length; j++) {
+          const output = outputs.get(j);
+          if (output && output.type === 'error') {
+            hasError = true;
+            break;
+          }
+        }
+      }
+      if (hasError) {
+        break;
+      }
+
+      // Check for violation
+      const meta = cell.model.getMetadata('flowbook') as
+        | IReproducibilityMetadata
+        | undefined;
+      if (meta?.errors && meta.errors.length > 0) {
+        break;
+      }
     }
-
-    // Find first non-empty code cell that is stale or has never been run
-    for (let i = 0; i < widgets.length; i++) {
-      const cell = widgets[i];
-      if (cell.model.type !== 'code') {
-        continue;
-      }
-
-      const codeModel = cell.model as ICodeCellModel;
-
-      // Skip empty cells (whitespace-only counts as empty)
-      const source = codeModel.sharedModel.getSource();
-      if (!source || source.trim() === '') {
-        continue;
-      }
-
-      const cellId = cell.model.id;
-      const isStale = staleCells.has(cellId);
-      // Check if cell has been executed by looking at executionCount
-      const hasBeenExecuted = codeModel.executionCount !== null;
-
-      // Cell needs to run if it's stale OR if it's never been executed
-      const needsRun = isStale || !hasBeenExecuted;
-
-      if (needsRun) {
-        console.log(
-          `FlowBook: Running ${isStale ? 'stale' : 'unrun'} cell at index ${i}`
-        );
-
-        // Activate the cell
-        notebook.activeCellIndex = i;
-
-        // Scroll to make cell visible
-        notebook.scrollToCell(cell);
-
-        // Run the cell
-        await NotebookActions.run(notebook, panel.sessionContext);
-
-        return;
-      }
-    }
-
-    console.log('FlowBook: No stale or unrun cells to run');
   }
 }

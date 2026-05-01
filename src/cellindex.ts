@@ -14,6 +14,10 @@ export class CellIndexManager {
   private _observers: Map<string, MutationObserver> = new Map();
   private _notebooks: Map<string, NotebookPanel> = new Map();
   private _listeners: Map<string, any[]> = new Map();
+  private _domListeners: Map<
+    string,
+    { node: HTMLElement; handlers: { event: string; handler: EventListener }[] }
+  > = new Map();
 
   constructor() {
     // Notebooks are passed directly to methods
@@ -23,8 +27,6 @@ export class CellIndexManager {
    * Start monitoring a notebook for cell index overlays
    */
   startMonitoring(notebookPath: string, notebook: NotebookPanel): void {
-    console.log(`[CellIndex] Start monitoring: ${notebookPath}`);
-
     // Initialize overlay map for this notebook
     this._overlays.set(notebookPath, new Map());
     this._notebooks.set(notebookPath, notebook);
@@ -74,14 +76,42 @@ export class CellIndexManager {
     });
 
     this._listeners.set(notebookPath, listeners);
+
+    // Listen for clipboard and undo/redo operations that can detach overlays
+    const contentNode = notebook.content.node;
+    const deferredRefresh = () => {
+      // Wait for the DOM to settle after the operation
+      requestAnimationFrame(() => {
+        this.updateAllOverlays(notebookPath, notebook);
+      });
+    };
+    const domHandlers: { event: string; handler: EventListener }[] = [];
+
+    for (const event of ['cut', 'paste'] as const) {
+      contentNode.addEventListener(event, deferredRefresh, true);
+      domHandlers.push({ event, handler: deferredRefresh });
+    }
+
+    // Catch undo/redo (Cmd+Z / Ctrl+Z / Ctrl+Shift+Z / Cmd+Shift+Z)
+    const keyHandler = (e: Event) => {
+      const ke = e as KeyboardEvent;
+      if ((ke.metaKey || ke.ctrlKey) && ke.key === 'z') {
+        deferredRefresh();
+      }
+    };
+    contentNode.addEventListener('keydown', keyHandler, true);
+    domHandlers.push({ event: 'keydown', handler: keyHandler });
+
+    this._domListeners.set(notebookPath, {
+      node: contentNode,
+      handlers: domHandlers
+    });
   }
 
   /**
    * Stop monitoring a notebook
    */
   stopMonitoring(notebookPath: string): void {
-    console.log(`[CellIndex] Stop monitoring: ${notebookPath}`);
-
     // Stop MutationObserver
     const observer = this._observers.get(notebookPath);
     if (observer) {
@@ -101,7 +131,7 @@ export class CellIndexManager {
     // Remove notebook reference
     this._notebooks.delete(notebookPath);
 
-    // Disconnect listeners
+    // Disconnect signal listeners
     const listeners = this._listeners.get(notebookPath);
     if (listeners) {
       listeners.forEach(({ signal, callback }) => {
@@ -112,6 +142,15 @@ export class CellIndexManager {
         }
       });
       this._listeners.delete(notebookPath);
+    }
+
+    // Remove DOM event listeners
+    const domEntry = this._domListeners.get(notebookPath);
+    if (domEntry) {
+      for (const { event, handler } of domEntry.handlers) {
+        domEntry.node.removeEventListener(event, handler, true);
+      }
+      this._domListeners.delete(notebookPath);
     }
   }
 
@@ -150,8 +189,6 @@ export class CellIndexManager {
         // Check if overlay already exists for this cell
         const existingOverlay = overlays.get(cellId);
         if (existingOverlay && existingOverlay.parentNode) {
-          // Update text in case index changed
-          // To show cell ID suffix, use: indexToAlpha(index, cellId)
           existingOverlay.textContent = indexToAlpha(index);
           return;
         }
@@ -164,7 +201,7 @@ export class CellIndexManager {
             existingOverlay.remove();
           }
 
-          const overlay = this.createOverlay(index, cellId);
+          const overlay = this.createOverlay(index);
           (editorNode as HTMLElement).style.position = 'relative';
           editorNode.appendChild(overlay);
           overlays.set(cellId, overlay);
@@ -176,10 +213,9 @@ export class CellIndexManager {
   /**
    * Create an overlay element with the cell index
    */
-  private createOverlay(index: number, _cellId: string): HTMLElement {
+  private createOverlay(index: number): HTMLElement {
     const overlay = document.createElement('div');
     overlay.className = 'flowbook-cell-index-overlay';
-    // To show cell ID suffix, use: indexToAlpha(index, _cellId)
     overlay.textContent = indexToAlpha(index);
     return overlay;
   }

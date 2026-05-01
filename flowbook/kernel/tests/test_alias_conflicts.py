@@ -4,8 +4,10 @@ Tests for ▷ conflict relation with LocRef aliasing.
 Covers every scenario from ALIAS_CONFLICT_ANALYSIS.md:
 - Same-object aliases (X = df) → same loc_id
 - User copies (df2 = df.copy()) → different loc_id
-- All 7 write types × 4 read types with alias/copy/self combinations
+- All 5 write types × 4 read types with alias/copy/self combinations
 - Var(x) only conflicts with Var(x) reads (no cross-domain bridge)
+
+Loc types: Var, Col, Cols, Rows, File (no Attr).
 
 See ALIAS_CONFLICT_ANALYSIS.md for the full correctness analysis.
 """
@@ -103,36 +105,41 @@ class TestVarColConflicts:
 
 
 # ============================================================================
-# Var(x) ▷ Attr(d', a') — no cross-domain conflict
+# Var(x) ▷ Cols(d') / Rows(d') — no cross-domain conflict
 # ============================================================================
 
-class TestVarAttrConflicts:
-    """Var(x) does NOT directly conflict with Attr reads."""
+class TestVarColsRowsConflicts:
+    """Var(x) does NOT directly conflict with Cols/Rows reads."""
 
-    def test_rebind_does_not_conflict_with_attr_reads(self):
-        """Var("df") ▷ Attr(LR(1,"df"), "shape") → False"""
+    def test_rebind_does_not_conflict_with_cols_reads(self):
+        """Var("df") ▷ Cols(LR(1,"df")) → False"""
         w = WriteLoc.var("df")
-        r = ReadLoc.attr(LR_DF, "shape")
+        r = ReadLoc.cols("df", qualifier=LR_DF)
         assert not write_conflicts_read(w, r)
 
-    def test_rebind_does_not_invalidate_alias_attr_reads(self):
-        """Var("df") ▷ Attr(LR(1,"X"), "shape") → False"""
+    def test_rebind_does_not_conflict_with_rows_reads(self):
+        """Var("df") ▷ Rows(LR(1,"df")) → False"""
         w = WriteLoc.var("df")
-        r = ReadLoc.attr(LR_X, "shape")
+        r = ReadLoc.rows("df", qualifier=LR_DF)
         assert not write_conflicts_read(w, r)
 
-    def test_rebind_alias_does_not_invalidate_original_attr_reads(self):
-        """Var("X") ▷ Attr(LR(1,"df"), "shape") → False"""
+    def test_rebind_does_not_invalidate_alias_cols_reads(self):
+        """Var("df") ▷ Cols(LR(1,"X")) → False"""
+        w = WriteLoc.var("df")
+        r = ReadLoc.cols("X", qualifier=LR_X)
+        assert not write_conflicts_read(w, r)
+
+    def test_rebind_alias_does_not_invalidate_original_cols_reads(self):
+        """Var("X") ▷ Cols(LR(1,"df")) → False"""
         w = WriteLoc.var("X")
-        r = ReadLoc.attr(LR_DF, "shape")
+        r = ReadLoc.cols("df", qualifier=LR_DF)
         assert not write_conflicts_read(w, r)
 
-    def test_rebind_no_attr_conflict_any_attr(self):
-        """Var(x) does not conflict with any Attr read."""
+    def test_rebind_no_cols_rows_conflict(self):
+        """Var(x) does not conflict with any Cols/Rows read."""
         w = WriteLoc.var("df")
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "shape"))
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "columns"))
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "index"))
+        assert not write_conflicts_read(w, ReadLoc.cols("df", qualifier=LR_DF))
+        assert not write_conflicts_read(w, ReadLoc.rows("df", qualifier=LR_DF))
 
     def test_var_does_not_conflict_with_file(self):
         """Var("df") ▷ File("data.csv") → False — always."""
@@ -208,39 +215,27 @@ class TestColColConflicts:
         assert not write_conflicts_read(w, ReadLoc.var("df"))
         assert not write_conflicts_read(w, ReadLoc.var("X"))
 
-    def test_col_does_not_conflict_with_structural_attr(self):
-        """Col(d,c) ▷ Attr(d',a') → False for structural attrs (shape, columns)."""
-        w = WriteLoc.col(LR_DF, "price")
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "shape"))
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_X, "columns"))
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "dtypes"))
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF, "index"))
+    def test_col_conflicts_with_cols_read(self):
+        """Col(d,c) ▷ Cols(d') → True when same DataFrame.
 
-    def test_col_conflicts_with_value_attrs(self):
-        """Col(d,c) ▷ Attr(d',a') → True when a' ∈ COL_VALUE_ATTRS.
-
-        Modifying column values changes df.values, df.T, df.describe().
+        Modifying a column can change column structure (dtypes, etc.).
         """
         w = WriteLoc.col(LR_DF, "price")
-        assert write_conflicts_read(w, ReadLoc.attr(LR_DF, "values"))
-        assert write_conflicts_read(w, ReadLoc.attr(LR_DF, "T"))
-        assert write_conflicts_read(w, ReadLoc.attr(LR_DF, "describe"))
+        assert write_conflicts_read(w, ReadLoc.cols("df", qualifier=LR_DF))
+        assert write_conflicts_read(w, ReadLoc.cols("X", qualifier=LR_X))
 
-    def test_col_conflicts_with_alias_value_attrs(self):
-        """Col(d,c) ▷ Attr(d',a') → True for alias with value attr.
+    def test_col_does_not_conflict_with_rows_read(self):
+        """Col(d,c) ▷ Rows(d') → False.
 
-        Same object via loc_id, value-dependent attr.
+        Column modification does not affect row structure.
         """
         w = WriteLoc.col(LR_DF, "price")
-        assert write_conflicts_read(w, ReadLoc.attr(LR_X, "values"))
-        assert write_conflicts_read(w, ReadLoc.attr(LR_X, "T"))
-        assert write_conflicts_read(w, ReadLoc.attr(LR_X, "describe"))
+        assert not write_conflicts_read(w, ReadLoc.rows("df", qualifier=LR_DF))
 
-    def test_col_does_not_conflict_with_copy_value_attrs(self):
-        """Col(d,c) ▷ Attr(d',a') → False for copy, even value attrs."""
+    def test_col_does_not_conflict_with_copy_cols_read(self):
+        """Col(d,c) ▷ Cols(d') → False for copy (different object)."""
         w = WriteLoc.col(LR_DF, "price")
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF2, "values"))
-        assert not write_conflicts_read(w, ReadLoc.attr(LR_DF2, "T"))
+        assert not write_conflicts_read(w, ReadLoc.cols("df2", qualifier=LR_DF2))
 
     def test_col_does_not_conflict_with_file(self):
         """Col(d,c) ▷ File(p') → False."""
@@ -249,110 +244,11 @@ class TestColColConflicts:
 
 
 # ============================================================================
-# ColAdd(d, c) ▷ Attr(d', a') — structural impact of adding a column
-# ============================================================================
-
-class TestColAddConflicts:
-    """Adding a column invalidates COL_ATTRS reads on the same object."""
-
-    def test_coladd_invalidates_own_col_attrs(self):
-        """ColAdd(LR(1,"df"), "new") ▷ Attr(LR(1,"df"), "columns") → True"""
-        w = WriteLoc.col_add(LR_DF, "new")
-        r = ReadLoc.attr(LR_DF, "columns")
-        assert write_conflicts_read(w, r)
-
-    def test_coladd_invalidates_alias_col_attrs(self):
-        """ColAdd(LR(1,"df"), "new") ▷ Attr(LR(1,"X"), "columns") → True
-
-        Alias: X.columns also changed because X IS df.
-        """
-        w = WriteLoc.col_add(LR_DF, "new")
-        r = ReadLoc.attr(LR_X, "columns")
-        assert write_conflicts_read(w, r)
-
-    def test_coladd_does_not_invalidate_copy_col_attrs(self):
-        """ColAdd(LR(1,"df"), "new") ▷ Attr(LR(2,"df2"), "columns") → False"""
-        w = WriteLoc.col_add(LR_DF, "new")
-        r = ReadLoc.attr(LR_DF2, "columns")
-        assert not write_conflicts_read(w, r)
-
-    def test_coladd_does_not_invalidate_non_col_attrs(self):
-        """ColAdd doesn't affect row-structural attrs like index."""
-        w = WriteLoc.col_add(LR_DF, "new")
-        r = ReadLoc.attr(LR_DF, "index")
-        assert not write_conflicts_read(w, r)
-
-    def test_coladd_does_not_invalidate_col_reads(self):
-        """ColAdd(d,c) ▷ Col(d',c') → False — existing columns unaffected."""
-        w = WriteLoc.col_add(LR_DF, "new")
-        assert not write_conflicts_read(w, ReadLoc.col(LR_DF, "price"))
-        assert not write_conflicts_read(w, ReadLoc.col(LR_X, "price"))
-
-    def test_coladd_does_not_invalidate_var(self):
-        """ColAdd(d,c) ▷ Var(x') → False."""
-        w = WriteLoc.col_add(LR_DF, "new")
-        assert not write_conflicts_read(w, ReadLoc.var("df"))
-
-
-# ============================================================================
-# ColDel(d, c) ▷ Col(d', c') and Attr(d', a')
-# ============================================================================
-
-class TestColDelConflicts:
-    """Deleting a column invalidates reads of that column AND COL_ATTRS."""
-
-    def test_coldel_invalidates_own_col_read(self):
-        """ColDel(LR(1,"df"), "price") ▷ Col(LR(1,"df"), "price") → True"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.col(LR_DF, "price")
-        assert write_conflicts_read(w, r)
-
-    def test_coldel_invalidates_alias_col_read(self):
-        """ColDel(LR(1,"df"), "price") ▷ Col(LR(1,"X"), "price") → True
-
-        Alias: column deleted from same object.
-        """
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.col(LR_X, "price")
-        assert write_conflicts_read(w, r)
-
-    def test_coldel_does_not_invalidate_copy_col_read(self):
-        """ColDel(LR(1,"df"), "price") ▷ Col(LR(2,"df2"), "price") → False"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.col(LR_DF2, "price")
-        assert not write_conflicts_read(w, r)
-
-    def test_coldel_does_not_invalidate_different_col(self):
-        """ColDel(LR(1,"df"), "price") ▷ Col(LR(1,"df"), "qty") → False"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.col(LR_DF, "qty")
-        assert not write_conflicts_read(w, r)
-
-    def test_coldel_invalidates_own_col_attrs(self):
-        """ColDel(LR(1,"df"), "price") ▷ Attr(LR(1,"df"), "columns") → True"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.attr(LR_DF, "columns")
-        assert write_conflicts_read(w, r)
-
-    def test_coldel_invalidates_alias_col_attrs(self):
-        """ColDel(LR(1,"df"), "price") ▷ Attr(LR(1,"X"), "columns") → True"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.attr(LR_X, "columns")
-        assert write_conflicts_read(w, r)
-
-    def test_coldel_does_not_invalidate_copy_col_attrs(self):
-        """ColDel(LR(1,"df"), "price") ▷ Attr(LR(2,"df2"), "columns") → False"""
-        w = WriteLoc.col_del(LR_DF, "price")
-        r = ReadLoc.attr(LR_DF2, "columns")
-        assert not write_conflicts_read(w, r)
-
-
-# ============================================================================
 # Rows(d) ▷ Col(d', c') and Attr(d', a')
 # ============================================================================
 
 class TestRowsConflicts:
-    """Row changes affect ALL columns and ROW_ATTRS on the same object."""
+    """Row changes affect ALL columns and Rows reads on the same object."""
 
     def test_rows_invalidates_own_col_read(self):
         """Rows(LR(1,"df")) ▷ Col(LR(1,"df"), "price") → True"""
@@ -382,74 +278,92 @@ class TestRowsConflicts:
         r = ReadLoc.col(LR_DF2, "price")
         assert not write_conflicts_read(w, r)
 
-    def test_rows_invalidates_own_row_attrs(self):
-        """Rows(LR(1,"df")) ▷ Attr(LR(1,"df"), "shape") → True"""
+    def test_rows_invalidates_own_rows_read(self):
+        """Rows(LR(1,"df")) ▷ Rows(LR(1,"df")) → True"""
         w = WriteLoc.rows(LR_DF.var_name, qualifier=LR_DF)
-        r = ReadLoc.attr(LR_DF, "shape")
+        r = ReadLoc.rows("df", qualifier=LR_DF)
         assert write_conflicts_read(w, r)
 
-    def test_rows_invalidates_alias_row_attrs(self):
-        """Rows(LR(1,"df")) ▷ Attr(LR(1,"X"), "shape") → True"""
+    def test_rows_invalidates_alias_rows_read(self):
+        """Rows(LR(1,"df")) ▷ Rows(LR(1,"X")) → True"""
         w = WriteLoc.rows(LR_DF.var_name, qualifier=LR_DF)
-        r = ReadLoc.attr(LR_X, "shape")
+        r = ReadLoc.rows("X", qualifier=LR_X)
         assert write_conflicts_read(w, r)
 
-    def test_rows_does_not_invalidate_non_row_attrs(self):
-        """Rows doesn't affect column-structural attrs like 'columns'."""
+    def test_rows_does_not_invalidate_cols_read(self):
+        """Rows(d) ▷ Cols(d') → False (row changes don't affect column structure)."""
         w = WriteLoc.rows(LR_DF.var_name, qualifier=LR_DF)
-        r = ReadLoc.attr(LR_DF, "columns")
+        r = ReadLoc.cols("df", qualifier=LR_DF)
         assert not write_conflicts_read(w, r)
 
-    def test_rows_does_not_invalidate_copy_row_attrs(self):
-        """Rows(LR(1,"df")) ▷ Attr(LR(2,"df2"), "shape") → False"""
+    def test_rows_does_not_invalidate_copy_rows_read(self):
+        """Rows(LR(1,"df")) ▷ Rows(LR(2,"df2")) → False"""
         w = WriteLoc.rows(LR_DF.var_name, qualifier=LR_DF)
-        r = ReadLoc.attr(LR_DF2, "shape")
+        r = ReadLoc.rows("df2", qualifier=LR_DF2)
         assert not write_conflicts_read(w, r)
 
 
 # ============================================================================
-# Attr(d, a) ▷ Attr(d', a')
+# Cols(d) ▷ Col(d',c') / Cols(d') and Rows(d) ▷ Rows(d')
 # ============================================================================
 
-class TestAttrAttrConflicts:
-    """Attr write invalidates attr read iff same object AND same attribute."""
+class TestColsWriteConflicts:
+    """Cols write invalidates Col reads and Cols reads on same object."""
 
-    def test_same_var_same_attr(self):
-        """Attr(LR(1,"df"), "index") ▷ Attr(LR(1,"df"), "index") → True"""
-        w = WriteLoc.attr(LR_DF, "index")
-        r = ReadLoc.attr(LR_DF, "index")
+    def test_cols_invalidates_col_read(self):
+        """Cols(LR(1,"df")) ▷ Col(LR(1,"df"), "price") → True"""
+        w = WriteLoc.cols(LR_DF.var_name, qualifier=LR_DF)
+        r = ReadLoc.col(LR_DF, "price")
         assert write_conflicts_read(w, r)
 
-    def test_alias_same_attr(self):
-        """Attr(LR(1,"df"), "index") ▷ Attr(LR(1,"X"), "index") → True
-
-        Alias: same attribute on same object.
-        """
-        w = WriteLoc.attr(LR_DF, "index")
-        r = ReadLoc.attr(LR_X, "index")
+    def test_cols_invalidates_cols_read(self):
+        """Cols(LR(1,"df")) ▷ Cols(LR(1,"df")) → True"""
+        w = WriteLoc.cols(LR_DF.var_name, qualifier=LR_DF)
+        r = ReadLoc.cols("df", qualifier=LR_DF)
         assert write_conflicts_read(w, r)
 
-    def test_alias_different_attr(self):
-        """Attr(LR(1,"df"), "index") ▷ Attr(LR(1,"X"), "shape") → False"""
-        w = WriteLoc.attr(LR_DF, "index")
-        r = ReadLoc.attr(LR_X, "shape")
+    def test_cols_invalidates_alias_col_read(self):
+        """Cols(LR(1,"df")) ▷ Col(LR(1,"X"), "price") → True"""
+        w = WriteLoc.cols(LR_DF.var_name, qualifier=LR_DF)
+        r = ReadLoc.col(LR_X, "price")
+        assert write_conflicts_read(w, r)
+
+    def test_cols_does_not_invalidate_copy_col_read(self):
+        """Cols(LR(1,"df")) ▷ Col(LR(2,"df2"), "price") → False"""
+        w = WriteLoc.cols(LR_DF.var_name, qualifier=LR_DF)
+        r = ReadLoc.col(LR_DF2, "price")
         assert not write_conflicts_read(w, r)
 
-    def test_copy_same_attr_no_conflict(self):
-        """Attr(LR(1,"df"), "index") ▷ Attr(LR(2,"df2"), "index") → False"""
-        w = WriteLoc.attr(LR_DF, "index")
-        r = ReadLoc.attr(LR_DF2, "index")
+    def test_cols_does_not_conflict_with_rows_read(self):
+        """Cols(d) ▷ Rows(d') → False."""
+        w = WriteLoc.cols(LR_DF.var_name, qualifier=LR_DF)
+        r = ReadLoc.rows("df", qualifier=LR_DF)
         assert not write_conflicts_read(w, r)
 
-    def test_attr_does_not_conflict_with_col(self):
-        """Attr(d,a) ▷ Col(d',c') → False (always)."""
-        w = WriteLoc.attr(LR_DF, "index")
-        assert not write_conflicts_read(w, ReadLoc.col(LR_DF, "price"))
-        assert not write_conflicts_read(w, ReadLoc.col(LR_X, "price"))
+    def test_cols_does_not_conflict_with_var(self):
+        """Cols(d) ▷ Var(x') → False."""
+        w = WriteLoc.cols(LR_DF.var_name, qualifier=LR_DF)
+        assert not write_conflicts_read(w, ReadLoc.var("df"))
 
-    def test_attr_does_not_conflict_with_var(self):
-        """Attr(d,a) ▷ Var(x') → False (always)."""
-        w = WriteLoc.attr(LR_DF, "index")
+
+class TestRowsWriteConflicts:
+    """Rows write invalidates Col reads and Rows reads on same object."""
+
+    def test_rows_write_invalidates_rows_read(self):
+        """Rows(LR(1,"df")) ▷ Rows(LR(1,"df")) → True"""
+        w = WriteLoc.rows(LR_DF.var_name, qualifier=LR_DF)
+        r = ReadLoc.rows("df", qualifier=LR_DF)
+        assert write_conflicts_read(w, r)
+
+    def test_rows_write_does_not_conflict_with_cols_read(self):
+        """Rows(d) ▷ Cols(d') → False."""
+        w = WriteLoc.rows(LR_DF.var_name, qualifier=LR_DF)
+        r = ReadLoc.cols("df", qualifier=LR_DF)
+        assert not write_conflicts_read(w, r)
+
+    def test_rows_write_does_not_conflict_with_var(self):
+        """Rows(d) ▷ Var(x') → False."""
+        w = WriteLoc.rows(LR_DF.var_name, qualifier=LR_DF)
         assert not write_conflicts_read(w, ReadLoc.var("df"))
 
 
@@ -583,12 +497,13 @@ class TestIndependentDataFrames:
         r = ReadLoc.col(self.LR_B, "price")
         assert not write_conflicts_read(w, r)
 
-    def test_coladd_independent(self):
-        w = WriteLoc.col_add(self.LR_A, "new")
-        r = ReadLoc.attr(self.LR_B, "columns")
+    def test_col_independent_cols(self):
+        """Col write on one DataFrame does not affect Cols read of another."""
+        w = WriteLoc.col(self.LR_A, "new")
+        r = ReadLoc.cols("inventory", qualifier=self.LR_B)
         assert not write_conflicts_read(w, r)
 
-    def test_attr_independent(self):
-        w = WriteLoc.attr(self.LR_A, "index")
-        r = ReadLoc.attr(self.LR_B, "index")
+    def test_rows_independent_rows(self):
+        w = WriteLoc.rows("sales", qualifier=self.LR_A)
+        r = ReadLoc.rows("inventory", qualifier=self.LR_B)
         assert not write_conflicts_read(w, r)

@@ -13,14 +13,9 @@ from flowbook.server.kernel_helper import KernelHelper
 
 # Export command implementations
 from flowbook.server.commands import (
-    AnalyzeNotebookCommand,
-    ValidateNotebookCommand,
-    ProfileCommand,
-    InspectVariablesCommand,
-    InspectCommand,
-    OptimizeCommand,
-    CleanupCommand,
-    ExampleMessageCommand,
+    CompareBaselineCommand,
+    ExecuteCommand,
+    ExecuteBaseCommand,
 )
 
 # Export registry and managers
@@ -31,16 +26,7 @@ from flowbook.server.kernel_manager import KernelConnectionManager
 from flowbook.server.handlers import (
     FlowbookCommandHandler,
     CommandListHandler,
-    MessageStreamHandler,
     setup_handlers,
-)
-
-# Export message broadcasting
-from flowbook.server.message_broadcaster import (
-    MessageBroadcaster,
-    get_broadcaster,
-    Message,
-    MessageType,
 )
 
 __all__ = [
@@ -49,29 +35,19 @@ __all__ = [
     # Utilities
     "KernelHelper",
     # Command implementations
-    "AnalyzeNotebookCommand",
-    "ValidateNotebookCommand",
-    "ProfileCommand",
-    "InspectVariablesCommand",
-    "InspectCommand",
-    "OptimizeCommand",
-    "CleanupCommand",
+    "CompareBaselineCommand",
+    "ExecuteCommand",
+    "ExecuteBaseCommand",
     # Registry and managers
     "CommandRegistry",
     "KernelConnectionManager",
     # Handlers
     "FlowbookCommandHandler",
     "CommandListHandler",
-    "MessageStreamHandler",
     "setup_handlers",
-    # Message broadcasting
-    "MessageBroadcaster",
-    "get_broadcaster",
-    "Message",
-    "MessageType",
 ]
 
-# Note: CLI functions (cli_main, optimize_cli_main) are now in flowbook.cli package
+# Note: CLI functions (cli_main) are in flowbook.cli package
 # to avoid circular imports. Import them directly from flowbook.cli if needed.
 
 __version__ = "0.1.0"

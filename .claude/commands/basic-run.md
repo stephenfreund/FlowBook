@@ -22,13 +22,13 @@ Run a notebook through FlowBook using the MCP server. Execute all cells in order
    continue_after_violation(true)
    ```
 
-3. Run all cells:
+3. Run all actionable cells:
 
    ```
-   run_all_cells()
+   run_actionable_cells()
    ```
 
-4. If `run_all_cells` reports an error, get the failing cell to show the user what went wrong:
+4. If `run_actionable_cells` reports an error, get the failing cell to show the user what went wrong:
 
    ```
    get_next_actionable_cell()
@@ -55,9 +55,9 @@ Run a notebook through FlowBook using the MCP server. Execute all cells in order
 
 Report to the user:
 
-- Whether the notebook ran successfully or which cell errored
-- Number of reproducibility violations found (if any), with a brief description of each
+- Whether the notebook ran successfully or which cell errored (use @-labels, e.g., @A, @B)
+- Number of reproducibility violations found (if any), with a brief description of each (cell @-label, type, variable)
 - Number of stale cells
 - Path to the saved log file
 
-Keep the report concise. If there are violations, list them briefly (cell ID, type, variable). Do not attempt to fix anything — just report.
+Keep the report concise. If there are violations, list them briefly (@-label, type, variable). Do not attempt to fix anything — just report.

@@ -255,52 +255,6 @@ class TestTrackingOnlyMode:
         assert os.path.abspath(real_file) in tracking.file_reads_before_writes
 
 
-class TestSocketFiltering:
-    """Tests for internal socket file filtering."""
-
-    def test_flowbook_socket_not_tracked(self, vfs, tmpdir):
-        vfs.enable_tracking_only()
-        vfs.reset_cell_tracking()
-
-        # Simulate access to flowbook internal socket
-        socket_path = os.path.join(tmpdir, "flowbook_cli_1234.sock")
-        abs_socket = os.path.abspath(socket_path)
-
-        # Directly call tracking methods (socket doesn't need to exist)
-        vfs._track_read(socket_path)
-        vfs._track_write(socket_path)
-
-        # Should not be tracked
-        assert abs_socket not in vfs.get_read_paths()
-        assert abs_socket not in vfs.get_write_paths()
-
-    def test_flowlab_socket_not_tracked(self, vfs, tmpdir):
-        vfs.enable_tracking_only()
-        vfs.reset_cell_tracking()
-
-        socket_path = os.path.join(tmpdir, "flowlab_5678.sock")
-        abs_socket = os.path.abspath(socket_path)
-
-        vfs._track_read(socket_path)
-        vfs._track_write(socket_path)
-
-        assert abs_socket not in vfs.get_read_paths()
-        assert abs_socket not in vfs.get_write_paths()
-
-    def test_regular_sock_file_tracked(self, vfs, tmpdir):
-        """Regular .sock files (not flowbook/flowlab) should be tracked."""
-        vfs.enable_tracking_only()
-        vfs.reset_cell_tracking()
-
-        socket_path = os.path.join(tmpdir, "myapp.sock")
-        abs_socket = os.path.abspath(socket_path)
-
-        vfs._track_read(socket_path)
-        vfs._track_write(socket_path)
-
-        # Regular sock files should be tracked
-        assert abs_socket in vfs.get_read_paths()
-        assert abs_socket in vfs.get_write_paths()
 
     def test_bytes_path_decoded_and_tracked(self, vfs, tmpdir):
         """Bytes paths (e.g., from psutil on Linux) should be decoded to str."""

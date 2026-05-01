@@ -298,13 +298,11 @@ class TestSDCStructuralReadsModeEnforce:
 class TestSDCStructuralStaleness:
     """Tests for staleness computation with structural reads."""
 
-    @pytest.mark.skip(reason="Test design issue: staleness computation interaction with structural tracking needs more work")
     def test_staleness_when_columns_changed(self):
         """Cell becomes stale when columns change and it read df.columns."""
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b', 'cell_c'])
-
 
         # Cell A: creates df
         df = pd.DataFrame({'a': [1], 'b': [2]})
@@ -321,7 +319,7 @@ class TestSDCStructuralStaleness:
         )
         assert not result_a.has_errors()
 
-        # Cell B: reads df.columns
+        # Cell B: reads df.columns (no writes, namespace unchanged)
         ns_b = ns_a.copy()
         pre_b = MemoryCheckpoint('pre_b', ns_b, {})
         checkpoints.save('_pre_cell_b', ns_b)
@@ -332,7 +330,7 @@ class TestSDCStructuralStaleness:
             structural_reads={'df': {'columns'}},
         )
 
-        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b, tracking_b,
             continue_on_violation=True,
         )
         assert not result_b.has_errors()
@@ -348,18 +346,17 @@ class TestSDCStructuralStaleness:
         )
 
         result_c = enforcer.check('cell_c', pre_c, ns_c_post, tracking_c,
+            continue_on_violation=True,
         )
 
         # Cell B should be stale (it read df.columns, columns changed)
         assert 'cell_b' in result_c.stale_cells
 
-    @pytest.mark.skip(reason="Test design issue: staleness computation interaction with structural tracking needs more work")
     def test_staleness_when_row_count_changed(self):
         """Cell becomes stale when row count changes and it read len(df)."""
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b', 'cell_c'])
-
 
         # Cell A: creates df
         df = pd.DataFrame({'a': [1, 2]})
@@ -375,7 +372,7 @@ class TestSDCStructuralStaleness:
         result_a = enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
-        # Cell B: reads len(df)
+        # Cell B: reads len(df) (no writes, namespace unchanged)
         ns_b = ns_a.copy()
         pre_b = MemoryCheckpoint('pre_b', ns_b, {})
         checkpoints.save('_pre_cell_b', ns_b)
@@ -386,7 +383,7 @@ class TestSDCStructuralStaleness:
             structural_reads={'df': {'len'}},
         )
 
-        result_b = enforcer.check('cell_b', pre_b, ns_b_post, tracking_b,
+        result_b = enforcer.check('cell_b', pre_b, ns_b, tracking_b,
         )
 
         # Cell C: adds row
@@ -396,9 +393,11 @@ class TestSDCStructuralStaleness:
         tracking_c = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
+            row_mutations={'df'},
         )
 
         result_c = enforcer.check('cell_c', pre_c, ns_c_post, tracking_c,
+            continue_on_violation=True,
         )
 
         # Cell B should be stale (it read len(df), row count changed)
@@ -500,15 +499,13 @@ class TestSDCStructuralNoFalsePositives:
 class TestSDCStructuralMultipleVariables:
     """Tests for structural reads on multiple variables."""
 
-    @pytest.mark.skip(reason="Test design issue: expects no backward mutation violation when cell A reads df2")
     def test_multiple_dataframes_independent(self):
         """Structural reads tracked independently per variable."""
         checkpoints = MemoryCheckpoints()
         enforcer = ReproducibilityEnforcer(checkpoints)
         enforcer.set_cell_order(['cell_a', 'cell_b'])
 
-
-        # Cell A reads df1.columns but not df2.columns
+        # Cell A reads df1.columns only (does NOT read df2)
         df1 = pd.DataFrame({'a': [1]})
         df2 = pd.DataFrame({'x': [1]})
         ns_a = {'df1': df1.copy(), 'df2': df2.copy()}
@@ -516,14 +513,15 @@ class TestSDCStructuralMultipleVariables:
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
-            reads_before_writes={'df1', 'df2'},
-            structural_reads={'df1': {'columns'}},  # Only df1
+            reads_before_writes={'df1'},  # Only reads df1, not df2
+            writes=set(),
+            structural_reads={'df1': {'columns'}},
         )
 
         enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
-        # Cell B adds column to df2 (not tracked structurally)
+        # Cell B adds column to df2 (not read by A)
         df2_b = pd.DataFrame({'x': [1], 'y': [2]})
         ns_b_post = {'df1': df1.copy(), 'df2': df2_b}
         pre_b = MemoryCheckpoint('pre_b', ns_a.copy(), {})

@@ -110,3 +110,25 @@ def alpha_to_index(alpha: str) -> int:
         return 26 + 26 * 26 + first * 26 * 26 + second * 26 + third
     else:
         raise ValueError(f"Invalid format: too many letters (max 3, got {length} in {alpha})")
+
+
+def parse_cell_ref(cell: str) -> int:
+    """Parse a cell reference in any supported format.
+
+    Accepts:
+    - @-labels:       '@C' -> 2,  '@AA' -> 26
+    - Plain letters:  'C'  -> 2,  'AA'  -> 26  (case-insensitive)
+    - Numeric strings: '2' -> 2,  '26'  -> 26
+    - Surrounding whitespace is stripped.
+
+    Returns 0-based code-cell index. Raises ValueError on invalid input.
+    """
+    if not isinstance(cell, str):
+        raise ValueError(f"Invalid cell reference: {cell!r}")
+    cell = cell.strip()
+    if not cell:
+        raise ValueError(f"Invalid cell reference: {cell!r}")
+    if cell.isdigit():
+        return int(cell)
+    letters = cell[1:] if cell.startswith('@') else cell
+    return alpha_to_index('@' + letters.upper())

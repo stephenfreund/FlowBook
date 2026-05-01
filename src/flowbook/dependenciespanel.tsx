@@ -15,7 +15,7 @@
 
 import { Widget } from '@lumino/widgets';
 import * as React from 'react';
-import * as ReactDOM from 'react-dom';
+import { createRoot, Root } from 'react-dom/client';
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -34,7 +34,7 @@ import '@xyflow/react/dist/style.css';
 import {
   IReadLoc,
   IWriteLoc,
-  IPredicateViolation,
+  IReproducibilityError,
   writeConflictsRead,
   formatReadLoc
 } from './types';
@@ -52,8 +52,8 @@ export interface ICellGraphData {
   isStale: boolean;
   isExecuted: boolean;
   hasError: boolean;
-  /** Predicate violations on this cell (from flowbook_violations metadata) */
-  violations: IPredicateViolation[];
+  /** Predicate violations on this cell (from flowbook.errors metadata) */
+  violations: IReproducibilityError[];
 }
 
 type DependencyEdgeKind = 'program_order' | 'data_dependency' | 'violation';
@@ -142,10 +142,10 @@ function computeEdges(cells: ICellGraphData[]): IDependencyEdge[] {
       //   no_read_and_write: self-conflict on the violating cell
       let sourceId: string;
       let targetId: string;
-      if (v.predicate === 'no_write_after_read') {
+      if (v.error_type === 'no_write_after_read') {
         sourceId = cell.cellId; // writer
         targetId = causerId; // reader
-      } else if (v.predicate === 'no_read_before_write') {
+      } else if (v.error_type === 'no_read_before_write') {
         sourceId = causerId; // writer below
         targetId = cell.cellId; // reader above
       } else {
@@ -532,6 +532,7 @@ const DependenciesDisplay: React.FC<IDependenciesDisplayProps> = ({
 
 export class DependenciesPanel extends Widget {
   private _cellData: ICellGraphData[] = [];
+  private _root: Root | null = null;
 
   constructor() {
     super();
@@ -544,10 +545,10 @@ export class DependenciesPanel extends Widget {
   }
 
   private render(): void {
-    ReactDOM.render(
-      <DependenciesDisplay cellData={this._cellData} />,
-      this.node
-    );
+    if (!this._root) {
+      this._root = createRoot(this.node);
+    }
+    this._root.render(<DependenciesDisplay cellData={this._cellData} />);
   }
 
   public updateGraph(cellData: ICellGraphData[]): void {
@@ -564,7 +565,8 @@ export class DependenciesPanel extends Widget {
     if (this.isDisposed) {
       return;
     }
-    ReactDOM.unmountComponentAtNode(this.node);
+    this._root?.unmount();
+    this._root = null;
     super.dispose();
   }
 }
