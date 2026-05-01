@@ -1563,6 +1563,23 @@ class Diff:
                     _register_stacking_dispatch_if_needed()
                     _DISPATCH_CACHE[t] = "_compare_stacking_estimator"
                     result = self._compare_stacking_estimator(val_a, val_b, path)
+                elif isinstance(val_a, np.random.Generator):
+                    # numpy.random.Generator has no __dict__/__slots__ and
+                    # inherits identity-based __eq__. Without this branch we
+                    # fall into _compare_object's `val_a != val_b` path and
+                    # report a spurious diff for every deepcopy'd Generator
+                    # — e.g. HistGradientBoostingClassifier._feature_subsample_rng.
+                    _DISPATCH_CACHE[t] = "_compare_numpy_generator"
+                    result = self._compare_numpy_generator(val_a, val_b, path)
+                elif isinstance(val_a, np.random.BitGenerator):
+                    # Same problem as Generator, one level down. All PCG64 /
+                    # MT19937 / Philox / SFC64 subclasses hit this branch.
+                    _DISPATCH_CACHE[t] = "_compare_numpy_bitgenerator"
+                    result = self._compare_numpy_bitgenerator(val_a, val_b, path)
+                elif isinstance(val_a, np.random.RandomState):
+                    # Legacy mtrand.RandomState — same identity-__eq__ trap.
+                    _DISPATCH_CACHE[t] = "_compare_numpy_randomstate"
+                    result = self._compare_numpy_randomstate(val_a, val_b, path)
                 elif isinstance(val_a, dict):
                     # Handle dict subclasses (OrderedDict, Counter, defaultdict, etc.)
                     _DISPATCH_CACHE[t] = "_compare_dict"
@@ -3508,6 +3525,81 @@ class Diff:
 
         if children:
             return CompoundDiff(source_type="stacking_estimator", children=children, truncated=False)
+        return None
+
+    def _compare_numpy_generator(self, val_a, val_b, path: str) -> Optional[ValueComparison]:
+        """Compare two numpy.random.Generator objects by bit-generator state.
+
+        Generators have identity-based __eq__, so the generic object
+        fallback reports every deep-copied Generator as "different". The
+        authoritative signal is bit_generator.state — a plain dict that
+        dict.__eq__ compares by value.
+        """
+        if val_a is val_b:
+            return None
+        if type(val_a) is not type(val_b):
+            return ValueComparison(
+                status="different",
+                value1=type(val_a).__name__,
+                value2=type(val_b).__name__,
+                message=f"Generator type mismatch at {path}",
+            )
+        state_a = val_a.bit_generator.state
+        state_b = val_b.bit_generator.state
+        if state_a == state_b:
+            return None
+        return ValueComparison(
+            status="different",
+            value1=state_a,
+            value2=state_b,
+            message=f"numpy.random.Generator state differs at {path}",
+        )
+
+    def _compare_numpy_bitgenerator(self, val_a, val_b, path: str) -> Optional[ValueComparison]:
+        """Compare two numpy.random.BitGenerator subclasses by state."""
+        if val_a is val_b:
+            return None
+        if type(val_a) is not type(val_b):
+            return ValueComparison(
+                status="different",
+                value1=type(val_a).__name__,
+                value2=type(val_b).__name__,
+                message=f"BitGenerator type mismatch at {path}",
+            )
+        if val_a.state == val_b.state:
+            return None
+        return ValueComparison(
+            status="different",
+            value1=val_a.state,
+            value2=val_b.state,
+            message=f"numpy.random.BitGenerator state differs at {path}",
+        )
+
+    def _compare_numpy_randomstate(self, val_a, val_b, path: str) -> Optional[ValueComparison]:
+        """Compare two numpy.random.RandomState (legacy mtrand) by state.
+
+        RandomState.get_state() returns a tuple whose second element is a
+        uint32 array, so element-wise equality needs np.array_equal.
+        """
+        if val_a is val_b:
+            return None
+        sa = val_a.get_state()
+        sb = val_b.get_state()
+        if len(sa) != len(sb) or sa[0] != sb[0]:
+            return ValueComparison(
+                status="different",
+                value1=str(sa[0]) if sa else "<empty>",
+                value2=str(sb[0]) if sb else "<empty>",
+                message=f"numpy.random.RandomState algo mismatch at {path}",
+            )
+        # Compare the keys/arrays after the algo name.
+        if not np.array_equal(sa[1], sb[1]) or sa[2:] != sb[2:]:
+            return ValueComparison(
+                status="different",
+                value1=sa,
+                value2=sb,
+                message=f"numpy.random.RandomState state differs at {path}",
+            )
         return None
 
     def _compare_groupby(self, val_a, val_b, path: str) -> Optional[ValueComparison]:
