@@ -64,6 +64,7 @@ BOTH_READ_ATTRS: FrozenSet[str] = frozenset({
     "values",    # Full array (both dimensions)
     "T",         # Transpose (both dimensions)
     "describe",  # describe() — statistics over all columns
+    "copy",      # copy() — reads every row and column
 })
 
 

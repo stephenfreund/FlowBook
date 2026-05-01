@@ -180,6 +180,9 @@ export class ViolationNoticeManager {
         case 'write_before_read':
           message = `${htmlLocs} not defined by any cell above`;
           break;
+        case 'unrecoverable_mutation':
+          message = `${htmlLocs} was modified in place, which violates rerun consistency`;
+          break;
         default:
           message = `Violation on ${htmlLocs}`;
       }
