@@ -10,16 +10,10 @@ You are fixing reproducibility violations in a Jupyter notebook using FlowBook's
 
 ## What Reproducibility Analysis Guarantees
 
-**Rerun consistency** means: if all cells are CLEAN, then running the notebook top-to-bottom will reproduce every cell's recorded outputs. FlowBook enforces this by tracking what each cell reads and writes, then checking four predicates after every execution:
-
-1. **NoReadAndWrite**: A cell must not read and write the same variable (re-runs would accumulate changes). Example: `train = pd.concat([train, extra])` — each re-run appends more rows.
-2. **WriteBeforeRead**: Every variable a cell reads must have been written by an earlier cell (no dangling references).
-3. **NoReadBeforeWrite** (forward contamination): A cell must not read a variable that is written by a _later_ cell (execution order dependency).
-4. **NoWriteAfterRead** (backward mutation): A cell must not write a variable that was read by an _earlier_ cell (re-running the writer would change the reader's inputs).
-
-Additionally, **UNRECOVERABLE_MUTATION** detects in-place modifications (like `df.drop(inplace=True)` or `model.fit()`) that FlowBook cannot roll back.
-
-When a violation is found, FlowBook marks cells **stale** — meaning their outputs may no longer match what a top-to-bottom re-run would produce. The goal of fixing is to eliminate all violations so every cell is CLEAN.
+See `flowbook/docs/REPRODUCIBILITY_PRIMER.md` for the canonical definitions of
+rerun consistency, the four validity predicates (NoReadAndWrite, WriteBeforeRead,
+NoReadBeforeWrite, NoWriteAfterRead), UNRECOVERABLE_MUTATION, and staleness.
+The goal of fixing is to eliminate all violations so every cell is CLEAN.
 
 ## Workflow
 

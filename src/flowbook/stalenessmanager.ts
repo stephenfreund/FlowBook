@@ -68,6 +68,29 @@ export class StalenessManager {
   }
 
   /**
+   * Eagerly mark a single cell as stale and record a reason.
+   *
+   * Used by callers that mutate cell source outside the kernel's
+   * cell_edited round-trip (e.g. the AI fix suggester) so the staleness
+   * UI updates immediately rather than after the debounced kernel
+   * notification. The next kernel-driven updateFromMetadata() will
+   * reconcile (and likely keep the cell stale, since cell_edited will
+   * have been sent in the meantime).
+   */
+  markStale(cellId: string, reason: IStalenessReason): void {
+    const wasStale = this._staleCells.has(cellId);
+    this._staleCells.add(cellId);
+    this._stalenessReasons.set(cellId, [reason]);
+    if (!wasStale) {
+      this._stalenessChanged.emit({
+        added: [cellId],
+        removed: [],
+        current: [...this._staleCells]
+      });
+    }
+  }
+
+  /**
    * Update staleness from reproducibility metadata
    *
    * The metadata contains the ABSOLUTE set of all currently stale cells

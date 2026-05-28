@@ -274,6 +274,70 @@
 }
 
 /* ========================================
+   AI fix suggester regions (inside violation notice)
+   ======================================== */
+
+.fb-ai-fix {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fb-diagnosis {
+  font-style: italic;
+  font-size: 0.85em;
+  color: #5a1a22;
+  padding: 2px 0;
+}
+
+.fb-fix-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.fb-fix-button {
+  background-color: #fff;
+  border: 1px solid #842029;
+  color: #842029;
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.fb-fix-button:hover:not(:disabled) {
+  background-color: #842029;
+  color: #fff;
+}
+
+.fb-fix-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fb-undo {
+  margin-top: 2px;
+}
+
+.fb-undo-button {
+  background-color: #fff;
+  border: 1px solid #6c757d;
+  color: #495057;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.fb-undo-button:hover {
+  background-color: #6c757d;
+  color: #fff;
+}
+
+/* ========================================
    Violation Details (metadata panel)
    ======================================== */
 

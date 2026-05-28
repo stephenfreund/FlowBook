@@ -17,6 +17,21 @@ from flowbook.server.kernel_manager import (
     KernelConnectionManager,
 )
 from flowbook.kernel_discovery import read_discovery, write_discovery
+from flowbook.server.fix_dispatcher import apply_fix
+from flowbook.server.fix_models import (
+    TOOL_ARG_SCHEMAS,
+    ApplyFixResponse,
+    PlanValidationError,
+)
+from flowbook.server.fix_suggester import (
+    ErrorEvent,
+    FixSuggester,
+    PlanEvent,
+    TextEvent,
+    build_context_from_notebook,
+    feature_enabled,
+    get_model,
+)
 from flowbook.util.output import error, log
 
 
@@ -247,6 +262,171 @@ class KernelDiscoveryHandler(APIHandler):
         self.finish(json.dumps({"discovery_file": disc_path}))
 
 
+class SuggestFixHandler(APIHandler):
+    """POST /flowbook/suggest-fix — stream a diagnosis + FixPlan via SSE.
+
+    Request body: {"notebook": <full notebook json>, "cell_id": "abcd"}
+
+    Stream protocol (one event per server-sent-event frame):
+        event: diagnosis
+        data: {"text": "..."}     # one chunk of the diagnosis text
+
+        event: plan
+        data: {"fixes": [...]}    # the validated FixPlan, sent once
+
+        event: error
+        data: {"message": "..."}  # terminal failure; no plan available
+
+        event: done
+        data: {}                  # terminal success marker
+
+    The frontend can abort by closing the connection (AbortController on
+    fetch). Tornado surfaces that as RequestFinishedError, which we let
+    propagate to stop the upstream LLM stream.
+    """
+
+    @tornado.web.authenticated
+    async def post(self):
+        # Quick guard: feature disabled if no provider key is configured.
+        if not feature_enabled(self.settings):
+            self.set_status(503)
+            self.set_header("Content-Type", "application/json")
+            self.finish(json.dumps({
+                "feature_disabled": True,
+                "reason": (
+                    "No provider API key found. Set ANTHROPIC_API_KEY (or the "
+                    "env var for your configured fix_model provider) in the "
+                    "Jupyter server's environment."
+                ),
+            }))
+            return
+
+        try:
+            body = self.get_json_body() or {}
+            notebook = body.get("notebook")
+            cell_id = body.get("cell_id")
+            if not notebook or not isinstance(notebook, dict):
+                self.set_status(400)
+                self.finish(json.dumps({"error": "Missing or invalid 'notebook'"}))
+                return
+            if not cell_id or not isinstance(cell_id, str):
+                self.set_status(400)
+                self.finish(json.dumps({"error": "Missing or invalid 'cell_id'"}))
+                return
+        except Exception as e:
+            self.set_status(400)
+            self.finish(json.dumps({"error": f"Bad request: {e}"}))
+            return
+
+        context = build_context_from_notebook(notebook, cell_id)
+        if context is None:
+            self.set_status(404)
+            self.finish(json.dumps({
+                "error": f"Cell {cell_id} has no violation metadata or is not a code cell"
+            }))
+            return
+
+        # Open the SSE stream.
+        self.set_header("Content-Type", "text/event-stream")
+        self.set_header("Cache-Control", "no-cache")
+        self.set_header("X-Accel-Buffering", "no")  # nginx: disable buffering
+
+        suggester = FixSuggester(model=get_model(self.settings))
+
+        try:
+            async for event in suggester.stream(context):
+                if isinstance(event, TextEvent):
+                    self._send_event("diagnosis", {"text": event.text})
+                elif isinstance(event, PlanEvent):
+                    self._send_event("plan", event.plan.model_dump())
+                elif isinstance(event, ErrorEvent):
+                    self._send_event("error", {"message": event.message})
+            self._send_event("done", {})
+        except tornado.iostream.StreamClosedError:
+            # Client aborted. Nothing to do — the async generator will be
+            # garbage-collected, which cancels the underlying LLM request.
+            return
+        except Exception as e:
+            error(f"suggest-fix stream failed: {e}")
+            traceback.print_exc()
+            try:
+                self._send_event("error", {"message": f"Internal error: {e}"})
+            except tornado.iostream.StreamClosedError:
+                pass
+        finally:
+            self.finish()
+
+    def _send_event(self, event_type: str, data: dict) -> None:
+        """Write one SSE frame and flush it to the client."""
+        payload = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+        self.write(payload)
+        self.flush()
+
+
+class ApplyFixHandler(APIHandler):
+    """POST /flowbook/apply-fix — apply a chosen FixSuggestion to a notebook.
+
+    Request body: {"notebook": <nb json>, "tool": "alpha_rename", "args": {...}}
+
+    Always validates `tool` against the allowlist and `args` against the
+    schema before dispatching. The notebook in the request body is mutated
+    in place by the dispatcher and the full result (modified sources,
+    pre-fix snapshot for undo, new cell order if changed) is returned.
+
+    The frontend is responsible for re-running the affected cells.
+    """
+
+    @tornado.web.authenticated
+    async def post(self):
+        try:
+            body = self.get_json_body() or {}
+            notebook = body.get("notebook")
+            tool = body.get("tool")
+            args = body.get("args") or {}
+        except Exception as e:
+            self.set_status(400)
+            self.finish(json.dumps({"error": f"Bad request: {e}"}))
+            return
+
+        if not notebook or not isinstance(notebook, dict):
+            self.set_status(400)
+            self.finish(json.dumps({"error": "Missing or invalid 'notebook'"}))
+            return
+        if tool not in TOOL_ARG_SCHEMAS:
+            self.set_status(400)
+            self.finish(json.dumps({"error": f"Unknown or unsupported tool: {tool}"}))
+            return
+        expected = TOOL_ARG_SCHEMAS[tool]
+        actual = set(args.keys())
+        if expected != actual:
+            self.set_status(400)
+            self.finish(json.dumps({
+                "error": f"Tool '{tool}' args mismatch: expected {sorted(expected)}, got {sorted(actual)}"
+            }))
+            return
+
+        try:
+            response: ApplyFixResponse = apply_fix(notebook, tool, args)
+        except ValueError as e:
+            self.set_status(400)
+            self.finish(json.dumps({"error": str(e)}))
+            return
+        except Exception as e:
+            error(f"apply-fix dispatcher failed: {e}")
+            traceback.print_exc()
+            self.set_status(500)
+            self.finish(json.dumps({"error": f"Internal error: {e}"}))
+            return
+
+        # Return the result alongside the (now-mutated) notebook so the
+        # frontend can use either.
+        self.set_header("Content-Type", "application/json")
+        self.finish(json.dumps({
+            "result": response.model_dump(),
+            "notebook": notebook,
+        }))
+
+
 def setup_handlers(web_app):
     """Set up the extension handlers."""
     global _kernel_manager
@@ -278,6 +458,16 @@ def setup_handlers(web_app):
         (
             url_path_join(base_url, "flowbook", "kernel-discovery", "(.+)"),
             KernelDiscoveryHandler,
+            {},
+        ),
+        (
+            url_path_join(base_url, "flowbook", "suggest-fix"),
+            SuggestFixHandler,
+            {},
+        ),
+        (
+            url_path_join(base_url, "flowbook", "apply-fix"),
+            ApplyFixHandler,
             {},
         ),
     ]

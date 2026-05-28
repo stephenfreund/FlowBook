@@ -522,3 +522,12 @@ This project maintains a formal specification in `FORMAL_DEVELOPMENT.md` that ma
 - **Code → Spec:** When source code implementing a formal concept is created, modified, renamed, or deleted, the mapping in `FORMAL_DEVELOPMENT.md` MUST be updated to reflect the change.
 
 Before completing any task, verify that `FORMAL_DEVELOPMENT.md` and the source code it references are consistent with each other.
+
+### Reproducibility Primer
+
+`flowbook/docs/REPRODUCIBILITY_PRIMER.md` is the canonical prose explanation of
+rerun consistency, the four validity predicates, UNRECOVERABLE_MUTATION, and
+staleness. The slash commands (`fix-notebook`, `reproducibility-fixer`) and the
+in-product AI fix suggester (`flowbook/server/fix_suggester.py`) all reference
+it. When you change the primer, verify it stays consistent with `FORMAL_DEVELOPMENT.md`
+and any other prose that paraphrases it.
