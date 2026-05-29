@@ -318,6 +318,35 @@
   cursor: default;
 }
 
+.fb-custom-input {
+  margin-top: 4px;
+}
+
+.fb-custom-input-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fb-custom-textarea {
+  width: 100%;
+  font-family: var(--jp-code-font-family, monospace);
+  font-size: 0.88em;
+  padding: 4px 6px;
+  border: 1px solid #842029;
+  border-radius: 3px;
+  background-color: #fff;
+  color: #212529;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.fb-custom-input-buttons {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
 .fb-undo {
   margin-top: 2px;
 }

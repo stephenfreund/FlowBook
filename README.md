@@ -64,16 +64,47 @@ notice shows:
 2. A short, italicized **diagnosis** that streams in as the model thinks.
 3. One to three **fix buttons** like _"Rename train → train_combined"_ or
    _"Replace inplace=True with assignment"_.
+4. An **Other Fix…** button — always present — that lets you describe a
+   fix in your own words and have the AI carry it out.
 
-Click a button and FlowBook applies the corresponding AST transformation
-(`alpha_rename`, `remove_inplace`, `insert_deepcopy`, `mark_diagnostic`,
-`merge_cells`, or `move_cell`) to the affected cells. An **Undo fix**
-button appears for 30 seconds afterwards, which restores the pre-fix state
-including any cells that were removed or moved.
+Click a built-in fix button and FlowBook applies the corresponding AST
+transformation (`alpha_rename`, `remove_inplace`, `insert_deepcopy`,
+`mark_diagnostic`, `merge_cells`, or `move_cell`) to the affected cells.
+An **Undo fix** button appears for 30 seconds afterwards, which restores
+the pre-fix state — including cells that were removed, moved, or added.
 
-The model never writes free-form code — fixes are restricted to the six
-AST tools above, and every suggestion is validated server-side against an
-allowlist before it can be applied.
+For built-in fixes the model never writes free-form code: every suggestion
+is validated server-side against an allowlist of those six tools before it
+can be applied.
+
+### Agentic inspection
+
+The diagnosis call is **agentic**: while the model reasons it can read any
+cell's source, outputs, traceback, or flowbook metadata through a fixed set
+of read-only tools. The LLM uses these to learn the shape of a DataFrame,
+the type of an object, or what a distant cell did — context that often
+materially changes which fix it picks. These read-only tools have no
+ability to mutate the notebook, run code, or access the filesystem.
+
+### "Other Fix…"
+
+When the built-in suggestions don't match what you want, click **Other Fix…**
+to open an inline textarea. Describe the change you want, e.g. _"split this
+cell so the plot is its own step"_ or _"replace the dropna with fillna(0)"_,
+then Submit. The AI applies the change using a small set of mutator tools
+(`edit_cell_source`, `insert_cell_after`, `delete_cell`, `merge_cells`,
+`move_cell`, `mark_diagnostic`) operating directly on the notebook JSON on
+the server. Safety constraints enforced server-side:
+
+- Code cells must still parse as Python after every edit; malformed code is
+  rejected and the model can retry on its next tool call.
+- Mutators never run cell code, never touch the kernel, never read or write
+  files.
+- The user's instruction is part of the prompt and is logged server-side.
+
+The same Undo button works for custom fixes: it restores the original
+sources and flowbook metadata of modified cells, deletes any cells the AI
+added, and re-inserts any cells the AI deleted.
 
 ### Setup
 

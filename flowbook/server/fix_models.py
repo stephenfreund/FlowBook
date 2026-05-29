@@ -128,6 +128,43 @@ class ApplyFixResponse(BaseModel):
     error: Optional[str] = None
 
 
+class CustomFixRequest(BaseModel):
+    """POST /flowbook/custom-fix body."""
+
+    notebook: Dict[str, Any]
+    cell_id: str = Field(..., description="The violating cell the user invoked from.")
+    instruction: str = Field(..., min_length=1, description="User's natural-language fix request.")
+
+
+class CustomFixResponse(BaseModel):
+    """POST /flowbook/custom-fix response."""
+
+    ok: bool
+    instruction: str
+    summary: str = Field(
+        default="",
+        description="Free-text summary from the LLM of what it did.",
+    )
+    modified_cells: List[str] = Field(default_factory=list)
+    cells_added: List[str] = Field(default_factory=list)
+    cells_removed: List[str] = Field(default_factory=list)
+    pre_fix_sources: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "cell_id -> source as it was BEFORE the custom fix. Includes "
+            "every cell the LLM mutated or deleted; the frontend uses this "
+            "for the same source-and-metadata Undo flow as the built-in fixes."
+        ),
+    )
+    post_fix_sources: Dict[str, str] = Field(default_factory=dict)
+    new_cell_order: Optional[List[str]] = Field(default=None)
+    mutations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Ordered list of mutation entries (tool, args, summary).",
+    )
+    error: Optional[str] = None
+
+
 class PlanValidationError(ValueError):
     """Raised when an LLM-produced FixPlan fails the validation contract.
 

@@ -24,11 +24,16 @@ import { getCodeCellOrder } from '../cellindexutils';
 // Metadata flag identifying our dedicated AI-fix display_data output.
 const AI_FIX_NOTICE_FLAG = 'flowbook_ai_fix_notice';
 
-// Inner HTML for the AI-fix notice. Three regions, all targeted by the
-// suggester via data-flowbook-region queries.
+// Inner HTML for the AI-fix notice. Four regions, all targeted by the
+// suggester via data-flowbook-region queries:
+//   diagnosis - streaming diagnosis text
+//   buttons   - proposed-fix buttons + always-present "Other Fix…" button
+//   input     - textarea + Submit/Cancel when the user is composing a custom fix
+//   undo      - "Undo fix" button after apply (30s TTL)
 const AI_FIX_NOTICE_HTML = `<div class="fb-ai-fix">
   <div class="fb-diagnosis" data-flowbook-region="diagnosis" hidden></div>
   <div class="fb-fix-buttons" data-flowbook-region="buttons" hidden></div>
+  <div class="fb-custom-input" data-flowbook-region="input" hidden></div>
   <div class="fb-undo" data-flowbook-region="undo" hidden></div>
 </div>`;
 
@@ -66,9 +71,32 @@ type CellState =
   | 'requesting'
   | 'streaming'
   | 'ready'
+  | 'awaiting_instruction' // user clicked "Other Fix…", composing in textarea
   | 'applying'
+  | 'applying_custom'
   | 'applied'
   | 'failed';
+
+interface ICustomFixResult {
+  ok: boolean;
+  instruction: string;
+  summary: string;
+  modified_cells: string[];
+  cells_added: string[];
+  cells_removed: string[];
+  pre_fix_sources: Record<string, string>;
+  post_fix_sources: Record<string, string>;
+  new_cell_order?: string[];
+  mutations: Array<{
+    tool: string;
+    args: Record<string, unknown>;
+    summary: string;
+    modified_cells: string[];
+    cells_added: string[];
+    cells_removed: string[];
+  }>;
+  error?: string;
+}
 
 /**
  * Full cell snapshot taken before an apply. We keep the entire cell JSON
@@ -294,6 +322,122 @@ export class FixSuggester {
   }
 
   /**
+   * Begin a custom-fix composition: replace the buttons region with a
+   * textarea + Submit/Cancel. The suggestion entry stays in 'ready' state
+   * with a flag so the user can still apply a built-in fix instead by
+   * cancelling the custom form.
+   */
+  openOtherFix(cell: Cell): void {
+    const entry = this._state.get(cell.model.id);
+    if (!entry) {
+      return;
+    }
+    // Allow opening from 'ready' (plan landed) or even 'streaming' /
+    // 'requesting' (user wants to skip the LLM's diagnosis entirely).
+    if (entry.state === 'applying' || entry.state === 'applying_custom') {
+      return;
+    }
+    entry.state = 'awaiting_instruction';
+    // Cancel any in-flight diagnosis stream — the user has moved on.
+    entry.abort.abort();
+    entry.abort = new AbortController();
+    this._renderFixButtons(cell, [], { showOtherFix: false });
+    this._renderCustomInput(cell);
+  }
+
+  /**
+   * Cancel the Other Fix textarea and return to the previous button view.
+   */
+  cancelOtherFix(cell: Cell): void {
+    const entry = this._state.get(cell.model.id);
+    if (!entry || entry.state !== 'awaiting_instruction') {
+      return;
+    }
+    this._hideCustomInput(cell);
+    entry.state = 'ready';
+    this._renderFixButtons(cell, entry.plan?.fixes || []);
+  }
+
+  /**
+   * Submit the composed instruction and drive the custom-fix flow.
+   */
+  async submitOtherFix(cell: Cell): Promise<void> {
+    const entry = this._state.get(cell.model.id);
+    if (!entry || entry.state !== 'awaiting_instruction') {
+      return;
+    }
+    const instruction = this._readCustomInstruction(cell);
+    if (!instruction) {
+      return;
+    }
+    const panel = this._panelForCell(cell);
+    if (!panel || !panel.model) {
+      return;
+    }
+
+    entry.state = 'applying_custom';
+    this._hideCustomInput(cell);
+    this._renderDiagnosisRegion(cell, `Applying custom fix: "${instruction}"`);
+    this._renderFixButtons(cell, [], { disabled: true, showOtherFix: false });
+
+    // Snapshot before mutating — same as the built-in apply path.
+    const snapshot = this._takeSnapshot(panel);
+
+    try {
+      const result = await this._streamCustomFix(
+        panel,
+        cell,
+        entry,
+        instruction
+      );
+      if (!result) {
+        // Aborted or errored; entry state already updated.
+        return;
+      }
+      entry.preFixSnapshot = snapshot;
+
+      // Apply the diff to the local notebook model. Mark these cells as
+      // programmatic so cancel-on-edit doesn't tear down our entry.
+      this._applyCustomFixDiff(panel, result);
+
+      // Transition to 'applied' BEFORE the cleanup so cellhighlighter sees
+      // isFixApplied=true and suppresses staleness rendering. From here the
+      // built-in apply behaviour takes over.
+      entry.state = 'applied';
+      this._postApplyCleanup(panel, 'edit_cell_source', {
+        ok: true,
+        tool: 'custom',
+        args: {},
+        modified_cells: [...result.modified_cells, ...result.cells_added],
+        pre_fix_sources: result.pre_fix_sources,
+        post_fix_sources: result.post_fix_sources,
+        cells_removed: result.cells_removed,
+        new_cell_order: result.new_cell_order
+      } as any);
+
+      this._ensureAIFixOutput(cell);
+      this._renderDiagnosisRegion(
+        cell,
+        result.summary
+          ? `${result.summary} Re-run the affected cells when you're ready.`
+          : "Custom fix applied. Re-run the affected cells when you're ready."
+      );
+      this._renderFixButtons(cell, [], { showOtherFix: false });
+      this._renderUndo(cell, true);
+
+      entry.undoTimer = setTimeout(() => {
+        this._renderUndo(cell, false);
+        entry.undoTimer = null;
+      }, UNDO_TTL_MS);
+    } catch (err) {
+      entry.state = 'failed';
+      this._renderDiagnosisRegion(cell, `Custom fix failed: ${err}`);
+      this._renderFixButtons(cell, entry.plan?.fixes || []);
+      entry.state = 'ready';
+    }
+  }
+
+  /**
    * Revert the most recent applied fix on this cell.
    *
    * Uses the pre-fix snapshot to:
@@ -352,6 +496,17 @@ export class FixSuggester {
       }
     }
 
+    // Cells the fix ADDED (present now, not in snapshot). Custom fixes can
+    // insert_cell_after; built-in fixes never add cells but we run this
+    // pass uniformly. Removing extras restores the pre-fix cell count.
+    const snapshotIds = new Set(snapshot.codeCellOrder);
+    const extras: string[] = [];
+    for (const id of currentSources.keys()) {
+      if (!snapshotIds.has(id)) {
+        extras.push(id);
+      }
+    }
+
     // ── 2. Restore source AND flowbook metadata for "changed" cells. ──
     // Restoring errors is what makes the original violation notice come
     // back. Without it, the cell ends up showing the kernel's staleness
@@ -380,7 +535,27 @@ export class FixSuggester {
       }
     }
 
-    // ── 3. Re-insert removed cells in their original positions. ──
+    // ── 3a. Delete cells the fix added that aren't in the snapshot. ──
+    // Walk back-to-front so successive deletes don't shift indexes for the
+    // ones still to come. Use _programmaticEdits so the edit listener
+    // doesn't try to cancel state we still need.
+    for (const id of extras) {
+      this._programmaticEdits.add(id);
+    }
+    try {
+      for (let i = panel.model.cells.length - 1; i >= 0; i--) {
+        const m = panel.model.cells.get(i);
+        if (m.type === 'code' && extras.includes(m.id)) {
+          panel.model.sharedModel.deleteCell(i);
+        }
+      }
+    } finally {
+      for (const id of extras) {
+        this._programmaticEdits.delete(id);
+      }
+    }
+
+    // ── 3b. Re-insert removed cells in their original positions. ──
     for (const id of missing) {
       const snapPos = snapshot.codeCellOrder.indexOf(id);
       if (snapPos < 0) {
@@ -454,6 +629,206 @@ export class FixSuggester {
   // ─────────────────────────────────────────────────────────────────────────
   // Streaming
   // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Stream /flowbook/custom-fix and return the ICustomFixResult from the
+   * terminal "done" event, or null on abort/error (in which case the entry
+   * state has already been updated).
+   */
+  private async _streamCustomFix(
+    panel: NotebookPanel,
+    cell: Cell,
+    entry: ICellEntry,
+    instruction: string
+  ): Promise<ICustomFixResult | null> {
+    const cellId = cell.model.id;
+    const settings = ServerConnection.makeSettings();
+    const url = `${settings.baseUrl}flowbook/custom-fix`;
+    const nb = panel.model?.toJSON();
+    if (!nb) {
+      this._renderDiagnosisRegion(cell, 'No notebook model.');
+      entry.state = 'failed';
+      return null;
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...this._xsrfHeader(settings)
+        },
+        body: JSON.stringify({ notebook: nb, cell_id: cellId, instruction }),
+        signal: entry.abort.signal
+      });
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') {
+        entry.state = 'ready';
+        return null;
+      }
+      entry.state = 'failed';
+      this._renderDiagnosisRegion(cell, 'Custom fix request failed.');
+      return null;
+    }
+
+    if (response.status === 503) {
+      this._renderDiagnosisRegion(
+        cell,
+        'AI fix feature is disabled on this server.'
+      );
+      entry.state = 'failed';
+      return null;
+    }
+    if (!response.ok || !response.body) {
+      this._renderDiagnosisRegion(
+        cell,
+        `Custom fix server error (${response.status}).`
+      );
+      entry.state = 'failed';
+      return null;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let diagnosisText = '';
+    let result: ICustomFixResult | null = null;
+    let streamError: string | null = null;
+
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const parsed = this._parseSSEFrame(frame);
+          if (!parsed) {
+            continue;
+          }
+          if (parsed.event === 'diagnosis') {
+            const chunk = (parsed.data as { text?: string }).text || '';
+            diagnosisText += chunk;
+            this._renderDiagnosisRegion(
+              cell,
+              diagnosisText || `Applying custom fix: "${instruction}"`
+            );
+          } else if (parsed.event === 'done') {
+            result = parsed.data as ICustomFixResult;
+          } else if (parsed.event === 'error') {
+            streamError =
+              (parsed.data as { message?: string }).message || 'unknown error';
+          }
+        }
+      }
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') {
+        entry.state = 'ready';
+        return null;
+      }
+      streamError = 'Stream interrupted.';
+    }
+
+    if (streamError) {
+      this._renderDiagnosisRegion(cell, `Custom fix failed: ${streamError}`);
+      entry.state = 'failed';
+      return null;
+    }
+    if (!result) {
+      this._renderDiagnosisRegion(cell, 'Custom fix produced no result.');
+      entry.state = 'failed';
+      return null;
+    }
+    return result;
+  }
+
+  private _parseSSEFrame(
+    frame: string
+  ): { event: string; data: unknown } | null {
+    let event = '';
+    const dataLines: string[] = [];
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('event:')) {
+        event = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trim());
+      }
+    }
+    if (!event || dataLines.length === 0) {
+      return null;
+    }
+    try {
+      return { event, data: JSON.parse(dataLines.join('\n')) };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Apply the per-cell diff returned by /custom-fix to the local notebook
+   * model: modify sources, insert new cells (with backend-generated ids),
+   * delete removed cells. All under the _programmaticEdits guard so the
+   * edit listener doesn't cancel us.
+   */
+  private _applyCustomFixDiff(
+    panel: NotebookPanel,
+    result: ICustomFixResult
+  ): void {
+    if (!panel.model) {
+      return;
+    }
+    // 1. Source updates (modified_cells).
+    this._applySourceChanges(panel, result.post_fix_sources);
+
+    // 2. Deletes.
+    if (result.cells_removed && result.cells_removed.length > 0) {
+      this._removeCells(panel, result.cells_removed);
+    }
+
+    // 3. Inserts. Use new_cell_order to compute the right insertion index
+    //    for each added cell.
+    if (
+      result.cells_added &&
+      result.cells_added.length > 0 &&
+      result.new_cell_order
+    ) {
+      const order = result.new_cell_order;
+      const added = new Set(result.cells_added);
+      for (let codePos = 0; codePos < order.length; codePos++) {
+        const id = order[codePos];
+        if (!added.has(id)) {
+          continue;
+        }
+        // The cell doesn't exist yet — insert it at the right absolute idx.
+        const targetIdx = this._absIndexOfCodeSlot(panel, codePos);
+        const source = result.post_fix_sources[id] || '';
+        this._programmaticEdits.add(id);
+        try {
+          panel.model.sharedModel.insertCell(targetIdx, {
+            cell_type: 'code',
+            id,
+            source,
+            metadata: {},
+            outputs: [],
+            execution_count: null
+          } as any);
+        } finally {
+          this._programmaticEdits.delete(id);
+        }
+      }
+    }
+
+    // 4. Final order restoration (if the LLM also reordered).
+    if (result.new_cell_order) {
+      this._restoreOrder(panel, result.new_cell_order);
+    }
+  }
 
   private async _streamSuggestion(
     panel: NotebookPanel,
@@ -583,7 +958,7 @@ export class FixSuggester {
 
   private _findRegion(
     cell: Cell,
-    region: 'diagnosis' | 'buttons' | 'undo'
+    region: 'diagnosis' | 'buttons' | 'input' | 'undo'
   ): HTMLElement | null {
     // Outputs live inside cell.node. The violation notice tags its regions
     // with data-flowbook-region.
@@ -603,14 +978,20 @@ export class FixSuggester {
   private _renderFixButtons(
     cell: Cell,
     fixes: IFixSuggestion[],
-    opts: { disabled?: boolean } = {}
+    opts: { disabled?: boolean; showOtherFix?: boolean } = {}
   ): void {
     const node = this._findRegion(cell, 'buttons');
     if (!node) {
       return;
     }
     node.innerHTML = '';
-    if (fixes.length === 0) {
+    // The "Describe your own fix" button only appears once the LLM has
+    // identified at least one proposed fix. That hides it during
+    // "Analyzing…" and once the user has applied a fix (when buttons are
+    // replaced by the Undo region). Explicit opts.showOtherFix overrides.
+    const showOther =
+      opts.showOtherFix !== undefined ? opts.showOtherFix : fixes.length > 0;
+    if (fixes.length === 0 && !showOther) {
       node.hidden = true;
       return;
     }
@@ -625,6 +1006,84 @@ export class FixSuggester {
       btn.disabled = !!opts.disabled;
       node.appendChild(btn);
     });
+    if (showOther) {
+      const other = document.createElement('button');
+      other.className = 'fb-fix-button fb-other-fix-button jp-Button';
+      other.textContent = 'Describe your own fix';
+      other.title = 'Describe a custom fix and let the AI apply it';
+      other.dataset.cellId = cell.model.id;
+      other.dataset.flowbookAction = 'open-other-fix';
+      other.disabled = !!opts.disabled;
+      node.appendChild(other);
+    }
+  }
+
+  /**
+   * Render an inline composition form (textarea + Submit/Cancel) in the
+   * input region. Called when the user clicks "Other Fix…".
+   */
+  private _renderCustomInput(cell: Cell): void {
+    const node = this._findRegion(cell, 'input');
+    if (!node) {
+      return;
+    }
+    node.innerHTML = '';
+    node.hidden = false;
+    const wrap = document.createElement('div');
+    wrap.className = 'fb-custom-input-wrap';
+
+    const ta = document.createElement('textarea');
+    ta.className = 'fb-custom-textarea';
+    ta.rows = 3;
+    ta.placeholder =
+      "Describe the fix you want. e.g. 'split this cell so the plot is its own step'.";
+    ta.dataset.cellId = cell.model.id;
+    ta.dataset.flowbookRole = 'custom-textarea';
+    wrap.appendChild(ta);
+
+    const buttonRow = document.createElement('div');
+    buttonRow.className = 'fb-custom-input-buttons';
+
+    const submit = document.createElement('button');
+    submit.className = 'fb-fix-button jp-Button';
+    submit.textContent = 'Submit';
+    submit.dataset.cellId = cell.model.id;
+    submit.dataset.flowbookAction = 'submit-other-fix';
+    buttonRow.appendChild(submit);
+
+    const cancel = document.createElement('button');
+    cancel.className = 'fb-undo-button jp-Button';
+    cancel.textContent = 'Cancel';
+    cancel.dataset.cellId = cell.model.id;
+    cancel.dataset.flowbookAction = 'cancel-other-fix';
+    buttonRow.appendChild(cancel);
+
+    wrap.appendChild(buttonRow);
+    node.appendChild(wrap);
+    // Focus the textarea so the user can type immediately.
+    setTimeout(() => ta.focus(), 0);
+  }
+
+  private _hideCustomInput(cell: Cell): void {
+    const node = this._findRegion(cell, 'input');
+    if (node) {
+      node.innerHTML = '';
+      node.hidden = true;
+    }
+  }
+
+  /**
+   * Read the current value of the textarea (if rendered) for this cell.
+   */
+  private _readCustomInstruction(cell: Cell): string {
+    const node = this._findRegion(cell, 'input');
+    if (!node) {
+      return '';
+    }
+    const ta = node.querySelector(
+      'textarea[data-flowbook-role="custom-textarea"]'
+    ) as HTMLTextAreaElement | null;
+    return ta?.value?.trim() || '';
   }
 
   private _renderUndo(cell: Cell, visible: boolean): void {
@@ -738,7 +1197,7 @@ export class FixSuggester {
    */
   private _postApplyCleanup(
     panel: NotebookPanel,
-    tool: IFixSuggestion['tool'],
+    tool: IFixSuggestion['tool'] | 'edit_cell_source' | 'custom',
     result: IApplyFixResult
   ): void {
     if (!this._highlighter || !panel.model) {

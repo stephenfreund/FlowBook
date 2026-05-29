@@ -156,7 +156,7 @@ class TestSuggestFixHandler:
             # The above is awkward — easier path: subclass with bound method.
             class FakeSuggester:
                 def __init__(self, *a, **k): pass
-                async def stream(self_, context):
+                async def stream(self_, context, notebook=None):
                     yield TextEvent(text="Diagnosis part 1. ")
                     yield TextEvent(text="Part 2.")
                     from flowbook.server.fix_models import FixPlan, FixSuggestion
@@ -189,7 +189,7 @@ class TestSuggestFixHandler:
 
         class FakeSuggester:
             def __init__(self, *a, **k): pass
-            async def stream(self_, context):
+            async def stream(self_, context, notebook=None):
                 yield ErrorEvent(message="oops")
 
         with patch("flowbook.server.handlers.FixSuggester", side_effect=FakeSuggester):

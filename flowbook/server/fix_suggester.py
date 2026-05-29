@@ -30,6 +30,18 @@ from flowbook.server.fix_models import (
     ViolationContext,
     validate_plan,
 )
+from flowbook.server.fix_tools_readonly import (
+    TOOL_SCHEMAS as READ_ONLY_TOOL_SCHEMAS,
+    ToolError as ReadOnlyToolError,
+    dispatch as dispatch_read_only_tool,
+)
+from flowbook.server.fix_tools_mutator import (
+    TOOL_SCHEMAS as MUTATOR_TOOL_SCHEMAS,
+    MutationLog,
+    MutatorError,
+    dispatch as dispatch_mutator_tool,
+    tool_names as mutator_tool_names,
+)
 
 # Default model when the FlowBookExtension.fix_model traitlet is not overridden.
 # Opus is the right default here even though it's pricier than Haiku — this is
@@ -175,6 +187,20 @@ You may ONLY propose fixes from this taxonomy. Anything else will be rejected.
 - `move_cell(cell_id, after_cell_id)` — Reorder cells. Use when a read-only
   inspection cell should be placed after the cell that mutates the variable.
 
+# Inspection tools
+
+Before answering you may call the available inspection tools to read any
+cell's source, outputs, traceback, or flowbook metadata. Use them when:
+
+- You need to see a cell that wasn't in the surrounding window I gave you.
+- You need to look at a cell's outputs (e.g. to learn the shape of a
+  DataFrame, the type of an object, the contents of an error).
+- You need precise read/write locations from a cell's last execution.
+
+Call as many tools as you need. Each call returns a JSON result you can
+read in your next response. Stop calling tools when you are confident
+about the root cause.
+
 # Response format
 
 Stream your diagnosis as plain text first — one or two short sentences
@@ -261,7 +287,55 @@ class ErrorEvent:
     message: str
 
 
-SuggesterEvent = Union[TextEvent, PlanEvent, ErrorEvent]
+@dataclass
+class CustomDoneEvent:
+    """Terminal event for a custom-fix run.
+
+    `log` is the accumulated MutationLog containing pre-fix snapshots and the
+    ordered list of mutation entries. The handler uses it to build the
+    CustomFixResponse.
+    """
+
+    summary: str
+    log: "MutationLog"
+
+
+SuggesterEvent = Union[TextEvent, PlanEvent, ErrorEvent, CustomDoneEvent]
+
+
+CUSTOM_FIX_SYSTEM_PROMPT_TEMPLATE = """You are applying a user-requested fix
+to a Jupyter notebook tracked by FlowBook. The user has explicitly approved
+this change by clicking "Other Fix…" and typing the instruction below.
+
+# Background: what FlowBook enforces
+
+{primer}
+
+# Your task
+
+Apply the user's request by calling the mutator tools. You may freely
+inspect the notebook first using the read-only tools (list_cells_summary,
+get_cell_source, get_cell_outputs, get_cell_flowbook_meta, get_cell_traceback)
+and then mutate cells with edit_cell_source, insert_cell_after, delete_cell,
+merge_cells, move_cell, and mark_diagnostic.
+
+Rules:
+- Make the smallest set of changes that satisfies the request.
+- Code cells must still parse as Python after every edit — the server
+  will reject malformed code and you should retry.
+- Use semantically meaningful variable names if you rename.
+- When you are done, stop calling tools and write a one-sentence summary
+  of what you changed. Do not write the summary until everything is done.
+- Do not run cells; do not invent tools; do not read or write files.
+
+# The user's request
+
+The user, looking at cell @{cell_alpha} (cell_id: {cell_id}), asked:
+
+> {instruction}
+
+Inspect, mutate, then write your one-sentence summary.
+"""
 
 
 class FixSuggester:
@@ -281,14 +355,25 @@ class FixSuggester:
         self._system_prompt = build_system_prompt()
 
     async def stream(
-        self, context: ViolationContext
+        self,
+        context: ViolationContext,
+        notebook: Optional[dict] = None,
     ) -> AsyncIterator[SuggesterEvent]:
         """Yield TextEvents as the model writes its diagnosis, then a PlanEvent
         (on successful parse + validate) or an ErrorEvent (on failure).
 
-        The user-facing "diagnosis" is whatever appears *before* the
-        FIX_PLAN_OPEN tag. Everything from the tag onward is structured data
-        and is buffered, not yielded as text.
+        The agentic loop runs as many turns as the model wants. On each turn:
+          - Stream text chunks (with FIX_PLAN-boundary detection, identical to
+            the single-shot path — text accumulates across turns).
+          - Accumulate any tool_use deltas.
+          - If the turn ended with tool calls, execute them, append the
+            tool_result messages, and loop.
+          - Otherwise this is the final turn — parse FIX_PLAN, validate,
+            and emit a PlanEvent.
+
+        If ``notebook`` is None, no tools are passed to the model and the loop
+        terminates after the first turn — behavior equivalent to the original
+        single-shot stream(). This keeps existing tests valid.
         """
         # Lazy import: a missing 'litellm' extra shouldn't break the rest of
         # the server extension.
@@ -304,72 +389,239 @@ class FixSuggester:
             return
 
         user_message = build_user_message(context)
+        messages: list[dict] = [
+            {"role": "system", "content": self._system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        tools_arg = READ_ONLY_TOOL_SCHEMAS if notebook is not None else None
 
-        # Buffer used to (a) hold the partial FIX_PLAN block and (b) detect
-        # the boundary where text-mode ends and JSON-mode begins.
-        full_response: list[str] = []
-        emitted_up_to = 0  # offset in joined response that we've already yielded
+        # Shared text-emission state spans every turn so FIX_PLAN can land
+        # anywhere across the streamed conversation.
+        full_response_text: list[str] = []
+        emitted_up_to = 0
         in_plan = False
 
+        # Agentic loop. No turn cap — the model decides when it's done by
+        # producing a turn with no tool calls.
+        while True:
+            turn_text: list[str] = []
+            tool_call_buffers: dict[int, _ToolCallBuffer] = {}
+            finish_reason: Optional[str] = None
+
+            try:
+                response = await acompletion(
+                    model=self._model,
+                    messages=messages,
+                    max_tokens=MAX_OUTPUT_TOKENS,
+                    stream=True,
+                    **({"tools": tools_arg} if tools_arg else {}),
+                )
+
+                async for chunk in response:
+                    fr = _extract_finish_reason(chunk)
+                    if fr:
+                        finish_reason = fr
+
+                    delta = _extract_chunk_text(chunk)
+                    if delta:
+                        turn_text.append(delta)
+                        full_response_text.append(delta)
+                        joined = "".join(full_response_text)
+                        if not in_plan:
+                            tag_idx = joined.find(FIX_PLAN_OPEN)
+                            if tag_idx == -1:
+                                safe_end = max(
+                                    emitted_up_to,
+                                    len(joined) - len(FIX_PLAN_OPEN),
+                                )
+                                if safe_end > emitted_up_to:
+                                    yield TextEvent(
+                                        text=joined[emitted_up_to:safe_end]
+                                    )
+                                    emitted_up_to = safe_end
+                            else:
+                                if tag_idx > emitted_up_to:
+                                    yield TextEvent(
+                                        text=joined[emitted_up_to:tag_idx]
+                                    )
+                                    emitted_up_to = tag_idx
+                                in_plan = True
+
+                    for tc_delta in _extract_tool_call_deltas(chunk):
+                        _accumulate_tool_call(tool_call_buffers, tc_delta)
+
+            except Exception as e:
+                yield ErrorEvent(
+                    message=f"LLM call failed: {type(e).__name__}: {e}"
+                )
+                return
+
+            # End of turn. Did the model call tools?
+            if tool_call_buffers and tools_arg is not None:
+                finalized = _finalize_tool_calls(tool_call_buffers)
+                # Append assistant message (text + tool calls) so the next
+                # turn has the full conversation history.
+                assistant_msg: dict = {
+                    "role": "assistant",
+                    "content": "".join(turn_text) or None,
+                    "tool_calls": finalized,
+                }
+                messages.append(assistant_msg)
+                # Execute each tool against the notebook; feed results back.
+                for call in finalized:
+                    result_str = _run_read_only_tool(notebook, call)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": result_str,
+                    })
+                # Loop for the next turn.
+                continue
+
+            # Terminal turn (no tool calls). Parse FIX_PLAN and emit it.
+            final_text = "".join(full_response_text)
+            try:
+                plan = _extract_and_parse_plan(final_text)
+                plan = validate_plan(plan, context)
+            except PlanValidationError as e:
+                yield ErrorEvent(message=f"Plan validation failed: {e}")
+                return
+            except Exception as e:
+                yield ErrorEvent(message=f"Could not parse plan: {e}")
+                return
+            yield PlanEvent(plan=plan)
+            return
+
+    async def custom_stream(
+        self,
+        notebook: dict,
+        cell_id: str,
+        cell_alpha: str,
+        instruction: str,
+    ) -> AsyncIterator[SuggesterEvent]:
+        """Run the custom-fix agentic loop.
+
+        Exposes BOTH read-only and mutator tools. The LLM may make any number
+        of calls; the loop terminates when the model emits a turn with no
+        tool calls. The trailing text of that final turn becomes the summary.
+
+        Mutations are applied directly to the `notebook` dict and recorded in
+        a MutationLog. The handler uses the log to build a CustomFixResponse
+        (pre/post sources, cells added/removed, etc.).
+        """
         try:
-            response = await acompletion(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": self._system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                max_tokens=MAX_OUTPUT_TOKENS,
-                stream=True,
+            from litellm import acompletion
+        except ImportError as e:
+            yield ErrorEvent(
+                message=f"litellm not installed; the AI fix feature is disabled. ({e})"
             )
+            return
 
-            async for chunk in response:
-                # litellm normalizes chunks to OpenAI-shape regardless of provider.
-                delta = _extract_chunk_text(chunk)
-                if not delta:
-                    continue
-                full_response.append(delta)
-                joined = "".join(full_response)
+        primer = load_primer()
+        system_prompt = CUSTOM_FIX_SYSTEM_PROMPT_TEMPLATE.format(
+            primer=primer,
+            cell_alpha=cell_alpha,
+            cell_id=cell_id,
+            instruction=instruction,
+        )
+        messages: list[dict] = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"Apply this fix to the notebook. The violating cell is "
+                    f"@{cell_alpha} (cell_id: {cell_id}). Start by inspecting "
+                    f"whatever you need, then mutate."
+                ),
+            },
+        ]
+        tools_arg = list(READ_ONLY_TOOL_SCHEMAS) + list(MUTATOR_TOOL_SCHEMAS)
+        mutator_names = set(mutator_tool_names())
+        log = MutationLog()
+        full_response_text: list[str] = []
+        emitted_up_to = 0
 
-                if not in_plan:
-                    tag_idx = joined.find(FIX_PLAN_OPEN)
-                    if tag_idx == -1:
-                        # Still in diagnosis text. Emit everything new
-                        # *except* the last few chars, in case the tag
-                        # is straddling a chunk boundary.
-                        safe_end = max(
-                            emitted_up_to, len(joined) - len(FIX_PLAN_OPEN)
-                        )
-                        if safe_end > emitted_up_to:
-                            new_text = joined[emitted_up_to:safe_end]
-                            if new_text:
-                                yield TextEvent(text=new_text)
-                                emitted_up_to = safe_end
+        # Agentic loop. No turn cap.
+        while True:
+            turn_text: list[str] = []
+            tool_call_buffers: dict[int, _ToolCallBuffer] = {}
+            finish_reason: Optional[str] = None
+
+            try:
+                response = await acompletion(
+                    model=self._model,
+                    messages=messages,
+                    max_tokens=MAX_OUTPUT_TOKENS,
+                    stream=True,
+                    tools=tools_arg,
+                )
+                async for chunk in response:
+                    fr = _extract_finish_reason(chunk)
+                    if fr:
+                        finish_reason = fr
+                    delta = _extract_chunk_text(chunk)
+                    if delta:
+                        turn_text.append(delta)
+                        full_response_text.append(delta)
+                        joined_new = delta
+                        if joined_new:
+                            yield TextEvent(text=joined_new)
+                            emitted_up_to += len(joined_new)
+                    for tc_delta in _extract_tool_call_deltas(chunk):
+                        _accumulate_tool_call(tool_call_buffers, tc_delta)
+            except Exception as e:
+                yield ErrorEvent(message=f"LLM call failed: {type(e).__name__}: {e}")
+                return
+
+            if tool_call_buffers:
+                finalized = _finalize_tool_calls(tool_call_buffers)
+                messages.append({
+                    "role": "assistant",
+                    "content": "".join(turn_text) or None,
+                    "tool_calls": finalized,
+                })
+                for call in finalized:
+                    name = (call.get("function") or {}).get("name") or ""
+                    if name in mutator_names:
+                        result_str = _run_mutator_tool(notebook, log, call)
                     else:
-                        # Flush any remaining diagnosis text before the tag.
-                        if tag_idx > emitted_up_to:
-                            yield TextEvent(text=joined[emitted_up_to:tag_idx])
-                            emitted_up_to = tag_idx
-                        in_plan = True
-                # When in_plan, we just keep buffering — no more TextEvents.
+                        result_str = _run_read_only_tool(notebook, call)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": result_str,
+                    })
+                continue
 
-            final_text = "".join(full_response)
-
-        except Exception as e:
-            yield ErrorEvent(message=f"LLM call failed: {type(e).__name__}: {e}")
+            # Terminal turn — model is done. Trailing text is the summary.
+            summary = "".join(full_response_text).strip()
+            yield CustomDoneEvent(summary=summary, log=log)
             return
 
-        # Parse + validate the FIX_PLAN block.
-        try:
-            plan = _extract_and_parse_plan(final_text)
-            plan = validate_plan(plan, context)
-        except PlanValidationError as e:
-            yield ErrorEvent(message=f"Plan validation failed: {e}")
-            return
-        except Exception as e:
-            yield ErrorEvent(message=f"Could not parse plan: {e}")
-            return
 
-        yield PlanEvent(plan=plan)
+def _run_mutator_tool(notebook: dict, log: "MutationLog", call: dict) -> str:
+    """Execute one mutator tool call and return a string result.
+
+    Same error-as-string handling as _run_read_only_tool so the LLM can read
+    and recover.
+    """
+    fn = call.get("function") or {}
+    name = fn.get("name") or ""
+    raw_args = fn.get("arguments") or "{}"
+    try:
+        args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+    except json.JSONDecodeError as e:
+        return f'{{"error": "Could not parse arguments JSON: {e}"}}'
+    try:
+        result = dispatch_mutator_tool(notebook, log, name, args)
+    except MutatorError as e:
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+    try:
+        return json.dumps(result)
+    except TypeError:
+        return json.dumps({"error": "tool returned non-serializable value"})
 
 
 def _extract_chunk_text(chunk) -> str:
@@ -390,6 +642,143 @@ def _extract_chunk_text(chunk) -> str:
         return content or ""
     except (AttributeError, KeyError, IndexError, TypeError):
         return ""
+
+
+def _extract_finish_reason(chunk) -> Optional[str]:
+    """Pull finish_reason out of a chunk if present."""
+    try:
+        choices = chunk.choices if hasattr(chunk, "choices") else chunk["choices"]
+        if not choices:
+            return None
+        first = choices[0]
+        fr = (
+            first.finish_reason
+            if hasattr(first, "finish_reason")
+            else first.get("finish_reason")
+        )
+        return fr or None
+    except (AttributeError, KeyError, IndexError, TypeError):
+        return None
+
+
+def _extract_tool_call_deltas(chunk) -> list[dict]:
+    """Pull the list of tool-call delta fragments from a streaming chunk.
+
+    Each fragment looks like:
+        {"index": 0, "id": "call_abc", "function": {"name": "...", "arguments": "..."}}
+    """
+    try:
+        choices = chunk.choices if hasattr(chunk, "choices") else chunk["choices"]
+        if not choices:
+            return []
+        first = choices[0]
+        delta = first.delta if hasattr(first, "delta") else first["delta"]
+        tcs = (
+            delta.tool_calls
+            if hasattr(delta, "tool_calls")
+            else delta.get("tool_calls")
+        )
+        if not tcs:
+            return []
+        out: list[dict] = []
+        for tc in tcs:
+            # Each item may be an object or a dict.
+            if hasattr(tc, "model_dump"):
+                out.append(tc.model_dump())
+            elif hasattr(tc, "__dict__"):
+                out.append({
+                    "index": getattr(tc, "index", 0),
+                    "id": getattr(tc, "id", None),
+                    "function": _to_dict(getattr(tc, "function", None)),
+                })
+            else:
+                out.append(dict(tc))
+        return out
+    except (AttributeError, KeyError, IndexError, TypeError):
+        return []
+
+
+def _to_dict(obj) -> dict:
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    return {
+        "name": getattr(obj, "name", None),
+        "arguments": getattr(obj, "arguments", ""),
+    }
+
+
+class _ToolCallBuffer:
+    """Accumulates fragments of a single streamed tool call."""
+
+    __slots__ = ("id", "name", "arguments")
+
+    def __init__(self) -> None:
+        self.id: Optional[str] = None
+        self.name: Optional[str] = None
+        self.arguments: str = ""
+
+
+def _accumulate_tool_call(buffers: dict[int, _ToolCallBuffer], delta: dict) -> None:
+    """Merge one fragment into the per-index buffer."""
+    idx = delta.get("index", 0)
+    buf = buffers.setdefault(idx, _ToolCallBuffer())
+    if delta.get("id"):
+        buf.id = delta["id"]
+    fn = delta.get("function") or {}
+    if fn.get("name"):
+        buf.name = fn["name"]
+    args_fragment = fn.get("arguments")
+    if args_fragment:
+        buf.arguments += args_fragment
+
+
+def _finalize_tool_calls(
+    buffers: dict[int, _ToolCallBuffer],
+) -> list[dict]:
+    """Convert per-index buffers into OpenAI-format tool_call message entries."""
+    out: list[dict] = []
+    for idx in sorted(buffers.keys()):
+        buf = buffers[idx]
+        out.append({
+            "id": buf.id or f"call_{idx}",
+            "type": "function",
+            "function": {
+                "name": buf.name or "",
+                "arguments": buf.arguments or "{}",
+            },
+        })
+    return out
+
+
+def _run_read_only_tool(notebook: Optional[dict], call: dict) -> str:
+    """Execute one read-only tool call and return a string result.
+
+    Errors are returned as a string (not raised) so the model can read them
+    in its next turn and recover (e.g. by retrying with a different cell_id).
+    """
+    fn = call.get("function") or {}
+    name = fn.get("name") or ""
+    raw_args = fn.get("arguments") or "{}"
+    try:
+        args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+    except json.JSONDecodeError as e:
+        return f'{{"error": "Could not parse arguments JSON: {e}"}}'
+
+    try:
+        result = dispatch_read_only_tool(notebook or {}, name, args)
+    except ReadOnlyToolError as e:
+        return json.dumps({"error": str(e)})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+    try:
+        return json.dumps(result)
+    except TypeError:
+        return json.dumps({"error": "tool returned non-serializable value"})
 
 
 def _extract_and_parse_plan(text: str) -> FixPlan:

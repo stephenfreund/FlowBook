@@ -453,11 +453,83 @@ function registerFixSuggesterCommands(
     }
   });
 
-  // Single delegated click listener — survives output re-renders.
+  app.commands.addCommand('flowbook:open-other-fix', {
+    label: 'Other AI fix (describe your own)',
+    execute: (args: any) => {
+      const cellId = String(args?.cellId || '');
+      const suggester = activationManager.fixSuggester();
+      if (!suggester || !cellId) {
+        return;
+      }
+      const cell = findCellById(tracker, cellId);
+      if (cell) {
+        suggester.openOtherFix(cell);
+      }
+    }
+  });
+
+  app.commands.addCommand('flowbook:cancel-other-fix', {
+    label: 'Cancel custom fix composition',
+    execute: (args: any) => {
+      const cellId = String(args?.cellId || '');
+      const suggester = activationManager.fixSuggester();
+      if (!suggester || !cellId) {
+        return;
+      }
+      const cell = findCellById(tracker, cellId);
+      if (cell) {
+        suggester.cancelOtherFix(cell);
+      }
+    }
+  });
+
+  app.commands.addCommand('flowbook:submit-other-fix', {
+    label: 'Submit custom AI fix',
+    execute: async (args: any) => {
+      const cellId = String(args?.cellId || '');
+      const suggester = activationManager.fixSuggester();
+      if (!suggester || !cellId) {
+        return;
+      }
+      const cell = findCellById(tracker, cellId);
+      if (cell) {
+        await suggester.submitOtherFix(cell);
+      }
+    }
+  });
+
+  // Single delegated click listener — survives output re-renders. We walk
+  // up from the click target looking for buttons we own, identified by
+  // data-flowbook-action or class. The action takes priority over fixIdx
+  // so the "Other Fix…" button (also a .fb-fix-button) routes correctly.
   document.addEventListener('click', event => {
     const target = event.target as HTMLElement | null;
     if (!target) {
       return;
+    }
+    const actionEl = target.closest(
+      '[data-flowbook-action]'
+    ) as HTMLElement | null;
+    if (actionEl && !(actionEl as HTMLButtonElement).disabled) {
+      const cellId = actionEl.dataset.cellId;
+      const action = actionEl.dataset.flowbookAction;
+      if (!cellId || !action) {
+        return;
+      }
+      switch (action) {
+        case 'open-other-fix':
+          void app.commands.execute('flowbook:open-other-fix', { cellId });
+          return;
+        case 'submit-other-fix':
+          void app.commands.execute('flowbook:submit-other-fix', { cellId });
+          return;
+        case 'cancel-other-fix':
+          void app.commands.execute('flowbook:cancel-other-fix', { cellId });
+          return;
+        case 'undo':
+          void app.commands.execute('flowbook:undo-fix', { cellId });
+          return;
+      }
     }
     const applyBtn = target.closest('.fb-fix-button') as HTMLElement | null;
     if (applyBtn && !(applyBtn as HTMLButtonElement).disabled) {
@@ -468,14 +540,6 @@ function registerFixSuggesterCommands(
           cellId,
           fixIdx: Number(fixIdx)
         });
-      }
-      return;
-    }
-    const undoBtn = target.closest('.fb-undo-button') as HTMLElement | null;
-    if (undoBtn) {
-      const cellId = undoBtn.dataset.cellId;
-      if (cellId) {
-        void app.commands.execute('flowbook:undo-fix', { cellId });
       }
     }
   });

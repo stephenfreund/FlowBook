@@ -70,7 +70,7 @@ def _scripted_suggester(diagnosis: str, fix: FixSuggestion):
         def __init__(self, *args, **kwargs):
             pass
 
-        async def stream(self, context):
+        async def stream(self, context, notebook=None):
             yield TextEvent(text=diagnosis)
             yield PlanEvent(plan=FixPlan(fixes=[fix]))
 
