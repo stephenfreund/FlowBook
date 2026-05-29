@@ -9,9 +9,13 @@ from typing import Any, Dict, List, Literal, Optional, Set, Union
 
 from pydantic import BaseModel, Field, model_validator
 
+from flowbook.tools.registry import REGISTRY as _REGISTRY
+
 
 # The exact tool names the LLM is allowed to propose. Any value outside this
-# allowlist is rejected by validate_plan() before dispatch.
+# allowlist is rejected by validate_plan() before dispatch. This stays a
+# static Literal (it annotates pydantic fields); a test asserts it matches the
+# registry, which is the runtime source of truth.
 FixToolName = Literal[
     "alpha_rename",
     "remove_inplace",
@@ -22,14 +26,10 @@ FixToolName = Literal[
 ]
 
 
-# Required arg keys per tool. Used by validate_plan() to verify shape.
+# Required arg keys per tool, derived from the unified registry so the
+# validation contract cannot drift from the handlers that apply the fix.
 TOOL_ARG_SCHEMAS: Dict[str, Set[str]] = {
-    "alpha_rename": {"cell_id", "old_name", "new_name"},
-    "remove_inplace": {"cell_id", "variable"},
-    "insert_deepcopy": {"cell_id", "variable"},
-    "mark_diagnostic": {"cell_id"},
-    "merge_cells": {"cell_ids"},
-    "move_cell": {"cell_id", "after_cell_id"},
+    t.name: set(t.parameters.get("required", [])) for t in _REGISTRY
 }
 
 

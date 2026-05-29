@@ -33,6 +33,7 @@ import {
   FlowbookClientMessage
 } from './protocol';
 import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
+import { emitAiActivity } from './aiattribution';
 
 export class ReproducibilityExecutionHookManager {
   private _tracker: INotebookTracker;
@@ -331,6 +332,30 @@ export class ReproducibilityExecutionHookManager {
               panel.context.path
             );
             this._highlighter.refreshDependencies();
+
+            // If an out-of-process agent (MCP on the shared kernel) drove this
+            // execution, announce it for an optional observer (e.g. LogBook).
+            // Frontend execution signals (NotebookActions) don't fire for ZMQ
+            // runs, so this DOM-event is the only signal an observer gets. It
+            // carries enough to record the run; dependency-free, no-op when
+            // unobserved.
+            if ((data as { actor?: string }).actor === 'ai') {
+              const codeModel =
+                cell.model.type === 'code'
+                  ? (cell.model as ICodeCellModel)
+                  : null;
+              const hasError = !!(
+                reproMeta.errors && reproMeta.errors.length > 0
+              );
+              emitAiActivity({
+                path: panel.context.path,
+                cellId: reproMeta.cell_id,
+                kind: 'execute',
+                status: hasError ? 'error' : 'ok',
+                executionCount: codeModel ? codeModel.executionCount : null,
+                outputCount: codeModel ? codeModel.outputs.length : undefined
+              });
+            }
           }
         }
 

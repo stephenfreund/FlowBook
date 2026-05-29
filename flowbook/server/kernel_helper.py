@@ -110,6 +110,7 @@ class KernelHelper:
         cell_metadata: dict = None,
         store_history: bool = True,
         flowbook_msg: dict = None,
+        actor: str = None,
     ) -> Dict[str, Any]:
         """
         Execute code in the kernel and return results.
@@ -132,6 +133,10 @@ class KernelHelper:
         meta_with_timeout['timeout'] = timeout
         if flowbook_msg is not None:
             meta_with_timeout['flowbook'] = flowbook_msg
+        if actor is not None:
+            # Tells the kernel who drove this execution; echoed on the
+            # flowbook_update so a co-located LogBook attributes it.
+            meta_with_timeout['actor'] = actor
 
         msg_id = kernel_client.execute(code, cell_id=cell_id, cell_metadata=meta_with_timeout, store_history=store_history)
 

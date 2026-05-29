@@ -20,6 +20,7 @@ import { ServerConnection } from '@jupyterlab/services';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { IReproducibilityMetadata } from './types';
 import { getCodeCellOrder } from '../cellindexutils';
+import { aiTransact } from './aiattribution';
 
 // Metadata flag identifying our dedicated AI-fix display_data output.
 const AI_FIX_NOTICE_FLAG = 'flowbook_ai_fix_notice';
@@ -1256,27 +1257,31 @@ export class FixSuggester {
     if (!panel.model) {
       return;
     }
-    for (let i = 0; i < panel.model.cells.length; i++) {
-      const cellModel = panel.model.cells.get(i);
-      if (cellModel.type !== 'code') {
-        continue;
+    // Tag the whole apply as one AI-originated transaction so LogBook
+    // attributes the resulting edits to origin: 'ai'.
+    aiTransact(panel.model.sharedModel, () => {
+      for (let i = 0; i < panel.model!.cells.length; i++) {
+        const cellModel = panel.model!.cells.get(i);
+        if (cellModel.type !== 'code') {
+          continue;
+        }
+        const newSource = sources[cellModel.id];
+        if (newSource === undefined) {
+          continue;
+        }
+        // Mark this id as a programmatic edit just long enough for the
+        // synchronous sharedModel.changed signal to fire. cancel() will
+        // see the flag and skip. The kernel-side _sendCellEdited debounce
+        // (also in _onCellContentChanged) still runs — the cell really
+        // did change, and the kernel should mark it stale accordingly.
+        this._programmaticEdits.add(cellModel.id);
+        try {
+          (cellModel as ICodeCellModel).sharedModel.setSource(newSource);
+        } finally {
+          this._programmaticEdits.delete(cellModel.id);
+        }
       }
-      const newSource = sources[cellModel.id];
-      if (newSource === undefined) {
-        continue;
-      }
-      // Mark this id as a programmatic edit just long enough for the
-      // synchronous sharedModel.changed signal to fire. cancel() will
-      // see the flag and skip. The kernel-side _sendCellEdited debounce
-      // (also in _onCellContentChanged) still runs — the cell really
-      // did change, and the kernel should mark it stale accordingly.
-      this._programmaticEdits.add(cellModel.id);
-      try {
-        (cellModel as ICodeCellModel).sharedModel.setSource(newSource);
-      } finally {
-        this._programmaticEdits.delete(cellModel.id);
-      }
-    }
+    });
   }
 
   private _removeCells(panel: NotebookPanel, cellIds: string[]): void {
@@ -1285,11 +1290,13 @@ export class FixSuggester {
     }
     // sharedModel.deleteCellRange wants indices; collect them.
     const ids = new Set(cellIds);
-    for (let i = panel.model.cells.length - 1; i >= 0; i--) {
-      if (ids.has(panel.model.cells.get(i).id)) {
-        panel.model.sharedModel.deleteCell(i);
+    aiTransact(panel.model.sharedModel, () => {
+      for (let i = panel.model!.cells.length - 1; i >= 0; i--) {
+        if (ids.has(panel.model!.cells.get(i).id)) {
+          panel.model!.sharedModel.deleteCell(i);
+        }
       }
-    }
+    });
   }
 
   /**
@@ -1314,7 +1321,9 @@ export class FixSuggester {
     // was after the destination, or dstAfterIdx (without +1, since the
     // removal already shifts subsequent cells down by one) if it was before.
     const toIndex = srcIdx < dstAfterIdx ? dstAfterIdx : dstAfterIdx + 1;
-    panel.model.sharedModel.moveCell(srcIdx, toIndex);
+    aiTransact(panel.model.sharedModel, () =>
+      panel.model!.sharedModel.moveCell(srcIdx, toIndex)
+    );
   }
 
   /**

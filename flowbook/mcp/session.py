@@ -40,6 +40,9 @@ from flowbook.scripts.fix_repro_errors import (
     get_cell_source,
     set_cell_source,
 )
+from flowbook.tools import reproducibility as _repro
+from flowbook.tools.adapters.kernel_controller import KernelController
+from flowbook.tools.controller import NoEffectError
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +789,7 @@ class NotebookSession:
             timeout,
             cell_id=cell_id,
             cell_metadata=cell_metadata,
+            actor="ai",  # MCP runs cells on behalf of an LLM
         )
 
         # Update cell in notebook
@@ -969,6 +973,17 @@ class NotebookSession:
                 store_history=False,
                 flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
             )
+
+    def _notify_structure(self) -> None:
+        """Tell the kernel the current code-cell order (after a structural edit)."""
+        new_order = self.get_cell_order()
+        KernelHelper.execute_code(
+            self.kernel_client,
+            "",
+            timeout=10,
+            store_history=False,
+            flowbook_msg={"type": "notebook_structure", "cell_order": new_order},
+        )
 
     def edit_cell(self, cell_id: str, new_source: str) -> Dict[str, Any]:
         """Update a cell's source and mark it stale if previously executed."""
@@ -1241,259 +1256,102 @@ class NotebookSession:
     # Algorithmic refactoring
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Refactoring tools — thin adapters over the unified handlers in
+    # flowbook.tools.reproducibility, run via a KernelController. The shared
+    # handlers do the algorithm + per-cell staleness/Contents-API batching;
+    # these methods only shape the MCP-facing return dicts and preserve MCP's
+    # historically tolerant handling of no-op fixes.
+    # ------------------------------------------------------------------
+
     def alpha_rename(
         self, cell_id: str, old_name: str, new_name: str
     ) -> Dict[str, Any]:
         """Rename a variable from cell_id onwards using AST-based rename."""
         self._require_loaded()
         self._refresh_from_contents_api()
-        code_order = self.get_cell_order()
-        if cell_id not in code_order:
-            raise ValueError(
-                f"Cell '{cell_id}' not found in notebook. "
-                f"Available code cells: {code_order}"
+        ctrl = KernelController(self)
+        try:
+            result = _repro.alpha_rename(
+                ctrl, cell_id=cell_id, old_name=old_name, new_name=new_name
             )
-        start_idx = code_order.index(cell_id)
-
-        modified_cells = []
-        for cid in code_order[start_idx:]:
-            _, cell = self._find_cell(cid)
-            source = get_cell_source(cell)
-            new_source, renamed = rename_variable_in_code(source, old_name, new_name)
-            if renamed:
-                set_cell_source(cell, new_source)
-                modified_cells.append(cid)
-                self._mark_cell_edited(cid)
-
-        if modified_cells:
-            self._put_contents_api()
-
+            modified = result["modified_cells"]
+        except NoEffectError:
+            modified = []  # MCP reports a no-op rather than erroring
+        ctrl.flush()
         return {
             "old_name": old_name,
             "new_name": new_name,
-            "modified_cells": modified_cells,
-            "total_modified": len(modified_cells),
+            "modified_cells": modified,
+            "total_modified": len(modified),
         }
 
     def remove_inplace(self, cell_id: str, variable: str) -> Dict[str, Any]:
         """Convert df.method(inplace=True) to df = df.method() in a cell."""
         self._require_loaded()
         self._refresh_from_contents_api()
-        _, cell = self._find_cell(cell_id)
-        source = get_cell_source(cell)
-
-        # Find actual variable name (may have been renamed)
-        actual_var = find_actual_variable_name(source, variable)
-
+        ctrl = KernelController(self)
         try:
-            tree = ast.parse(source)
-            remover = InplaceRemover(actual_var)
-            new_tree = remover.visit(tree)
-            if remover.modified:
-                new_source = ast.unparse(new_tree)
-                set_cell_source(cell, new_source)
-                self._mark_cell_edited(cell_id)
-                self._put_contents_api()
-                return {
-                    "cell_id": cell_id,
-                    "variable": actual_var,
-                    "methods_fixed": remover.method_calls_fixed,
-                    "new_source": new_source,
-                }
-        except SyntaxError:
-            pass
-
-        # Regex fallback
-        pattern = rf"(\b{re.escape(actual_var)}\.(\w+)\([^)]*),\s*inplace\s*=\s*True([^)]*)\)"
-        new_source, count = re.subn(
-            pattern,
-            rf"{actual_var} = \1\3)",
-            source,
-        )
-        if count > 0:
-            set_cell_source(cell, new_source)
-            self._mark_cell_edited(cell_id)
-            self._put_contents_api()
-            return {
-                "cell_id": cell_id,
-                "variable": actual_var,
-                "methods_fixed": ["(regex fallback)"],
-                "new_source": new_source,
-            }
-
+            result = _repro.remove_inplace(ctrl, cell_id=cell_id, variable=variable)
+        except NoEffectError as exc:
+            return {"cell_id": cell_id, "error": str(exc)}
+        ctrl.flush()
         return {
             "cell_id": cell_id,
-            "error": f"No inplace=True found for variable '{actual_var}'",
+            "variable": result["variable"],
+            "methods_fixed": result["methods_fixed"],
+            "new_source": result["new_source"],
         }
 
     def insert_deepcopy(self, cell_id: str, variable: str) -> Dict[str, Any]:
         """Insert deepcopy of variable at top of cell, rename downstream."""
         self._require_loaded()
         self._refresh_from_contents_api()
-        _, cell = self._find_cell(cell_id)
-        source = get_cell_source(cell)
-
-        actual_var = find_actual_variable_name(source, variable)
-        new_name = f"{variable}_copy"
-
-        # Insert deepcopy at top of cell
-        copy_line = f"import copy; {new_name} = copy.deepcopy({actual_var})\n"
-        new_source = prepend_to_cell_source(source, copy_line)
-
-        # Rename variable in this cell (after the copy line)
-        new_source, _ = rename_variable_in_code(new_source, actual_var, new_name)
-        # But the deepcopy line itself should keep the original name on RHS
-        # Fix: the copy line uses actual_var on RHS which is correct since
-        # rename_variable_in_code would rename it. We need to be smarter here.
-        # Actually, we want: import copy; new_name = copy.deepcopy(actual_var)
-        # then rename actual_var -> new_name in the REST of the cell.
-        # Let's do this more carefully:
-        magic_prefix, rest = split_cell_magic(source)
-        renamed_rest, _ = rename_variable_in_code(rest, actual_var, new_name)
-        new_source = magic_prefix + copy_line + renamed_rest
-
-        set_cell_source(cell, new_source)
-        self._mark_cell_edited(cell_id)
-
-        # Rename in all downstream cells
-        code_order = self.get_cell_order()
-        if cell_id not in code_order:
-            raise ValueError(
-                f"Cell '{cell_id}' not found in notebook. "
-                f"Available code cells: {code_order}"
-            )
-        start_idx = code_order.index(cell_id)
-        modified_downstream = []
-        for cid in code_order[start_idx + 1:]:
-            _, dcell = self._find_cell(cid)
-            dsource = get_cell_source(dcell)
-            dnew, renamed = rename_variable_in_code(dsource, actual_var, new_name)
-            if renamed:
-                set_cell_source(dcell, dnew)
-                modified_downstream.append(cid)
-                self._mark_cell_edited(cid)
-
-        self._put_contents_api()
-
+        ctrl = KernelController(self)
+        result = _repro.insert_deepcopy(ctrl, cell_id=cell_id, variable=variable)
+        ctrl.flush()
         return {
             "cell_id": cell_id,
-            "variable": actual_var,
-            "new_name": new_name,
-            "modified_downstream": modified_downstream,
+            "variable": result["variable"],
+            "new_name": result["new_name"],
+            "modified_downstream": result["modified_downstream"],
         }
 
     def mark_diagnostic(self, cell_id: str) -> Dict[str, Any]:
         """Add %diagnostic magic to a cell."""
         self._require_loaded()
         self._refresh_from_contents_api()
-        _, cell = self._find_cell(cell_id)
-        source = get_cell_source(cell)
-
-        if source.lstrip().startswith("%diagnostic"):
+        ctrl = KernelController(self)
+        try:
+            result = _repro.mark_diagnostic(ctrl, cell_id=cell_id)
+        except NoEffectError:
             return {"cell_id": cell_id, "already_diagnostic": True}
-
-        new_source = prepend_to_cell_source(source, "%diagnostic\n")
-        set_cell_source(cell, new_source)
-
-        self._mark_cell_edited(cell_id)
-        self._put_contents_api()
-        return {"cell_id": cell_id, "new_source_preview": new_source[:200]}
+        ctrl.flush()
+        return {"cell_id": cell_id, "new_source_preview": result["new_source"][:200]}
 
     def merge_cells(self, cell_ids: List[str]) -> Dict[str, Any]:
         """Merge multiple cells into the first one."""
         self._require_loaded()
         self._refresh_from_contents_api()
-        if len(cell_ids) < 2:
-            raise ValueError("Need at least 2 cell IDs to merge")
-
-        # Collect sources in order
-        cells_to_merge = []
-        for cid in cell_ids:
-            _, cell = self._find_cell(cid)
-            cells_to_merge.append((cid, cell))
-
-        # Merge sources
-        sources = [get_cell_source(c) for _, c in cells_to_merge]
-        merged_source = "\n\n".join(s for s in sources if s.strip())
-
-        # Update first cell
-        first_id, first_cell = cells_to_merge[0]
-        set_cell_source(first_cell, merged_source)
-
-        # Remove subsequent cells from notebook
-        ids_to_remove = set(cell_ids[1:])
-        self.notebook["cells"] = [
-            c for c in self.notebook["cells"]
-            if c.get("id") not in ids_to_remove
-        ]
-
-        self._mark_cell_edited(first_id)
-
-        # Clean up tracking for removed cells
-        for cid in ids_to_remove:
-            self.executed_cells.discard(cid)
-            self.cell_flowbook_meta.pop(cid, None)
-            self.cell_status.pop(cid, None)
-            self._stale_cells.discard(cid)
-
-        # Update kernel with new cell order
-        new_order = self.get_cell_order()
-        order_str = " ".join(new_order)
-        KernelHelper.execute_code(
-            self.kernel_client,
-            "",
-            timeout=10,
-            store_history=False,
-            flowbook_msg={"type": "notebook_structure", "cell_order": order_str.split()},
-        )
-
-        self._put_contents_api()
-
+        ctrl = KernelController(self)
+        result = _repro.merge_cells(ctrl, cell_ids=cell_ids)
+        ctrl.flush()
         return {
-            "merged_cell_id": first_id,
-            "cells_removed": list(ids_to_remove),
-            "new_source_preview": merged_source[:300],
-            "new_cell_order": new_order,
+            "merged_cell_id": result["merged_cell_id"],
+            "cells_removed": result["cells_removed"],
+            "new_source_preview": result["new_source"][:300],
+            "new_cell_order": result["new_cell_order"],
         }
 
     def move_cell(self, cell_id: str, after_cell_id: str) -> Dict[str, Any]:
         """Move a cell to after another cell in the notebook."""
         self._require_loaded()
         self._refresh_from_contents_api()
-        cells = self.notebook["cells"]
-
-        # Find and remove the cell to move
-        src_idx, cell_to_move = self._find_cell(cell_id)
-        cells.pop(src_idx)
-
-        # Find destination
-        dst_idx = None
-        for i, c in enumerate(cells):
-            if c.get("id") == after_cell_id:
-                dst_idx = i + 1
-                break
-        if dst_idx is None:
-            # Put it back and raise
-            cells.insert(src_idx, cell_to_move)
-            raise ValueError(f"Destination cell not found: {after_cell_id}")
-
-        cells.insert(dst_idx, cell_to_move)
-
-        # Update kernel with new cell order
-        new_order = self.get_cell_order()
-        order_str = " ".join(new_order)
-        KernelHelper.execute_code(
-            self.kernel_client,
-            "",
-            timeout=10,
-            store_history=False,
-            flowbook_msg={"type": "notebook_structure", "cell_order": order_str.split()},
-        )
-
-        self._put_contents_api()
-
+        ctrl = KernelController(self)
+        result = _repro.move_cell(ctrl, cell_id=cell_id, after_cell_id=after_cell_id)
+        ctrl.flush()
         return {
             "cell_id": cell_id,
             "moved_after": after_cell_id,
-            "new_cell_order": new_order,
+            "new_cell_order": result["new_cell_order"],
         }

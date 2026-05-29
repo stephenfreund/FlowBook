@@ -42,6 +42,11 @@ from flowbook.server.fix_tools_mutator import (
     dispatch as dispatch_mutator_tool,
     tool_names as mutator_tool_names,
 )
+from flowbook.tools.prompt import (
+    FIX_TAXONOMY,
+    render_function_schemas,
+    render_tool_catalog,
+)
 
 # Default model when the FlowBookExtension.fix_model traitlet is not overridden.
 # Opus is the right default here even though it's pricier than Haiku — this is
@@ -145,7 +150,12 @@ def feature_enabled(settings: Optional[dict] = None) -> bool:
 
 
 def build_system_prompt() -> str:
-    """Compose the full system prompt: primer + task instructions."""
+    """Compose the full system prompt: primer + task instructions.
+
+    The fix-tool list is rendered from the unified registry
+    (`flowbook.tools`) so it cannot drift from the tools that are actually
+    validated and applied; per-tool craft guidance comes from FIX_TAXONOMY.
+    """
     primer = load_primer()
     return f"""You are diagnosing a reproducibility violation in a Jupyter notebook
 tracked by FlowBook. You will be given the violating cell, surrounding cells,
@@ -160,32 +170,9 @@ sentence and (2) propose 1–3 concrete fixes from a fixed taxonomy.
 
 You may ONLY propose fixes from this taxonomy. Anything else will be rejected.
 
-- `alpha_rename(cell_id, old_name, new_name)` — AST-rename a variable from
-  the given cell onwards. Use when a name is reused for different purposes,
-  or when a sequential transform overwrites a name already read above.
-  Choose a *semantically meaningful* new_name (e.g. `train_combined`,
-  `lr_model`, `df_featured`) — not `df2`, `df_new`, or `model_v2`.
+{render_tool_catalog()}
 
-- `remove_inplace(cell_id, variable)` — Convert `df.method(..., inplace=True)`
-  to `df = df.method(...)`. Use for UNRECOVERABLE_MUTATION caused by pandas
-  inplace operations.
-
-- `insert_deepcopy(cell_id, variable)` — Insert `import copy; var_copy =
-  copy.deepcopy(var)` at the top of the cell and rename `var` → `var_copy`
-  in the rest of that cell and downstream. Use for UNRECOVERABLE_MUTATION on
-  objects with mutating methods like `model.fit()`.
-
-- `mark_diagnostic(cell_id)` — Prefix the cell with `%diagnostic` so it is
-  treated as a read-only inspection cell that doesn't participate in
-  reproducibility tracking. Use when a `df.info()` / `df.head()` / `print(...)`
-  cell sits above a cell that mutates the variable.
-
-- `merge_cells([cell_id_a, cell_id_b, ...])` — Combine adjacent cells into
-  one. Use when an allocation and a tightly-coupled transformation are split
-  across two cells and would be simpler as one logical unit.
-
-- `move_cell(cell_id, after_cell_id)` — Reorder cells. Use when a read-only
-  inspection cell should be placed after the cell that mutates the variable.
+{FIX_TAXONOMY}
 
 # Inspection tools
 
@@ -313,11 +300,14 @@ this change by clicking "Other Fix…" and typing the instruction below.
 
 # Your task
 
-Apply the user's request by calling the mutator tools. You may freely
-inspect the notebook first using the read-only tools (list_cells_summary,
-get_cell_source, get_cell_outputs, get_cell_flowbook_meta, get_cell_traceback)
-and then mutate cells with edit_cell_source, insert_cell_after, delete_cell,
-merge_cells, move_cell, and mark_diagnostic.
+Apply the user's request. You may freely inspect the notebook first with the
+read-only tools, then change it with the mutator tools.
+
+Read-only tools (inspect):
+{read_tools}
+
+Mutator tools (change):
+{mutator_tools}
 
 Rules:
 - Make the smallest set of changes that satisfies the request.
@@ -520,6 +510,8 @@ class FixSuggester:
         primer = load_primer()
         system_prompt = CUSTOM_FIX_SYSTEM_PROMPT_TEMPLATE.format(
             primer=primer,
+            read_tools=render_function_schemas(READ_ONLY_TOOL_SCHEMAS),
+            mutator_tools=render_function_schemas(MUTATOR_TOOL_SCHEMAS),
             cell_alpha=cell_alpha,
             cell_id=cell_id,
             instruction=instruction,

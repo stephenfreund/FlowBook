@@ -18,6 +18,7 @@ import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { KernelDetector } from '../shared/kerneldetection';
 import { IReproducibilityMetadata, IReproducibilityError } from './types';
+import { aiTransact } from './aiattribution';
 import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
 import { StalenessManager } from './stalenessmanager';
 
@@ -518,8 +519,11 @@ export function registerBridgeCommands(
       const cell = panel.content.widgets[widgetIdx];
 
       // setSource() modifies in-place — preserves cell ID and triggers
-      // FlowBook's sharedModel.changed listener for edit detection
-      cell.model.sharedModel.setSource(newSource);
+      // FlowBook's sharedModel.changed listener for edit detection. Tag the
+      // transaction so LogBook attributes this NBI-driven edit to the AI.
+      aiTransact(panel.model?.sharedModel, () =>
+        cell.model.sharedModel.setSource(newSource)
+      );
 
       return {
         label: indexToAlpha(codeCellIndex),
@@ -544,7 +548,7 @@ export function registerBridgeCommands(
         throw new Error('No shared model');
       }
 
-      sharedModel.moveCell(fromWidget, toWidget);
+      aiTransact(sharedModel, () => sharedModel.moveCell(fromWidget, toWidget));
 
       return {
         label: indexToAlpha(fromCodeIdx),

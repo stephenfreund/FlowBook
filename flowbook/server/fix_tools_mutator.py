@@ -23,12 +23,27 @@ import ast
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from flowbook.server.fix_dispatcher import (
-    _mark_diagnostic as _disp_mark_diagnostic,
-    _merge_cells as _disp_merge_cells,
-    _move_cell as _disp_move_cell,
-)
+from flowbook.server.fix_dispatcher import apply_fix as _apply_fix
 from flowbook.scripts.fix_repro_errors import get_cell_source, set_cell_source
+from flowbook.tools import get as _get_tool
+
+
+def _registry_fn_schema(name: str) -> Dict[str, Any]:
+    """OpenAI/litellm function schema for a tool, sourced from the registry.
+
+    Used for the mutator tools that overlap the unified registry
+    (merge_cells, move_cell, mark_diagnostic) so their LLM-facing arg schema
+    can't drift from the handler that applies them via apply_fix().
+    """
+    tool = _get_tool(name)
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        },
+    }
 from flowbook.util.cell_ids import next_insertion_id
 
 
@@ -210,7 +225,7 @@ def merge_cells(
     for cid in cell_ids:
         _require_existing_cell(notebook, cid)
         log.snapshot_if_first(_require_existing_cell(notebook, cid))
-    response = _disp_merge_cells(notebook, cell_ids)
+    response = _apply_fix(notebook, "merge_cells", {"cell_ids": cell_ids})
     log.record(
         MutationEntry(
             tool="merge_cells",
@@ -236,7 +251,9 @@ def move_cell(
     built-in move_cell fix tool."""
     _require_existing_cell(notebook, cell_id)
     _require_existing_cell(notebook, after_cell_id)
-    response = _disp_move_cell(notebook, cell_id, after_cell_id)
+    response = _apply_fix(
+        notebook, "move_cell", {"cell_id": cell_id, "after_cell_id": after_cell_id}
+    )
     log.record(
         MutationEntry(
             tool="move_cell",
@@ -254,7 +271,7 @@ def mark_diagnostic(
     cell = _require_existing_cell(notebook, cell_id)
     log.snapshot_if_first(cell)
     try:
-        response = _disp_mark_diagnostic(notebook, cell_id)
+        response = _apply_fix(notebook, "mark_diagnostic", {"cell_id": cell_id})
     except ValueError as e:
         # Already diagnostic, or other dispatch error.
         raise MutatorError(str(e))
@@ -327,57 +344,12 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "merge_cells",
-            "description": (
-                "Combine multiple code cells into the first one. The "
-                "second+ cells are removed."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "cell_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "minItems": 2,
-                    },
-                },
-                "required": ["cell_ids"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "move_cell",
-            "description": "Reorder a cell to sit immediately after another.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "cell_id": {"type": "string"},
-                    "after_cell_id": {"type": "string"},
-                },
-                "required": ["cell_id", "after_cell_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mark_diagnostic",
-            "description": (
-                "Prepend %diagnostic to a code cell so FlowBook treats it as "
-                "a read-only inspection cell."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {"cell_id": {"type": "string"}},
-                "required": ["cell_id"],
-            },
-        },
-    },
+    # merge_cells, move_cell, mark_diagnostic overlap the unified registry and
+    # are applied via apply_fix(); their schemas are generated from the registry
+    # so they cannot drift from the handlers.
+    _registry_fn_schema("merge_cells"),
+    _registry_fn_schema("move_cell"),
+    _registry_fn_schema("mark_diagnostic"),
 ]
 
 
