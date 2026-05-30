@@ -15,6 +15,13 @@ import {
   IWriteLoc
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
+import { requestAPI } from '../handler';
+
+/** Shape of GET /flowbook/fix-status. */
+interface IFixStatus {
+  enabled: boolean;
+  model: string;
+}
 
 interface IReproducibilityMetadataDisplayProps {
   metadata: IReproducibilityMetadata | null;
@@ -459,6 +466,28 @@ const ReproducibilityMetadataDisplay: React.FC<
 };
 
 /**
+ * Fix-it model header — shows the configured AI-fix model when a provider
+ * key is present, or "disabled" otherwise. Rendered above the Last Execution
+ * status bit. `null` status means we haven't fetched yet, so render nothing.
+ */
+const FixModelHeader: React.FC<{ status: IFixStatus | null }> = ({ status }) => {
+  if (!status) {
+    return null;
+  }
+  return (
+    <div className="flowbook-fixmodel-header">
+      <div className="flowbook-fixmodel-label">AI Model</div>
+      <div
+        className="flowbook-fixmodel-value"
+        title={status.enabled ? status.model : 'No provider API key configured'}
+      >
+        {status.enabled ? status.model : 'disabled'}
+      </div>
+    </div>
+  );
+};
+
+/**
  * Status header bar — shows the latest kernel status line (icon + text).
  * Includes a small title and the cell reference (@A notation).
  */
@@ -503,6 +532,7 @@ export class ReproducibilityMetadataPanel extends Widget {
   private _statusIcon: string | null = null;
   private _statusText: string | null = null;
   private _statusCellRef: string | null = null;
+  private _fixStatus: IFixStatus | null = null;
   private _root: Root | null = null;
 
   constructor() {
@@ -513,6 +543,21 @@ export class ReproducibilityMetadataPanel extends Widget {
     this.title.closable = true;
     this.title.caption = 'FlowBook cell metadata';
     this.render();
+    void this.fetchFixStatus();
+  }
+
+  /**
+   * Query the server for AI-fix availability + configured model, then
+   * re-render the fix-it header. Best-effort: failures leave it hidden.
+   */
+  private async fetchFixStatus(): Promise<void> {
+    try {
+      this._fixStatus = await requestAPI<IFixStatus>('fix-status');
+      this.render();
+    } catch (e) {
+      // Leave the header hidden if the probe fails.
+      this._fixStatus = null;
+    }
   }
 
   private render(): void {
@@ -521,6 +566,7 @@ export class ReproducibilityMetadataPanel extends Widget {
     }
     this._root.render(
       <>
+        <FixModelHeader status={this._fixStatus} />
         <StatusHeader
           icon={this._statusIcon}
           text={this._statusText}

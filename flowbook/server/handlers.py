@@ -290,6 +290,12 @@ class SuggestFixHandler(APIHandler):
     async def post(self):
         # Quick guard: feature disabled if no provider key is configured.
         if not feature_enabled(self.settings):
+            log(
+                "AI fix suggestion requested but disabled: no provider API key "
+                f"found for fix_model '{get_model(self.settings)}'. Set "
+                "ANTHROPIC_API_KEY (or the env var for your configured "
+                "fix_model provider) in the Jupyter server's environment."
+            )
             self.set_status(503)
             self.set_header("Content-Type", "application/json")
             self.finish(json.dumps({
@@ -446,6 +452,12 @@ class CustomFixHandler(APIHandler):
     @tornado.web.authenticated
     async def post(self):
         if not feature_enabled(self.settings):
+            log(
+                "Custom AI fix requested but disabled: no provider API key "
+                f"found for fix_model '{get_model(self.settings)}'. Set "
+                "ANTHROPIC_API_KEY (or the env var for your configured "
+                "fix_model provider) in the Jupyter server's environment."
+            )
             self.set_status(503)
             self.set_header("Content-Type", "application/json")
             self.finish(json.dumps({
@@ -527,6 +539,26 @@ class CustomFixHandler(APIHandler):
         payload = f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
         self.write(payload)
         self.flush()
+
+
+class FixStatusHandler(APIHandler):
+    """GET /flowbook/fix-status — report AI-fix availability + configured model.
+
+    Response body: {"enabled": bool, "model": str}
+
+    The frontend uses this to render the fix-it status line in the FlowBook
+    panel without making (and failing) an actual suggestion request. ``model``
+    is always the resolved fix_model identifier; ``enabled`` reflects whether
+    that provider's API key is present in the server environment.
+    """
+
+    @tornado.web.authenticated
+    def get(self):
+        self.set_header("Content-Type", "application/json")
+        self.finish(json.dumps({
+            "enabled": feature_enabled(self.settings),
+            "model": get_model(self.settings),
+        }))
 
 
 def _index_to_alpha(idx: int) -> str:
@@ -645,6 +677,11 @@ def setup_handlers(web_app):
         (
             url_path_join(base_url, "flowbook", "custom-fix"),
             CustomFixHandler,
+            {},
+        ),
+        (
+            url_path_join(base_url, "flowbook", "fix-status"),
+            FixStatusHandler,
             {},
         ),
     ]

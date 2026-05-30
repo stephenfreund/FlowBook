@@ -12,7 +12,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from flowbook.server.fix_suggester import ErrorEvent, PlanEvent, TextEvent
-from flowbook.server.handlers import ApplyFixHandler, SuggestFixHandler
+from flowbook.server.handlers import (
+    ApplyFixHandler,
+    FixStatusHandler,
+    SuggestFixHandler,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -272,3 +276,44 @@ class TestApplyFixHandler:
         )
         _aio(handler.post())
         assert handler._status == 400
+
+
+# ---------------------------------------------------------------------------
+# FixStatusHandler
+# ---------------------------------------------------------------------------
+
+_ALL_KEYS = (
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+    "AZURE_API_KEY", "COHERE_API_KEY", "MISTRAL_API_KEY", "GROQ_API_KEY",
+)
+
+
+class TestFixStatusHandler:
+    def test_disabled_when_no_key(self, monkeypatch):
+        for var in _ALL_KEYS:
+            monkeypatch.delenv(var, raising=False)
+        handler = _make_handler(
+            FixStatusHandler,
+            settings={"flowbook": {"fix_model": "anthropic/claude-opus-4-7"}},
+            body={},
+        )
+        handler.get()  # synchronous
+        assert handler._status == 200
+        body = json.loads(handler._finished[-1])
+        assert body["enabled"] is False
+        assert body["model"] == "anthropic/claude-opus-4-7"
+
+    def test_enabled_with_key(self, monkeypatch):
+        for var in _ALL_KEYS:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        handler = _make_handler(
+            FixStatusHandler,
+            settings={"flowbook": {"fix_model": "anthropic/claude-opus-4-7"}},
+            body={},
+        )
+        handler.get()
+        assert handler._status == 200
+        body = json.loads(handler._finished[-1])
+        assert body["enabled"] is True
+        assert body["model"] == "anthropic/claude-opus-4-7"

@@ -24,6 +24,29 @@
   flex-shrink: 0;
 }
 
+.flowbook-fixmodel-header {
+  padding: 6px 10px;
+  background-color: var(--jp-layout-color2);
+  border-bottom: 1px solid var(--jp-border-color1);
+  flex-shrink: 0;
+}
+
+.flowbook-fixmodel-label {
+  font-size: 0.7em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #888;
+  margin-bottom: 2px;
+}
+
+.flowbook-fixmodel-value {
+  font-size: 0.85em;
+  font-family: var(--jp-code-font-family, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .flowbook-metadata-content {
   padding: 16px;
   font-family: var(--jp-ui-font-family);
