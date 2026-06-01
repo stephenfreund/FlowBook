@@ -13,6 +13,10 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 from flowbook.mcp.server import (
     _cell_label,
+    _format_cell_output,
+    _OUTPUT_HEAD_CHARS,
+    _OUTPUT_TAIL_CHARS,
+    get_cell_output,
     read_cell,
     edit_cell_source,
     get_flowbook_metadata,
@@ -542,6 +546,85 @@ class TestRunCellPutsContentsApi:
             NotebookSession.run_cell(session, "abc1")
 
         session._put_contents_api.assert_called_once()
+
+
+# ==================================================================
+# _format_cell_output (middle-elision + truncation banner)
+# ==================================================================
+
+
+class TestFormatCellOutput:
+    def test_empty_returns_blank(self):
+        assert _format_cell_output("", "abc1") == ""
+        assert _format_cell_output("   \n  ", "abc1") == ""
+
+    def test_small_output_returned_whole(self):
+        out = _format_cell_output("col_a  col_b\n1  2\n", "abc1")
+        assert out == "\nOutput:\ncol_a  col_b\n1  2"
+        assert "TRUNCATED" not in out
+
+    def test_at_threshold_not_truncated(self):
+        text = "x" * (_OUTPUT_HEAD_CHARS + _OUTPUT_TAIL_CHARS)
+        out = _format_cell_output(text, "abc1")
+        assert "TRUNCATED" not in out
+        assert out.endswith(text)
+
+    def test_large_output_keeps_head_and_tail(self):
+        head = "H" * _OUTPUT_HEAD_CHARS
+        tail = "T" * _OUTPUT_TAIL_CHARS
+        middle = "M" * 1000
+        out = _format_cell_output(head + middle + tail, "abc1")
+        # banner is obvious and quantifies what was dropped
+        assert "OUTPUT TRUNCATED" in out
+        total = _OUTPUT_HEAD_CHARS + 1000 + _OUTPUT_TAIL_CHARS
+        assert f"1000 of {total} chars hidden" in out
+        # head and tail survive; the middle is gone
+        assert head in out and tail in out
+        assert middle not in out
+
+    def test_large_output_has_paging_hint(self):
+        out = _format_cell_output("z" * 5000, "abc1")
+        assert f"get_cell_output(cell_id='abc1', offset={_OUTPUT_HEAD_CHARS})" in out
+
+
+# ==================================================================
+# get_cell_output (paging)
+# ==================================================================
+
+
+class TestGetCellOutput:
+    def _session_with_output(self, text):
+        session = _make_mock_session(cell_order=["abc1"])
+        session.get_cell.return_value = {"cell_id": "abc1", "outputs_text": text}
+        return session
+
+    def test_no_output(self):
+        session = self._session_with_output("")
+        result = get_cell_output("abc1", _make_ctx(session))
+        assert "no output" in result
+
+    def test_first_page_reports_total_and_next_offset(self):
+        session = self._session_with_output("D" * 10000)
+        result = get_cell_output("abc1", _make_ctx(session), offset=0, limit=4000)
+        assert "chars 0–4000 of 10000" in result
+        assert "offset=4000" in result  # more available
+        assert result.count("D") == 4000
+
+    def test_last_page_has_no_more_hint(self):
+        session = self._session_with_output("D" * 10000)
+        result = get_cell_output("abc1", _make_ctx(session), offset=8000, limit=4000)
+        assert "chars 8000–10000 of 10000" in result
+        assert "offset=" not in result  # nothing left to page
+
+    def test_offset_past_end(self):
+        session = self._session_with_output("D" * 100)
+        result = get_cell_output("abc1", _make_ctx(session), offset=500)
+        assert "past end" in result
+
+    def test_negative_offset_clamped(self):
+        session = self._session_with_output("D" * 100)
+        result = get_cell_output("abc1", _make_ctx(session), offset=-5, limit=50)
+        assert "chars 0–50 of 100" in result
 
 
 # ==================================================================

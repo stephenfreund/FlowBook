@@ -288,6 +288,43 @@ class TestRefactoringToolsOverKernelController:
             session.close()
 
 
+class TestLargeOutputTruncationAndPaging:
+    """run_cell shows a head+tail preview with an obvious banner for big output;
+    get_cell_output pages the full untruncated text. Exercises the real kernel."""
+
+    def _ctx(self, session):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            request_context=SimpleNamespace(lifespan_context={"session": session})
+        )
+
+    def test_run_cell_truncates_then_get_cell_output_pages(self, simple_notebook):
+        from flowbook.mcp import server
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            ctx = self._ctx(session)
+            session.edit_cell(ids[2], "print('Z' * 5000)")
+
+            run_out = server.run_cell(ids[2], ctx)
+            # Obvious banner + paging hint; only head+tail of the Z's shown.
+            assert "OUTPUT TRUNCATED" in run_out
+            assert "get_cell_output" in run_out
+            assert run_out.count("Z") == server._OUTPUT_HEAD_CHARS + server._OUTPUT_TAIL_CHARS
+
+            # Page 1 of 2: reports the true total and points at the next offset.
+            page1 = server.get_cell_output(ids[2], ctx, offset=0, limit=3000)
+            assert "of 5000" in page1 and "offset=3000" in page1
+            assert page1.count("Z") == 3000
+
+            # Page 2: the remainder, with no further pages.
+            page2 = server.get_cell_output(ids[2], ctx, offset=3000, limit=3000)
+            assert page2.count("Z") == 2000
+            assert "offset=" not in page2
+        finally:
+            session.close()
+
+
 class TestActorAttribution:
     """The kernel echoes the driving actor on flowbook metadata (Phase 4).
 
