@@ -199,3 +199,32 @@ def move_cell(
         "after_cell_id": after_cell_id,
         "new_cell_order": ctrl.cell_order(),
     }
+
+
+def insert_cell(
+    ctrl: NotebookController,
+    *,
+    after_cell_id: str,
+    source: str,
+    cell_type: str = "code",
+) -> Dict[str, Any]:
+    """Insert a new ``cell_type`` cell directly after ``after_cell_id``."""
+    if cell_type not in ("code", "markdown"):
+        raise ToolError(f"cell_type must be 'code' or 'markdown', got '{cell_type}'")
+    new_id = ctrl.insert_after(after_cell_id, source, cell_type)
+    return {
+        "new_cell_id": new_id,
+        "after_cell_id": after_cell_id,
+        "cell_type": cell_type,
+        "new_cell_order": ctrl.cell_order(),
+    }
+
+
+def delete_cell(ctrl: NotebookController, *, cell_id: str) -> Dict[str, Any]:
+    """Remove ``cell_id`` from the notebook."""
+    ctrl.delete_cell(cell_id)  # raises CellNotFoundError if absent
+    return {
+        "cell_id": cell_id,
+        "removed": True,
+        "new_cell_order": ctrl.cell_order(),
+    }

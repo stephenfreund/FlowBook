@@ -246,6 +246,36 @@ class TestRefactoringToolsOverKernelController:
         finally:
             session.close()
 
+    def test_insert_and_delete_code_cell(self, simple_notebook):
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]  # [x=1, y=x+1, print(y)]
+        try:
+            inserted = session.insert_cell(ids[0], "w = 99", cell_type="code")
+            new_id = inserted["new_cell_id"]
+            assert inserted["cell_type"] == "code"
+            assert inserted["new_cell_order"] == [ids[0], new_id, ids[1], ids[2]]
+
+            deleted = session.delete_cell(new_id)
+            assert deleted["removed"] is True
+            assert deleted["new_cell_order"] == ids
+        finally:
+            session.close()
+
+    def test_insert_markdown_cell_not_in_code_order(self, simple_notebook):
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            inserted = session.insert_cell(
+                ids[0], "## Decisions log", cell_type="markdown"
+            )
+            # markdown cells are absent from the code-cell order...
+            assert inserted["new_cell_order"] == ids
+            # ...but present in the underlying notebook, right after ids[0].
+            order = [c.get("id") for c in session.notebook["cells"]]
+            assert order.index(inserted["new_cell_id"]) == order.index(ids[0]) + 1
+        finally:
+            session.close()
+
     def test_mark_diagnostic_idempotent(self, simple_notebook):
         session = NotebookSession()
         ids = session.load(simple_notebook)["cell_ids"]

@@ -16,6 +16,7 @@ from typing import Any, Dict, List
 
 from flowbook.scripts.fix_repro_errors import get_cell_source, set_cell_source
 from flowbook.tools.controller import CellNotFoundError
+from flowbook.util.cell_ids import next_insertion_id
 
 
 class DictController:
@@ -69,6 +70,31 @@ class DictController:
         self.post_sources.pop(cell_id, None)
         self.removed.append(cell_id)
         self.order_changed = True
+
+    def insert_after(
+        self, after_cell_id: str, source: str, cell_type: str = "code"
+    ) -> str:
+        cells = self.notebook.get("cells", [])
+        idx = next(
+            (i for i, c in enumerate(cells) if c.get("id") == after_cell_id), None
+        )
+        if idx is None:
+            raise CellNotFoundError(f"after_cell_id '{after_cell_id}' not found")
+        existing = {c.get("id", "") for c in cells}
+        new_id = next_insertion_id(after_cell_id, existing)
+        new_cell = {
+            "cell_type": cell_type,
+            "id": new_id,
+            "source": source,
+            "metadata": {},
+        }
+        if cell_type == "code":
+            new_cell["outputs"] = []
+            new_cell["execution_count"] = None
+        cells.insert(idx + 1, new_cell)
+        self.post_sources[new_id] = source
+        self.order_changed = True
+        return new_id
 
     def move_after(self, cell_id: str, after_cell_id: str) -> None:
         cells = self.notebook.get("cells", [])

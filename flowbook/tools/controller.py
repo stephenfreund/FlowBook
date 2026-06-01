@@ -65,6 +65,16 @@ class NotebookController(Protocol):
     def delete_cell(self, cell_id: str) -> None:
         """Remove a cell. Raises ToolError if absent."""
 
+    def insert_after(
+        self, after_cell_id: str, source: str, cell_type: str = "code"
+    ) -> str:
+        """Insert a new ``cell_type`` ('code'|'markdown') cell directly after
+        ``after_cell_id`` and return the new cell's id.
+
+        ``after_cell_id`` may name any cell (code or markdown). Raises ToolError
+        if it is absent.
+        """
+
     def move_after(self, cell_id: str, after_cell_id: str) -> None:
         """Move ``cell_id`` to directly after ``after_cell_id``.
 

@@ -819,6 +819,49 @@ def move_cell(cell_id: str, after_cell_id: str, ctx: Context) -> str:
     )
 
 
+@mcp.tool()
+@_logged_tool
+def insert_cell(
+    after_cell_id: str, source: str, ctx: Context, cell_type: str = "code"
+) -> str:
+    """Insert a new cell directly after another cell.
+
+    Use this to build up a notebook from a conversation: add a code cell with
+    analysis or a markdown cell with narration/conclusions. The new cell is
+    inserted unrun; execute it with run_cell when ready.
+
+    Args:
+        after_cell_id: Cell ID to insert after (may be a code OR markdown cell).
+        source: Source content for the new cell.
+        cell_type: 'code' (default) or 'markdown'.
+    """
+    session = _get_session(ctx)
+    result = session.insert_cell(after_cell_id, source, cell_type=cell_type)
+    after_label = _cell_label(session, after_cell_id)
+    return (
+        f"Inserted {result['cell_type']} cell [{result['new_cell_id']}] "
+        f"after {after_label} [{result['after_cell_id']}]"
+    )
+
+
+@mcp.tool()
+@_logged_tool
+def delete_cell(cell_id: str, ctx: Context) -> str:
+    """Delete a cell from the notebook.
+
+    Use this to remove an exploratory cell that turned out to be a dead end
+    (typically after restoring a checkpoint). Distil the rejected approach into
+    a markdown note rather than leaving dead code behind.
+
+    Args:
+        cell_id: The cell ID to remove.
+    """
+    session = _get_session(ctx)
+    label = _cell_label(session, cell_id)
+    result = session.delete_cell(cell_id)
+    return f"Deleted cell {label} [{result['cell_id']}]"
+
+
 # =====================================================================
 # Log tool (21)
 # =====================================================================

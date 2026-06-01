@@ -7,7 +7,7 @@ load-bearing guarantee for all three surfaces.
 
 import pytest
 
-from flowbook.tools import get
+from flowbook.tools import get, reproducibility
 from flowbook.tools.adapters.dict_controller import DictController
 from flowbook.tools.controller import ToolError
 
@@ -134,6 +134,64 @@ class TestMoveCell:
         with pytest.raises(ToolError, match="not found"):
             _run(nb, "move_cell", {"cell_id": "b000", "after_cell_id": "zzzz"})
         assert [c["id"] for c in nb["cells"]] == ["a000", "b000"]
+
+
+class TestInsertCell:
+    def test_inserts_code_cell(self):
+        nb = _nb(_code("a000", "x = 1"), _code("b000", "y = 2"))
+        ctrl = DictController(nb)
+        result = reproducibility.insert_cell(
+            ctrl, after_cell_id="a000", source="z = x + 1", cell_type="code"
+        )
+        new_id = result["new_cell_id"]
+        ids = [c["id"] for c in nb["cells"]]
+        assert ids == ["a000", new_id, "b000"]
+        new_cell = nb["cells"][1]
+        assert new_cell["cell_type"] == "code"
+        assert _src(new_cell) == "z = x + 1"
+        assert new_cell["outputs"] == [] and new_cell["execution_count"] is None
+        assert ctrl.order_changed
+
+    def test_inserts_markdown_cell(self):
+        nb = _nb({"cell_type": "markdown", "id": "m000", "source": "# Title", "metadata": {}})
+        ctrl = DictController(nb)
+        result = reproducibility.insert_cell(
+            ctrl, after_cell_id="m000", source="## Decisions log", cell_type="markdown"
+        )
+        new_cell = nb["cells"][1]
+        assert result["cell_type"] == "markdown"
+        assert new_cell["cell_type"] == "markdown"
+        assert "outputs" not in new_cell  # markdown cells have no outputs
+
+    def test_bad_cell_type_raises(self):
+        nb = _nb(_code("a000", "x = 1"))
+        with pytest.raises(ToolError, match="code.*markdown"):
+            reproducibility.insert_cell(
+                DictController(nb), after_cell_id="a000", source="x", cell_type="raw"
+            )
+
+    def test_missing_after_raises(self):
+        nb = _nb(_code("a000", "x = 1"))
+        with pytest.raises(ToolError, match="not found"):
+            reproducibility.insert_cell(
+                DictController(nb), after_cell_id="zzzz", source="x"
+            )
+
+
+class TestDeleteCell:
+    def test_removes_cell(self):
+        nb = _nb(_code("a000", "x = 1"), _code("b000", "y = 2"))
+        ctrl = DictController(nb)
+        result = reproducibility.delete_cell(ctrl, cell_id="b000")
+        assert result["removed"] is True
+        assert [c["id"] for c in nb["cells"]] == ["a000"]
+        assert result["new_cell_order"] == ["a000"]
+        assert ctrl.removed == ["b000"]
+
+    def test_missing_raises(self):
+        nb = _nb(_code("a000", "x = 1"))
+        with pytest.raises(ToolError, match="not found"):
+            reproducibility.delete_cell(DictController(nb), cell_id="zzzz")
 
 
 class TestRegistry:

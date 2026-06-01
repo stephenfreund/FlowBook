@@ -291,7 +291,7 @@ Commands are auto-discovered by the registry from `flowbook/server/commands/`.
 
 ### MCP Server (`flowbook/mcp/`)
 
-Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Claude Code). 23 tools organized into core, algorithmic refactoring, and logging categories.
+Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Claude Code). 25 tools organized into core, algorithmic refactoring, and logging categories.
 
 - `server.py` - FastMCP server with `@_logged_tool` decorator for automatic event logging
 - `session.py` - `NotebookSession` manages a single (notebook, kernel) pair with reproducibility metadata
@@ -308,6 +308,7 @@ Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Cla
 | `get_status`                                          | Reproducibility status (violations, staleness)             |
 | `get_next_actionable_cell`                            | First cell needing attention                               |
 | `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                    |
+| `insert_cell` / `delete_cell`                         | Add a code/markdown cell after another; remove a cell      |
 | `checkpoint` / `restore`                              | Save/restore notebook state                                |
 | `save_notebook`                                       | Write to disk                                              |
 
@@ -438,7 +439,7 @@ This normalization happens transparently at entry points:
 
 **MCP Server**:
 
-- Server entry point: `flowbook/mcp/server.py` (23 tools)
+- Server entry point: `flowbook/mcp/server.py` (25 tools)
 - Session management: `flowbook/mcp/session.py`
 - Jupyter server discovery: `flowbook/mcp/jupyter_config.py`
 - Kernel discovery: `flowbook/kernel_discovery.py`

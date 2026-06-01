@@ -1355,3 +1355,25 @@ class NotebookSession:
             "moved_after": after_cell_id,
             "new_cell_order": result["new_cell_order"],
         }
+
+    def insert_cell(
+        self, after_cell_id: str, source: str, cell_type: str = "code"
+    ) -> Dict[str, Any]:
+        """Insert a new code/markdown cell after another cell."""
+        self._require_loaded()
+        self._refresh_from_contents_api()
+        ctrl = KernelController(self)
+        result = _repro.insert_cell(
+            ctrl, after_cell_id=after_cell_id, source=source, cell_type=cell_type
+        )
+        ctrl.flush()
+        return result
+
+    def delete_cell(self, cell_id: str) -> Dict[str, Any]:
+        """Remove a cell from the notebook."""
+        self._require_loaded()
+        self._refresh_from_contents_api()
+        ctrl = KernelController(self)
+        result = _repro.delete_cell(ctrl, cell_id=cell_id)
+        ctrl.flush()
+        return result
