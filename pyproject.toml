@@ -7,6 +7,7 @@ allow-direct-references = true
 
 [project]
 name = "flowbook-python"
+version = "0.1.1"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
