@@ -219,6 +219,25 @@ S →^{Edit(i, c)} S'
 S · (T, R, W) ⇒^{Edit(i, c)} S' · (T[i := STALE], R, W)
 ```
 
+**Meaningful-edit refinement (implementation).** The instrumentation classifies an
+edit by comparing the new source against a per-cell **AST fingerprint** Fᵢ captured
+on the last [Inst-Run]. Let `fp(c)` be the canonical AST of the edited source `c`
+(IPython input transform → `ast.parse` → `ast.dump`; `⊥` if unparseable):
+
+```
+            = T[i := STALE]   if fp(c) ≠ Fᵢ  or  fp(c) = ⊥   (meaningful / invalid)
+T'          = clear CODE_CHANGED at i        if fp(c) = Fᵢ   (cosmetic / reverted)
+```
+
+`fp` discards comments, blank lines, indentation, and source positions, so
+whitespace- and comment-only edits leave `T` unchanged. When `fp(c) = Fᵢ` the edit
+is semantically a no-op (or a round-trip back to the last-run source), so the
+`CODE_CHANGED` reason is cleared — the cell returns to CLEAN unless it is stale for
+another reason (e.g. `FORWARD_STALE`). Fingerprints are stored in
+`NotebookState.fingerprints`; `fp` is computed by `FlowbookKernel._source_fingerprint`
+(it owns source/transformer access); the clear path is
+`ReproducibilityEnforcer.clear_code_changed` → `NotebookState.clear_pre_execution_reasons`.
+
 **[Inst-Run]**
 
 ```
@@ -401,13 +420,13 @@ Validity predicates are implemented inline within `check()`, following the [Inst
 
 The `check()` method implements [Inst-Run] exactly, with formal citations in comments:
 
-| main.tex          | FORMAL_DEVELOPMENT.md | Code                                                          |
-| ----------------- | --------------------- | ------------------------------------------------------------- |
-| Inst-Edit         | §3.4 [Inst-Edit]      | `mark_cell_edited()` in `kernel/reproducibility_enforcer.py`  |
-| Inst-Run          | §3.4 [Inst-Run]       | `check()` in `kernel/reproducibility_enforcer.py`             |
-| Inst-Insert       | §3.5 [Inst-Insert]    | `set_cell_order()` detecting new cells                        |
-| Inst-Delete       | §3.5 [Inst-Delete]    | `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
-| Inst-Move-Down/Up | §3.5 [Inst-Move-*]    | `_handle_moves()` in `kernel/reproducibility_enforcer.py`     |
+| main.tex          | FORMAL_DEVELOPMENT.md | Code                                                                                                                                                                                                                                                     |
+| ----------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Inst-Edit         | §3.4 [Inst-Edit]      | `mark_cell_edited()` (meaningful) / `clear_code_changed()` (cosmetic/revert) in `kernel/reproducibility_enforcer.py`; classified by `_process_cell_edit()` + `_source_fingerprint()` in `kernel/flowbook_kernel.py` against `NotebookState.fingerprints` |
+| Inst-Run          | §3.4 [Inst-Run]       | `check()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                                                        |
+| Inst-Insert       | §3.5 [Inst-Insert]    | `set_cell_order()` detecting new cells                                                                                                                                                                                                                   |
+| Inst-Delete       | §3.5 [Inst-Delete]    | `_handle_deletions()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                                            |
+| Inst-Move-Down/Up | §3.5 [Inst-Move-*]    | `_handle_moves()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                                                |
 
 **[Inst-Run] Implementation Structure:**
 

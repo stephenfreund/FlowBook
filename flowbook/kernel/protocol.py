@@ -113,11 +113,17 @@ def build_notebook_structure_message(cell_order: List[str]) -> dict:
     }
 
 
-def build_cell_edited_message(cell_id: str) -> dict:
-    """Build a cell_edited message."""
+def build_cell_edited_message(cell_id: str, source: Optional[str] = None) -> dict:
+    """Build a cell_edited message.
+
+    The optional source is the cell's current text; the kernel uses it to decide
+    whether the edit is meaningful (AST changed) or cosmetic (whitespace/comments).
+    Omitting it preserves the legacy always-mark-stale behavior.
+    """
     return {
         "type": CELL_EDITED,
         "cell_id": cell_id,
+        "source": source,
     }
 
 

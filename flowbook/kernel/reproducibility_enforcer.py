@@ -2054,6 +2054,31 @@ class ReproducibilityEnforcer:
 
             return self.get_stale_cells()
 
+    def set_fingerprint(self, cell_id: str, fingerprint: Optional[str]) -> None:
+        """Store the AST fingerprint of the source last executed for a cell.
+
+        Used by [Inst-Edit] to distinguish meaningful edits from cosmetic ones
+        (whitespace/comments). Computed by the kernel, which owns source access.
+        """
+        self._notebook_state.set_fingerprint(cell_id, fingerprint)
+
+    def get_fingerprint(self, cell_id: str) -> Optional[str]:
+        """Return the AST fingerprint of the source last executed for a cell."""
+        return self._notebook_state.get_fingerprint(cell_id)
+
+    def clear_code_changed(self, cell_id: str) -> List[str]:
+        """Clear the CODE_CHANGED reason for a cell (symmetric [Inst-Edit]).
+
+        Called when an edit brings a cell's source back to an AST identical to
+        what it last executed. Removes the CODE_CHANGED/NEVER_EXECUTED pre-execution
+        reasons, marking the cell clean only if no other staleness reason remains
+        (e.g. FORWARD_STALE from an upstream cell is preserved).
+
+        Returns current stale cells list.
+        """
+        self._notebook_state.clear_pre_execution_reasons(cell_id)
+        return self.get_stale_cells()
+
     def get_execution_records_size(self) -> int:
         """
         Calculate approximate memory size of execution records in bytes.
