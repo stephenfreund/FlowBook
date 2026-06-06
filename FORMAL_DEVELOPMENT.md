@@ -420,13 +420,13 @@ Validity predicates are implemented inline within `check()`, following the [Inst
 
 The `check()` method implements [Inst-Run] exactly, with formal citations in comments:
 
-| main.tex          | FORMAL_DEVELOPMENT.md | Code                                                          |
-| ----------------- | --------------------- | ------------------------------------------------------------- |
+| main.tex          | FORMAL_DEVELOPMENT.md | Code                                                                                                                                                                                                                                                     |
+| ----------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Inst-Edit         | §3.4 [Inst-Edit]      | `mark_cell_edited()` (meaningful) / `clear_code_changed()` (cosmetic/revert) in `kernel/reproducibility_enforcer.py`; classified by `_process_cell_edit()` + `_source_fingerprint()` in `kernel/flowbook_kernel.py` against `NotebookState.fingerprints` |
-| Inst-Run          | §3.4 [Inst-Run]       | `check()` in `kernel/reproducibility_enforcer.py`             |
-| Inst-Insert       | §3.5 [Inst-Insert]    | `set_cell_order()` detecting new cells                        |
-| Inst-Delete       | §3.5 [Inst-Delete]    | `_handle_deletions()` in `kernel/reproducibility_enforcer.py` |
-| Inst-Move-Down/Up | §3.5 [Inst-Move-*]    | `_handle_moves()` in `kernel/reproducibility_enforcer.py`     |
+| Inst-Run          | §3.4 [Inst-Run]       | `check()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                                                        |
+| Inst-Insert       | §3.5 [Inst-Insert]    | `set_cell_order()` detecting new cells                                                                                                                                                                                                                   |
+| Inst-Delete       | §3.5 [Inst-Delete]    | `_handle_deletions()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                                            |
+| Inst-Move-Down/Up | §3.5 [Inst-Move-*]    | `_handle_moves()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                                                |
 
 **[Inst-Run] Implementation Structure:**
 
