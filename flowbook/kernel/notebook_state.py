@@ -75,6 +75,11 @@ class NotebookState:
     execution_seq: Dict[str, int] = field(default_factory=dict)  # cell_id -> seq number
     structural_reads_values: Dict[str, Dict[str, Dict[str, str]]] = field(default_factory=dict)  # cell_id -> var -> attr -> value
     typed_changes: Dict[str, List["Change"]] = field(default_factory=dict)  # cell_id -> changes
+    # Canonical AST fingerprint of the source last executed for each cell.
+    # Used by [Inst-Edit] to decide whether a source edit is meaningful: an edit
+    # whose fingerprint matches this baseline is treated as cosmetic (clears
+    # CODE_CHANGED) rather than marking the cell stale.
+    fingerprints: Dict[str, str] = field(default_factory=dict)  # cell_id -> AST fingerprint
 
     # =========================================================================
     # Status Access
@@ -105,6 +110,21 @@ class NotebookState:
     def get_reasons(self, cell_id: str) -> Set[Reason]:
         """Get all reasons for a cell's staleness."""
         return self.get_status(cell_id).reasons
+
+    def set_fingerprint(self, cell_id: str, fingerprint: Optional[str]) -> None:
+        """Store the AST fingerprint of the source last executed for a cell.
+
+        Passing None (unparseable source) clears any stored fingerprint, which
+        makes subsequent edits fall through to the conservative mark-stale path.
+        """
+        if fingerprint is None:
+            self.fingerprints.pop(cell_id, None)
+        else:
+            self.fingerprints[cell_id] = fingerprint
+
+    def get_fingerprint(self, cell_id: str) -> Optional[str]:
+        """Return the AST fingerprint of the source last executed for a cell."""
+        return self.fingerprints.get(cell_id)
 
     def clear_pre_execution_reasons(self, cell_id: str) -> None:
         """Clear pre-execution reasons (NEVER_EXECUTED, CODE_CHANGED) from a cell.
@@ -487,6 +507,7 @@ class NotebookState:
         self.execution_seq.pop(deleted_cell, None)
         self.structural_reads_values.pop(deleted_cell, None)
         self.typed_changes.pop(deleted_cell, None)
+        self.fingerprints.pop(deleted_cell, None)
         if deleted_cell in self.cell_order:
             self.cell_order.remove(deleted_cell)
 
@@ -594,6 +615,7 @@ class NotebookState:
         self.execution_seq.clear()
         self.structural_reads_values.clear()
         self.typed_changes.clear()
+        self.fingerprints.clear()
 
     # =========================================================================
     # Debug/Inspection

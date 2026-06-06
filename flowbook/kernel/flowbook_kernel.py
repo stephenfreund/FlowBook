@@ -342,6 +342,7 @@ See checkpoint.py sections 13-14 for implementation details.
 ================================================================================
 """
 
+import ast
 import os
 import re
 import time
@@ -525,7 +526,7 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         if msg_type == "notebook_structure":
             self._process_structure_update(msg["cell_order"])
         elif msg_type == "cell_edited":
-            self._process_cell_edit(msg["cell_id"])
+            self._process_cell_edit(msg["cell_id"], msg.get("source"))
         elif msg_type == "continue_after_violation":
             self._set_continue_after_violation(msg["enabled"])
         elif msg_type == "sync":
@@ -579,26 +580,94 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 log(f"[structure_update] ERROR: {e}")
                 log(f"[structure_update] Traceback: {traceback.format_exc()}")
 
-    def _process_cell_edit(self, cell_id: str) -> None:
-        """Process a cell_edited command. Marks the cell stale ([Inst-Edit])."""
+    def _source_fingerprint(self, source: str) -> Optional[str]:
+        """Canonical AST fingerprint of a cell's source ([Inst-Edit]).
+
+        Runs the source through IPython's input transformer so magics/`!`
+        commands become valid Python, then returns ``ast.dump`` of the parsed
+        tree. This is insensitive to comments, blank lines, indentation, and
+        source positions, so cosmetic edits produce an identical fingerprint.
+        Returns None when the (possibly partial) source cannot be parsed.
+        """
+        try:
+            transformed = self.shell.input_transformer_manager.transform_cell(source)
+            return ast.dump(ast.parse(transformed))
+        except (SyntaxError, ValueError):
+            return None
+
+    def _send_cell_edit_metadata(self, cell_id: str, stale_cells: list, icon: str, text: str) -> None:
+        """Emit metadata + status reflecting a cell's post-edit staleness."""
+        staleness_reasons = self._enforcer._notebook_state.get_all_reasons()
+        metadata = ReproducibilityMetadata(
+            cell_id=cell_id,
+            execution_seq=self._enforcer.seq_counter,
+            read_locs=[],
+            write_locs=[],
+            changed_locs=[],
+            stale_cells=stale_cells,
+            cell_order=self._enforcer.cell_order,
+            staleness_reasons=staleness_reasons,
+        )
+        self._send_flowbook_message(build_metadata_message(metadata))
+        self._send_flowbook_message(build_status_message(icon, text, cell_id=cell_id))
+
+    def _process_cell_edit(self, cell_id: str, source: Optional[str] = None) -> None:
+        """Process a cell_edited command ([Inst-Edit]).
+
+        Compares the edited source's AST fingerprint against the one captured when
+        the cell last executed. If they match, the edit is cosmetic
+        (whitespace/comments) or a round-trip back to the last-run source, so
+        CODE_CHANGED is cleared (the cell returns to clean unless stale for another
+        reason). Otherwise — including unparseable or sourceless edits — the cell is
+        marked stale, preserving the conservative legacy behavior.
+        """
         if not cell_id:
             return
-        stale_cells = self._enforcer.mark_cell_edited(cell_id)
-        if cell_id in stale_cells:
-            staleness_reasons = self._enforcer._notebook_state.get_all_reasons()
-            metadata = ReproducibilityMetadata(
-                cell_id=cell_id,
-                execution_seq=self._enforcer.seq_counter,
-                read_locs=[],
-                write_locs=[],
-                changed_locs=[],
-                stale_cells=stale_cells,
-                cell_order=self._enforcer.cell_order,
-                staleness_reasons=staleness_reasons,
+
+        new_fp = self._source_fingerprint(source) if source is not None else None
+        old_fp = self._enforcer.get_fingerprint(cell_id)
+
+        def _fp_repr(fp: Optional[str]) -> str:
+            if fp is None:
+                return "None"
+            return f"<{len(fp)}c #{hash(fp) & 0xffffffff:08x}>"
+
+        log(
+            f"[Inst-Edit] cell={cell_id} source_present={source is not None} "
+            f"new_fp={_fp_repr(new_fp)} old_fp={_fp_repr(old_fp)} "
+            f"match={new_fp is not None and old_fp is not None and new_fp == old_fp}"
+        )
+
+        if new_fp is not None and old_fp is not None and new_fp == old_fp:
+            # Source semantically matches the last execution — not stale due to code.
+            stale_before = set(self._enforcer.get_stale_cells())
+            stale_cells = self._enforcer.clear_code_changed(cell_id)
+            changed = set(stale_cells) != stale_before
+            log(
+                f"[Inst-Edit] cell={cell_id} DECISION=cosmetic/revert -> clear_code_changed "
+                f"(status_changed={changed}, stale_now={stale_cells})"
             )
-            self._send_flowbook_message(build_metadata_message(metadata))
-            self._send_flowbook_message(
-                build_status_message("✏️", "Cell edited, marked stale", cell_id=cell_id)
+            if changed:
+                self._send_cell_edit_metadata(
+                    cell_id, stale_cells, "↩️", "Edit reverted to last run, cleared"
+                )
+            return
+
+        if source is not None and new_fp is None:
+            reason = "unparseable"
+        elif source is None:
+            reason = "no-source"
+        else:
+            reason = "ast-differs"
+        stale_cells = self._enforcer.mark_cell_edited(cell_id)
+        marked = cell_id in stale_cells
+        log(
+            f"[Inst-Edit] cell={cell_id} DECISION=meaningful ({reason}) -> mark_cell_edited "
+            f"(marked_stale={marked}, stale_now={stale_cells})"
+        )
+        if marked:
+            self._send_cell_edit_metadata(
+                cell_id, stale_cells, "✏️", "Cell edited, marked stale"
             )
 
     def _set_continue_after_violation(self, enabled: bool) -> None:
@@ -1263,6 +1332,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 if cell_meta and "cell_order" in cell_meta:
                     self._enforcer.set_cell_order(cell_meta["cell_order"])
 
+                # Capture the raw source (before magic stripping) for the [Inst-Edit]
+                # fingerprint, so it matches the source the frontend/MCP send on edit.
+                original_code = code
+
                 # Check for notebook_structure magic (parse and remove if present)
                 code = self._process_structure_magic(code)
 
@@ -1469,6 +1542,17 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                             if err.detail and err.detail.get("truncation_details"):
                                 error(f"Reproducibility truncation: {err.message}")
                                 self._send_truncation_details(err.detail["truncation_details"])
+
+                    # [Inst-Edit] baseline: record the fingerprint of the source that
+                    # just committed, so future edits can be classified as meaningful
+                    # or cosmetic. Reached only on the committed path (rejected
+                    # executions return above).
+                    _baseline_fp = self._source_fingerprint(original_code)
+                    self._enforcer.set_fingerprint(self._cell_id, _baseline_fp)
+                    log(
+                        f"[Inst-Edit] cell={self._cell_id} stored baseline fingerprint "
+                        f"{'None' if _baseline_fp is None else f'<{len(_baseline_fp)}c #{hash(_baseline_fp) & 0xffffffff:08x}>'}"
+                    )
 
                     # Display results (no longer skip on violations since we don't reject)
                     skip_display = False
