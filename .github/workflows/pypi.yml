@@ -1,9 +1,28 @@
 name: Publish to PyPI
 
+# One-shot release: bump the version (in package.json — the dynamic version
+# source per `[tool.hatch.version] source = "nodejs"`), build the labextension
+# + sdist/wheel, publish to PyPI, then commit the bump, tag it, and cut a
+# GitHub Release. Run it from the Actions tab → Publish to PyPI → Run workflow.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump level (ignored if "version" is set)'
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: 'Explicit version e.g. 0.2.0 (overrides bump level)'
+        type: string
+        default: ''
+
+permissions:
+  contents: write # push the bump commit + tag and create the GitHub Release
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   build-and-publish:
@@ -11,8 +30,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -23,6 +45,30 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Bump version in package.json
+        id: bump
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+          else
+            npm version "${{ inputs.bump }}" --no-git-tag-version
+          fi
+          NEW=$(node -p "require('./package.json').version")
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$NEW"
+
+      - name: Fail if tag already exists
+        run: |
+          if git rev-parse "v${{ steps.bump.outputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ steps.bump.outputs.version }} already exists"
+            exit 1
+          fi
 
       - name: Install build dependencies
         run: |
@@ -43,9 +89,27 @@ jobs:
           python -m pip install twine
           python -m twine check dist/*
 
+      # Publish first: if this fails, main is left untouched (no stray bump).
       - name: Publish package
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           user: __token__
           password: ${{ secrets.PYPI_API_TOKEN }}
 
+      - name: Commit bump, tag, and push
+        run: |
+          git add package.json
+          [ -f package-lock.json ] && git add package-lock.json || true
+          git commit -m "Release v${{ steps.bump.outputs.version }}"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin main
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.bump.outputs.version }}" \
+            dist/*.whl dist/*.tar.gz \
+            --title "v${{ steps.bump.outputs.version }}" \
+            --generate-notes
