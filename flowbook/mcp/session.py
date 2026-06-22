@@ -962,17 +962,41 @@ class NotebookSession:
     # Editing
     # ------------------------------------------------------------------
 
-    def _mark_cell_edited(self, cell_id: str) -> None:
-        """Mark a cell as stale and notify the kernel, if previously executed."""
-        if cell_id in self.executed_cells:
+    def _mark_cell_edited(self, cell_id: str, new_source: Optional[str] = None) -> None:
+        """Notify the kernel of a source edit ([Inst-Edit]), if previously executed.
+
+        When ``new_source`` is provided, the kernel classifies the edit using the
+        cell's AST fingerprint (meaningful vs cosmetic) and we reconcile
+        ``_stale_cells`` from its authoritative reply. When omitted (e.g. the
+        refactoring tools, which always change semantics), the kernel marks the
+        cell stale and we mirror that optimistically — preserving legacy behavior.
+        """
+        if cell_id not in self.executed_cells:
+            return
+
+        result = KernelHelper.execute_code(
+            self.kernel_client,
+            "",
+            timeout=10,
+            store_history=False,
+            flowbook_msg={"type": "cell_edited", "cell_id": cell_id, "source": new_source},
+        )
+
+        if new_source is None:
+            # Legacy/refactor path: the edit is always meaningful.
             self._stale_cells.add(cell_id)
-            KernelHelper.execute_code(
-                self.kernel_client,
-                "",
-                timeout=10,
-                store_history=False,
-                flowbook_msg={"type": "cell_edited", "cell_id": cell_id},
-            )
+            return
+
+        # Source provided: the kernel decides. It emits a metadata message only
+        # when the edit changes the cell's status; reconcile from that reply.
+        for fb in result.get("flowbook_messages", []):
+            if isinstance(fb, dict) and fb.get("type") == "metadata":
+                if cell_id in set(fb.get("stale_cells", [])):
+                    self._stale_cells.add(cell_id)
+                else:
+                    self._stale_cells.discard(cell_id)
+                return
+        # No metadata reply → cosmetic no-op; leave staleness unchanged.
 
     def _notify_structure(self) -> None:
         """Tell the kernel the current code-cell order (after a structural edit)."""
@@ -993,7 +1017,7 @@ class NotebookSession:
         old_source = get_cell_source(cell)
         set_cell_source(cell, new_source)
 
-        self._mark_cell_edited(cell_id)
+        self._mark_cell_edited(cell_id, new_source)
         self._put_contents_api()
 
         return {
