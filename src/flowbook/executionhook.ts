@@ -205,7 +205,7 @@ export class ReproducibilityExecutionHookManager {
     model.sharedModel.changed.connect((_sender: any, change: CellChange) => {
       // Only react to source text edits, not output/metadata/executionCount changes
       if (change.sourceChange) {
-        this._onCellContentChanged(cellId);
+        this._onCellContentChanged(cellId, model);
       }
     });
   }
@@ -213,7 +213,7 @@ export class ReproducibilityExecutionHookManager {
   /**
    * [EDIT transition (§2.3)] Handle cell content change with debouncing.
    */
-  private _onCellContentChanged(cellId: string): void {
+  private _onCellContentChanged(cellId: string, model: ICodeCellModel): void {
     // Cancel any in-flight AI fix suggestion — the violation it was
     // diagnosing is about to be invalidated by this edit.
     if (this._fixSuggester) {
@@ -233,7 +233,7 @@ export class ReproducibilityExecutionHookManager {
 
     // Set new timer (1s debounce)
     const timer = setTimeout(() => {
-      this._sendCellEdited(cellId);
+      this._sendCellEdited(cellId, model);
       this._editTimers.delete(cellId);
     }, 1000);
 
@@ -242,9 +242,12 @@ export class ReproducibilityExecutionHookManager {
 
   /**
    * [EDIT transition (§2.3)] Send cell_edited command to kernel via comm.
+   * Includes the cell's current source so the kernel can tell a meaningful
+   * edit (AST changed) from a cosmetic one (whitespace/comments).
    */
-  private _sendCellEdited(cellId: string): void {
-    this.sendCommand({ type: 'cell_edited', cell_id: cellId });
+  private _sendCellEdited(cellId: string, model: ICodeCellModel): void {
+    const source = model.sharedModel.getSource();
+    this.sendCommand({ type: 'cell_edited', cell_id: cellId, source });
   }
 
   /**

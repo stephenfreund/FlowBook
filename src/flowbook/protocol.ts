@@ -74,6 +74,9 @@ export interface INotebookStructureMessage {
 export interface ICellEditedMessage {
   type: 'cell_edited';
   cell_id: string;
+  // Current cell source; lets the kernel classify the edit as meaningful
+  // (AST changed) or cosmetic (whitespace/comments). Optional for back-compat.
+  source?: string;
 }
 
 export interface IContinueAfterViolationMessage {
