@@ -4477,6 +4477,28 @@ def process_v4(
                         mem_cdf_fig.savefig("mem.pdf", dpi=150)
                         plt.close(mem_cdf_fig)
 
+                    # Absolute per-cell memory overhead page (Checkpoint - Base, MB)
+                    if cdf_data and cdf_data.memory_abs_mb:
+                        mem_abs_fig, mem_abs_ax = plt.subplots(figsize=(6, 5))
+                        render_cdf_panel(
+                            mem_abs_ax,
+                            cdf_data,
+                            "memory_abs",
+                            color_override="orange",
+                            title_override="Per-Cell Memory Overhead\nDistribution",
+                            large_fonts=args.large_fonts,
+                            show_sample_size=show_sample_size,
+                        )
+                        mem_abs_ax.set_xlim(0.01, 10000)
+                        mem_abs_ax.set_xticks([0.01, 1, 100, 10000])
+                        mem_abs_ax.set_xticklabels(
+                            ["0.01", "1", "100", "10000"]
+                        )
+                        mem_abs_fig.tight_layout()
+                        pdf.savefig(mem_abs_fig, dpi=150)
+                        mem_abs_fig.savefig("mem-abs.pdf", dpi=150)
+                        plt.close(mem_abs_fig)
+
             print(f"Combined plots saved to: {combined_path}")
 
     # Print summary table

@@ -655,8 +655,10 @@ def render_time_cdf(
     xlabel: str = "Analysis Time (ms, log scale)",
     large_fonts: bool = True,
     show_sample_size: bool = True,
+    value_fmt=None,
+    tick_fmt=None,
 ) -> None:
-    """Render a time-based CDF panel with log scale x-axis.
+    """Render a value-based CDF panel with log scale x-axis.
 
     This is a shared helper for both Analysis Time Distribution and
     Rerun Overhead Time Distribution CDFs.
@@ -825,16 +827,18 @@ def render_time_cdf(
         arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3),
     )
 
-    # Format function for milliseconds
+    # Format function for milliseconds (default when no formatter supplied)
     def fmt_ms(v):
         if v >= 1:
             return f"{v:.1f}ms"
         else:
             return f"{v:.2f}ms"
 
+    fmt = value_fmt or fmt_ms
+
     # Legend box with values (right-aligned, monospace)
-    formatted = {p: fmt_ms(stats[p]) for p in ["P50", "P95", "P99"]}
-    formatted["Max"] = fmt_ms(max_val)
+    formatted = {p: fmt(stats[p]) for p in ["P50", "P95", "P99"]}
+    formatted["Max"] = fmt(max_val)
     max_val_len = max(len(v) for v in formatted.values())
     legend_lines = [
         f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]
@@ -876,8 +880,11 @@ def render_time_cdf(
     ax.set_ylim(0, 1.05)
     ax.tick_params(axis="both", labelsize=tick_size)
     ax.set_xscale("log")
-    # Format with commas (e.g., "1,000" instead of "1000")
-    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
+    if tick_fmt is not None:
+        ax.xaxis.set_major_formatter(FuncFormatter(tick_fmt))
+    else:
+        # Format with commas (e.g., "1,000" instead of "1000")
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
 
 
 def render_overhead_pct_cdf(
@@ -1089,6 +1096,46 @@ def render_cdf_panel(
             xlabel="Analysis Time (ms, log scale)",
             large_fonts=large_fonts,
             show_sample_size=show_sample_size,
+        )
+        return
+
+    # Absolute per-cell memory overhead (Checkpoint - Base, MB) on a log axis,
+    # reusing the log-scale time helper with MB formatters.
+    if metric == "memory_abs":
+        def fmt_mb(v):
+            if v >= 100:
+                return f"{v:,.0f} MB"
+            elif v >= 10:
+                return f"{v:.1f} MB"
+            elif v >= 1:
+                return f"{v:.2f} MB"
+            elif v > 0:
+                return f"{v:.3f} MB"
+            else:
+                return "0 MB"
+
+        def tick_mb(x, _pos):
+            if x >= 1:
+                return f"{x:,.0f}"
+            elif x >= 0.1:
+                return f"{x:.1f}"
+            elif x >= 0.01:
+                return f"{x:.2f}"
+            else:
+                return f"{x:.3f}"
+
+        render_time_cdf(
+            ax,
+            sorted_vals=list(data.memory_abs_sorted),
+            percentiles=list(data.memory_abs_percentiles),
+            n=len(data.memory_abs_mb),
+            color=color_override or "darkorange",
+            title=title_override or "Memory Overhead Distribution",
+            xlabel="Checkpoint - Base Memory Size (MB, log scale)",
+            large_fonts=large_fonts,
+            show_sample_size=show_sample_size,
+            value_fmt=fmt_mb,
+            tick_fmt=tick_mb,
         )
         return
 

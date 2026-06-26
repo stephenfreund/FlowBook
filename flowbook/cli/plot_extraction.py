@@ -531,6 +531,7 @@ def extract_cdf_data(
     """
     time_overhead_ms = []
     memory_ratios = []
+    memory_abs_mb = []
     peak_memory_pct = []
 
     for i, result in enumerate(results):
@@ -576,6 +577,12 @@ def extract_cdf_data(
                 if prev_base >= MIN_BASE_MB:
                     delta = max(0, p3.overhead_mb[j] - p3.overhead_mb[j - 1])
                     memory_ratios.append(delta / prev_base)
+                    # Absolute per-cell memory overhead (Checkpoint - Base, in MB).
+                    # overhead_mb is flowbook.total - baseline.total, i.e. the
+                    # checkpoint memory present at this cell. Gated by the same
+                    # condition as memory_ratios so both CDFs share one cell
+                    # population (identical N).
+                    memory_abs_mb.append(p3.overhead_mb[j])
 
             peak_memory_pct.append(p3.peak_overhead_pct)
 
@@ -662,6 +669,7 @@ def extract_cdf_data(
 
     time_sorted, time_pct = build_cdf(time_overhead_ms)
     memory_sorted, memory_pct = build_cdf(memory_ratios)
+    memory_abs_sorted, memory_abs_pct = build_cdf(memory_abs_mb)
     peak_sorted, peak_pct = build_cdf(peak_memory_pct)
     gpu_memory_sorted, gpu_memory_pct = build_cdf(gpu_memory_ratios)
     gpu_peak_sorted, gpu_peak_pct = build_cdf(gpu_peak_memory_pct)
@@ -692,6 +700,9 @@ def extract_cdf_data(
         base_runtime_ms=base_runtime_ms,
         base_runtime_sorted=base_runtime_sorted,
         base_runtime_percentiles=base_runtime_pct,
+        memory_abs_mb=memory_abs_mb,
+        memory_abs_sorted=memory_abs_sorted,
+        memory_abs_percentiles=memory_abs_pct,
     )
 
 
