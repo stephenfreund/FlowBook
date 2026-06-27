@@ -655,6 +655,7 @@ def render_time_cdf(
     xlabel: str = "Analysis Time (ms, log scale)",
     large_fonts: bool = True,
     show_sample_size: bool = True,
+    font_scale: float = 1.0,
 ) -> None:
     """Render a time-based CDF panel with log scale x-axis.
 
@@ -670,6 +671,7 @@ def render_time_cdf(
         title: Plot title
         xlabel: X-axis label
         large_fonts: Use larger fonts
+        font_scale: Multiplier applied to all font sizes
     """
     from matplotlib.ticker import FuncFormatter
 
@@ -680,11 +682,11 @@ def render_time_cdf(
     # annotation_size = 18 if large_fonts else 12
     # legend_fontsize = 14 if large_fonts else 10
 
-    label_size = 18 if large_fonts else 14
-    title_size = 20 if large_fonts else 16
-    tick_size = 14 if large_fonts else 12
-    annotation_size = 14 if large_fonts else 12
-    legend_fontsize = 12 if large_fonts else 10
+    label_size = (18 if large_fonts else 14) * font_scale
+    title_size = (20 if large_fonts else 16) * font_scale
+    tick_size = (14 if large_fonts else 12) * font_scale
+    annotation_size = (14 if large_fonts else 12) * font_scale
+    legend_fontsize = (12 if large_fonts else 10) * font_scale
 
     if not sorted_vals:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
@@ -1048,6 +1050,7 @@ def render_cdf_panel(
     color_override: str = None,
     title_override: str = None,
     show_sample_size: bool = True,
+    font_scale: float = 1.0,
 ) -> None:
     """Render a single CDF panel for aggregate data.
 
@@ -1061,6 +1064,7 @@ def render_cdf_panel(
         color_override: Optional color to use instead of the default for this metric
         title_override: Optional title to use instead of the default for this metric
         show_sample_size: Whether to show N= annotation
+        font_scale: Multiplier applied to all font sizes
     """
     from matplotlib.ticker import FuncFormatter
 
@@ -1071,11 +1075,11 @@ def render_cdf_panel(
     # annotation_size = 18 if large_fonts else 12
     # legend_fontsize = 14 if large_fonts else 10
 
-    label_size = 18 if large_fonts else 14
-    title_size = 20 if large_fonts else 16
-    tick_size = 14 if large_fonts else 12
-    annotation_size = 14 if large_fonts else 12
-    legend_fontsize = 12 if large_fonts else 10
+    label_size = (18 if large_fonts else 14) * font_scale
+    title_size = (20 if large_fonts else 16) * font_scale
+    tick_size = (14 if large_fonts else 12) * font_scale
+    annotation_size = (14 if large_fonts else 12) * font_scale
+    legend_fontsize = (12 if large_fonts else 10) * font_scale
 
     # For time metric, use the shared helper
     if metric == "time":
@@ -1089,6 +1093,7 @@ def render_cdf_panel(
             xlabel="Analysis Time (ms, log scale)",
             large_fonts=large_fonts,
             show_sample_size=show_sample_size,
+            font_scale=font_scale,
         )
         return
 
