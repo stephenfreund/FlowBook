@@ -54,6 +54,9 @@ FlowBook can ask an LLM to diagnose any violation it raises and propose
 one-click fixes. The suggestion appears directly inside the violation notice
 underneath the cell, with buttons that apply the fix automatically.
 
+To use this feature set the `ANTHROPIC_API_KEY` environment variable to a
+valid Anthropic API key.
+
 ### What you see
 
 When a cell fails a reproducibility predicate (e.g.
@@ -108,13 +111,8 @@ added, and re-inserts any cells the AI deleted.
 
 ### Setup
 
-Install with the `ai` extra to pull in `litellm`:
-
-```bash
-pip install 'flowbook-python[ai]'
-```
-
-Then set an API key for whichever provider you want to use:
+`litellm` is included with FlowBook, so no extra install is needed. Just set
+an API key for whichever provider you want to use:
 
 ```bash
 # Anthropic (default — Claude Opus)
@@ -249,7 +247,7 @@ mismatch, etc.).
 If violations show up correctly but you don't see a diagnosis or fix
 buttons underneath them:
 
-- Confirm `flowbook-python[ai]` is installed (`pip show litellm`).
+- Confirm `litellm` is installed (`pip show litellm`).
 - Confirm the provider API key for your configured `fix_model` is set in
   the same shell where you launched `jupyter lab` (run `echo
 $ANTHROPIC_API_KEY` etc.).

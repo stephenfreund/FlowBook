@@ -365,7 +365,7 @@ class FixSuggester:
         terminates after the first turn — behavior equivalent to the original
         single-shot stream(). This keeps existing tests valid.
         """
-        # Lazy import: a missing 'litellm' extra shouldn't break the rest of
+        # Lazy import: a missing 'litellm' install shouldn't break the rest of
         # the server extension.
         try:
             from litellm import acompletion
@@ -373,7 +373,7 @@ class FixSuggester:
             yield ErrorEvent(
                 message=(
                     f"litellm not installed; the AI fix feature is disabled. "
-                    f"Install with `pip install 'flowbook-python[ai]'`. ({e})"
+                    f"Install with `pip install litellm`. ({e})"
                 )
             )
             return

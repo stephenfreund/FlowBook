@@ -50,6 +50,7 @@ dependencies = [
     "attrs",
     "psutil",
     "pyyaml",
+    "litellm>=1.50",
 
     "nbconvert",
 
@@ -62,7 +63,6 @@ dynamic = ["version", "description", "authors", "urls", "keywords"]
 [project.optional-dependencies]
 mcp = ["jupyter-collaboration", "mcp"]
 nbi = ["notebook-intelligence"]
-ai = ["litellm>=1.50"]
 
 [project.scripts]
 flowbook = "flowbook.cli.cli:cli_main"
