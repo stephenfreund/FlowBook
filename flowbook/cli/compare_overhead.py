@@ -4279,7 +4279,7 @@ def process_v4(
                         render_cdf_panel(
                             cdf_axes[1],
                             cdf_data,
-                            "memory",
+                            "memory_abs",
                             large_fonts=args.large_fonts,
                             show_sample_size=show_sample_size,
                         )
@@ -4450,6 +4450,55 @@ def process_v4(
                             time_cdf_fig.savefig("time.pdf", dpi=150)
                             plt.close(time_cdf_fig)
 
+                            # All CDFs in one row: 2 time + 1 memory, slightly
+                            # larger fonts than the standalone time/mem.pdf files
+                            all_cdf_scale = 1.3
+                            all_cdf_fig, all_cdf_axes = plt.subplots(
+                                1, 3, figsize=(18, 5), sharey=True
+                            )
+                            render_time_cdf(
+                                all_cdf_axes[0],
+                                sorted_vals=list(cdf_data.time_sorted),
+                                percentiles=list(cdf_data.time_percentiles),
+                                n=len(cdf_data.time_overhead_ms),
+                                color="blue",
+                                title="Per-Cell Analysis Time",
+                                xlabel="Analysis Time (ms, log scale)",
+                                large_fonts=args.large_fonts,
+                                show_sample_size=show_sample_size,
+                                font_scale=all_cdf_scale,
+                            )
+                            render_time_cdf(
+                                all_cdf_axes[1],
+                                sorted_vals=list(rerun_cdf_data.total_sorted),
+                                percentiles=list(rerun_cdf_data.total_percentiles),
+                                n=len(rerun_cdf_data.total_overhead_ms),
+                                color="green",
+                                title="Per-Rerun-Cell Analysis Time",
+                                xlabel="Rerun Overhead (ms, log scale)",
+                                large_fonts=args.large_fonts,
+                                show_sample_size=show_sample_size,
+                                font_scale=all_cdf_scale,
+                            )
+                            render_cdf_panel(
+                                all_cdf_axes[2],
+                                cdf_data,
+                                "memory_abs",
+                                color_override="orange",
+                                title_override="Per-Cell Checkpoint Memory Size",
+                                large_fonts=args.large_fonts,
+                                show_sample_size=show_sample_size,
+                                font_scale=all_cdf_scale,
+                            )
+                            # Drop the redundant y-axis label on the 2nd and
+                            # 3rd panels (y-axis is shared via sharey=True).
+                            all_cdf_axes[1].set_ylabel("")
+                            all_cdf_axes[2].set_ylabel("")
+                            all_cdf_fig.tight_layout()
+                            pdf.savefig(all_cdf_fig, dpi=150)
+                            all_cdf_fig.savefig("all-cdfs.pdf", dpi=150)
+                            plt.close(all_cdf_fig)
+
                     # Memory CDFs side-by-side page (per-cell + per-notebook)
                     if cdf_data:
                         mem_cdf_fig, mem_cdf_axes = plt.subplots(
@@ -4458,9 +4507,9 @@ def process_v4(
                         render_cdf_panel(
                             mem_cdf_axes[0],
                             cdf_data,
-                            "memory",
+                            "memory_abs",
                             color_override="orange",
-                            title_override="Per-Cell Memory Overhead\nDistribution",
+                            title_override="Per-Cell Checkpoint Memory Size\nDistribution",
                             large_fonts=args.large_fonts,
                             show_sample_size=show_sample_size,
                         )
@@ -4486,7 +4535,7 @@ def process_v4(
                             cdf_data,
                             "memory_abs",
                             color_override="orange",
-                            title_override="Per-Cell Memory Overhead\nDistribution",
+                            title_override="Per-Cell Checkpoint Memory Size\nDistribution",
                             large_fonts=args.large_fonts,
                             show_sample_size=show_sample_size,
                         )

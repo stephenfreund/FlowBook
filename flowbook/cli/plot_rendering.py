@@ -657,6 +657,7 @@ def render_time_cdf(
     show_sample_size: bool = True,
     value_fmt=None,
     tick_fmt=None,
+    font_scale: float = 1.0,
 ) -> None:
     """Render a value-based CDF panel with log scale x-axis.
 
@@ -672,6 +673,7 @@ def render_time_cdf(
         title: Plot title
         xlabel: X-axis label
         large_fonts: Use larger fonts
+        font_scale: Multiplier applied to all font sizes
     """
     from matplotlib.ticker import FuncFormatter
 
@@ -682,11 +684,11 @@ def render_time_cdf(
     # annotation_size = 18 if large_fonts else 12
     # legend_fontsize = 14 if large_fonts else 10
 
-    label_size = 18 if large_fonts else 14
-    title_size = 20 if large_fonts else 16
-    tick_size = 14 if large_fonts else 12
-    annotation_size = 14 if large_fonts else 12
-    legend_fontsize = 12 if large_fonts else 10
+    label_size = (18 if large_fonts else 14) * font_scale
+    title_size = (20 if large_fonts else 16) * font_scale
+    tick_size = (14 if large_fonts else 12) * font_scale
+    annotation_size = (14 if large_fonts else 12) * font_scale
+    legend_fontsize = (12 if large_fonts else 10) * font_scale
 
     if not sorted_vals:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
@@ -919,6 +921,7 @@ def render_overhead_pct_cdf(
         return
 
     import numpy as np
+
     sorted_arr = np.array(sorted_vals)
     cdf_arr = np.array(percentiles)
 
@@ -955,31 +958,85 @@ def render_overhead_pct_cdf(
     line_width = 0.6
     for pname, y_val, _, _ in pct_config:
         x_val = stats[pname]
-        ax.axhline(y=y_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
-        ax.axvline(x=x_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
-    ax.axhline(y=1.0, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
-    ax.axvline(x=max_val, color=line_color, linestyle="--", linewidth=line_width, alpha=line_alpha, zorder=1)
+        ax.axhline(
+            y=y_val,
+            color=line_color,
+            linestyle="--",
+            linewidth=line_width,
+            alpha=line_alpha,
+            zorder=1,
+        )
+        ax.axvline(
+            x=x_val,
+            color=line_color,
+            linestyle="--",
+            linewidth=line_width,
+            alpha=line_alpha,
+            zorder=1,
+        )
+    ax.axhline(
+        y=1.0,
+        color=line_color,
+        linestyle="--",
+        linewidth=line_width,
+        alpha=line_alpha,
+        zorder=1,
+    )
+    ax.axvline(
+        x=max_val,
+        color=line_color,
+        linestyle="--",
+        linewidth=line_width,
+        alpha=line_alpha,
+        zorder=1,
+    )
 
     # Percentile markers
     for pname, y_val, offset, va in pct_config:
         x_val = stats[pname]
-        ax.scatter([x_val], [y_val], color=color, s=40, marker="o", zorder=5,
-                   edgecolors="white", linewidths=1.5)
+        ax.scatter(
+            [x_val],
+            [y_val],
+            color=color,
+            s=40,
+            marker="o",
+            zorder=5,
+            edgecolors="white",
+            linewidths=1.5,
+        )
         ax.annotate(
-            pname, (x_val, y_val),
-            textcoords="offset points", xytext=offset,
-            fontsize=annotation_size, ha="left", va=va, fontweight="bold",
-            arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+            pname,
+            (x_val, y_val),
+            textcoords="offset points",
+            xytext=offset,
+            fontsize=annotation_size,
+            ha="left",
+            va=va,
+            fontweight="bold",
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3),
         )
 
     # Max marker
-    ax.scatter([max_val], [1.0], color=color, s=40, marker="o", zorder=5,
-               edgecolors="white", linewidths=1.5)
+    ax.scatter(
+        [max_val],
+        [1.0],
+        color=color,
+        s=40,
+        marker="o",
+        zorder=5,
+        edgecolors="white",
+        linewidths=1.5,
+    )
     ax.annotate(
-        "Max", (max_val, 1.0),
-        textcoords="offset points", xytext=(12, -18),
-        fontsize=annotation_size, ha="left", va="top", fontweight="bold",
-        arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3)
+        "Max",
+        (max_val, 1.0),
+        textcoords="offset points",
+        xytext=(12, -18),
+        fontsize=annotation_size,
+        ha="left",
+        va="top",
+        fontweight="bold",
+        arrowprops=dict(arrowstyle="-", color="gray", lw=0.8, shrinkA=0, shrinkB=3),
     )
 
     # Format percentage
@@ -995,19 +1052,38 @@ def render_overhead_pct_cdf(
     formatted = {p: fmt_pct(stats[p]) for p in ["P50", "P95", "P99"]}
     formatted["Max"] = fmt_pct(max_val)
     max_val_len = max(len(v) for v in formatted.values())
-    legend_lines = [f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]]
+    legend_lines = [
+        f"{p:>3}  {formatted[p]:>{max_val_len}}" for p in ["P50", "P95", "P99", "Max"]
+    ]
     legend_text = "\n".join(legend_lines)
     props = dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray")
-    ax.text(0.98, 0.02, legend_text, transform=ax.transAxes, fontsize=legend_fontsize,
-            verticalalignment="bottom", horizontalalignment="right", bbox=props,
-            family="monospace")
+    ax.text(
+        0.98,
+        0.02,
+        legend_text,
+        transform=ax.transAxes,
+        fontsize=legend_fontsize,
+        verticalalignment="bottom",
+        horizontalalignment="right",
+        bbox=props,
+        family="monospace",
+    )
 
     # N count in top left
     if show_sample_size:
         textstr = f"N={n:,}"
-        ax.text(0.02, 0.98, textstr, transform=ax.transAxes, fontsize=tick_size,
-                verticalalignment="top", horizontalalignment="left",
-                bbox=dict(boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"))
+        ax.text(
+            0.02,
+            0.98,
+            textstr,
+            transform=ax.transAxes,
+            fontsize=tick_size,
+            verticalalignment="top",
+            horizontalalignment="left",
+            bbox=dict(
+                boxstyle="round", facecolor="white", alpha=0.95, edgecolor="lightgray"
+            ),
+        )
 
     # Axes config
     ax.set_xlabel("Overhead Percentage", fontsize=label_size)
@@ -1055,6 +1131,7 @@ def render_cdf_panel(
     color_override: str = None,
     title_override: str = None,
     show_sample_size: bool = True,
+    font_scale: float = 1.0,
 ) -> None:
     """Render a single CDF panel for aggregate data.
 
@@ -1068,6 +1145,7 @@ def render_cdf_panel(
         color_override: Optional color to use instead of the default for this metric
         title_override: Optional title to use instead of the default for this metric
         show_sample_size: Whether to show N= annotation
+        font_scale: Multiplier applied to all font sizes
     """
     from matplotlib.ticker import FuncFormatter
 
@@ -1078,11 +1156,11 @@ def render_cdf_panel(
     # annotation_size = 18 if large_fonts else 12
     # legend_fontsize = 14 if large_fonts else 10
 
-    label_size = 18 if large_fonts else 14
-    title_size = 20 if large_fonts else 16
-    tick_size = 14 if large_fonts else 12
-    annotation_size = 14 if large_fonts else 12
-    legend_fontsize = 12 if large_fonts else 10
+    label_size = (18 if large_fonts else 14) * font_scale
+    title_size = (20 if large_fonts else 16) * font_scale
+    tick_size = (14 if large_fonts else 12) * font_scale
+    annotation_size = (14 if large_fonts else 12) * font_scale
+    legend_fontsize = (12 if large_fonts else 10) * font_scale
 
     # For time metric, use the shared helper
     if metric == "time":
@@ -1096,12 +1174,14 @@ def render_cdf_panel(
             xlabel="Analysis Time (ms, log scale)",
             large_fonts=large_fonts,
             show_sample_size=show_sample_size,
+            font_scale=font_scale,
         )
         return
 
     # Absolute per-cell memory overhead (Checkpoint - Base, MB) on a log axis,
     # reusing the log-scale time helper with MB formatters.
     if metric == "memory_abs":
+
         def fmt_mb(v):
             if v >= 100:
                 return f"{v:,.0f} MB"
@@ -1130,12 +1210,13 @@ def render_cdf_panel(
             percentiles=list(data.memory_abs_percentiles),
             n=len(data.memory_abs_mb),
             color=color_override or "darkorange",
-            title=title_override or "Memory Overhead Distribution",
+            title=title_override or "Checkpoint Memory Size Distribution",
             xlabel="Checkpoint - Base Memory Size (MB, log scale)",
             large_fonts=large_fonts,
             show_sample_size=show_sample_size,
             value_fmt=fmt_mb,
             tick_fmt=tick_mb,
+            font_scale=font_scale,
         )
         return
 
@@ -1380,6 +1461,19 @@ def render_cdf_panel(
     ax.set_ylim(0, 1.05)
     ax.tick_params(axis="both", labelsize=tick_size)
 
+    def _nice_step(span, target_ticks=6):
+        # Pick a "nice" tick step (1/2/2.5/5 * 10^k) so the axis shows roughly
+        # target_ticks labels regardless of range. Without this, an extreme
+        # outlier (e.g. an 8944% ratio) drives a fixed step into dozens of
+        # overlapping labels.
+        raw = span / max(1, target_ticks)
+        magnitude = 10 ** np.floor(np.log10(raw))
+        for mult in (1, 2, 2.5, 5, 10):
+            step = mult * magnitude
+            if raw <= step:
+                return step
+        return 10 * magnitude
+
     if metric in ("memory", "gpu_memory"):
         # Extend x-axis beyond 100% if data exceeds it
         x_max = max(1.05, max_val * 1.05)
@@ -1389,11 +1483,11 @@ def render_cdf_panel(
             ax.set_xticks([0, 0.25, 0.5, 0.75, 1])
             ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
         else:
-            # Generate ticks up to max value
-            tick_step = 0.5 if x_max <= 2.5 else 1.0
+            # Generate ticks up to max value with a nice, bounded step
+            tick_step = _nice_step(x_max)
             ticks = np.arange(0, x_max + tick_step, tick_step)
             ax.set_xticks(ticks)
-            ax.set_xticklabels([f"{int(t * 100)}%" for t in ticks])
+            ax.set_xticklabels([f"{int(round(t * 100))}%" for t in ticks])
     elif metric in ("peak", "gpu_peak"):
         # Extend x-axis beyond 100% if data exceeds it
         x_max = max(105, max_val * 1.05)
@@ -1403,11 +1497,11 @@ def render_cdf_panel(
             ax.set_xticks([0, 25, 50, 75, 100])
             ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
         else:
-            # Generate ticks up to max value
-            tick_step = 50 if x_max <= 250 else 100
+            # Generate ticks up to max value with a nice, bounded step
+            tick_step = _nice_step(x_max)
             ticks = np.arange(0, x_max + tick_step, tick_step)
             ax.set_xticks(ticks)
-            ax.set_xticklabels([f"{int(t)}%" for t in ticks])
+            ax.set_xticklabels([f"{int(round(t))}%" for t in ticks])
 
 
 def render_combined_6panel(

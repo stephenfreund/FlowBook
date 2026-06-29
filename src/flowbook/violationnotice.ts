@@ -117,7 +117,12 @@ export class ViolationNoticeManager {
     // Group violations by (error_type, locations) to merge common ones
     const grouped = new Map<
       string,
-      { errorType: string; locs: string[]; causers: string[] }
+      {
+        errorType: string;
+        locs: string[];
+        causers: string[];
+        selfReader?: string;
+      }
     >();
 
     for (const violation of violations) {
@@ -146,6 +151,28 @@ export class ViolationNoticeManager {
       }
     }
 
+    // Merge no_read_and_write into no_write_after_read for shared locations.
+    // When the current cell both writes a location read above (no_write_after_read)
+    // AND reads+writes that same location (no_read_and_write), the current cell is
+    // itself one of the readers. Report a single message ("Writes `x` read by @B
+    // above and @C") — the current cell (@C) is tracked separately and listed after
+    // "above" so the modifier clearly applies to the cells above, not @C.
+    const selfIdx = cellOrder.indexOf(violations[0].cell_id);
+    const selfRef = selfIdx >= 0 ? indexToAlpha(selfIdx) : null;
+    if (selfRef) {
+      for (const [groupKey, rwGroup] of [...grouped]) {
+        if (rwGroup.errorType !== 'no_read_and_write') {
+          continue;
+        }
+        const locsKey = [...rwGroup.locs].sort().join(',');
+        const warGroup = grouped.get(`no_write_after_read:${locsKey}`);
+        if (warGroup) {
+          warGroup.selfReader = selfRef;
+          grouped.delete(groupKey); // drop the standalone "Reads and writes `x`"
+        }
+      }
+    }
+
     // Build messages from grouped violations
     const htmlMessages: string[] = [];
     const plainMessages: string[] = [];
@@ -153,14 +180,17 @@ export class ViolationNoticeManager {
     for (const group of grouped.values()) {
       const locs = group.locs.map(l => '`' + l + '`').join(', ');
       const htmlLocs = locs.replace(/`([^`]+)`/g, '<code>$1</code>');
-      const causersStr = group.causers.join(', ');
+      const causersStr = this._joinCausers(group.causers);
 
       let message: string;
       switch (group.errorType) {
         case 'no_write_after_read': {
-          message = causersStr
-            ? `Writes ${htmlLocs} already read by ${causersStr}`
-            : `Writes ${htmlLocs} already read by cell above`;
+          const readers = group.causers.length
+            ? `${causersStr} above`
+            : 'cell above';
+          message = group.selfReader
+            ? `Writes ${htmlLocs} read by ${readers} and ${group.selfReader}`
+            : `Writes ${htmlLocs} read by ${readers}`;
           for (const loc of group.locs) {
             if (loc.includes('.')) {
               const [dfName, colName] = loc.split('.');
@@ -215,5 +245,17 @@ export class ViolationNoticeManager {
     };
 
     return { noticeOutput, plainText };
+  }
+
+  /**
+   * Join cell references with natural-language conjunction:
+   * ['@C'] -> '@C', ['@C', '@B'] -> '@C and @B',
+   * ['@C', '@B', '@A'] -> '@C, @B and @A'.
+   */
+  private _joinCausers(causers: string[]): string {
+    if (causers.length <= 1) {
+      return causers.join('');
+    }
+    return `${causers.slice(0, -1).join(', ')} and ${causers[causers.length - 1]}`;
   }
 }
