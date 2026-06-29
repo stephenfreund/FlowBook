@@ -85,11 +85,15 @@ export interface IAiActivityDetail {
  * Announce AI-driven activity via {@link AI_ACTIVITY_EVENT}. Safe to call when
  * no DOM / no listener is present (e.g. headless tests) — it never throws.
  */
-export function emitAiActivity(detail: Omit<IAiActivityDetail, 'source'>): void {
+export function emitAiActivity(
+  detail: Omit<IAiActivityDetail, 'source'>
+): void {
   try {
     if (typeof document !== 'undefined' && typeof CustomEvent !== 'undefined') {
       const full: IAiActivityDetail = { source: 'flowbook', ...detail };
-      document.dispatchEvent(new CustomEvent(AI_ACTIVITY_EVENT, { detail: full }));
+      document.dispatchEvent(
+        new CustomEvent(AI_ACTIVITY_EVENT, { detail: full })
+      );
     }
   } catch {
     // Best-effort: attribution must never break notebook execution.

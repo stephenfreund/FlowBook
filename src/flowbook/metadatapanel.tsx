@@ -470,7 +470,9 @@ const ReproducibilityMetadataDisplay: React.FC<
  * key is present, or "disabled" otherwise. Rendered above the Last Execution
  * status bit. `null` status means we haven't fetched yet, so render nothing.
  */
-const FixModelHeader: React.FC<{ status: IFixStatus | null }> = ({ status }) => {
+const FixModelHeader: React.FC<{ status: IFixStatus | null }> = ({
+  status
+}) => {
   if (!status) {
     return null;
   }

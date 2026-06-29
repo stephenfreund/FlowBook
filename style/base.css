@@ -331,14 +331,14 @@
   cursor: pointer;
 }
 
-.fb-fix-button:hover:not(:disabled) {
-  background-color: #842029;
-  color: #fff;
-}
-
 .fb-fix-button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.fb-fix-button:hover:not(:disabled) {
+  background-color: #842029;
+  color: #fff;
 }
 
 .fb-custom-input {
