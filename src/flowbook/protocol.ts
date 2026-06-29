@@ -27,6 +27,12 @@ export const COMM_TARGET = 'flowbook';
  */
 export interface IMetadataMessage extends IReproducibilityMetadata {
   type: 'metadata';
+  /**
+   * Who drove the execution that produced this metadata: 'ai' for an LLM
+   * (MCP / NBI tool call / fix agent), 'user' otherwise. Used by the LogBook
+   * bridge to attribute out-of-process AI activity. Absent when unknown.
+   */
+  actor?: 'user' | 'ai';
 }
 
 /**

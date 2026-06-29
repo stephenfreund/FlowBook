@@ -291,7 +291,7 @@ Commands are auto-discovered by the registry from `flowbook/server/commands/`.
 
 ### MCP Server (`flowbook/mcp/`)
 
-Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Claude Code). 23 tools organized into core, algorithmic refactoring, and logging categories.
+Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Claude Code). 26 tools organized into core, algorithmic refactoring, and logging categories.
 
 - `server.py` - FastMCP server with `@_logged_tool` decorator for automatic event logging
 - `session.py` - `NotebookSession` manages a single (notebook, kernel) pair with reproducibility metadata
@@ -299,17 +299,19 @@ Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Cla
 
 **Key MCP Tools:**
 
-| Tool                                                  | Purpose                                                    |
-| ----------------------------------------------------- | ---------------------------------------------------------- |
-| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync |
-| `run_cell`                                            | Execute cell, return outputs + flowbook metadata           |
-| `edit_cell`                                           | Edit source, sync to Y.js, notify kernel                   |
-| `list_cells` / `get_cell`                             | Read cell state (polls IOPub for external updates)         |
-| `get_status`                                          | Reproducibility status (violations, staleness)             |
-| `get_next_actionable_cell`                            | First cell needing attention                               |
-| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                    |
-| `checkpoint` / `restore`                              | Save/restore notebook state                                |
-| `save_notebook`                                       | Write to disk                                              |
+| Tool                                                  | Purpose                                                     |
+| ----------------------------------------------------- | ----------------------------------------------------------- |
+| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync  |
+| `run_cell`                                            | Execute cell, return outputs (head+tail preview) + metadata |
+| `get_cell_output`                                     | Page a cell's full untruncated output (offset/limit)        |
+| `edit_cell`                                           | Edit source, sync to Y.js, notify kernel                    |
+| `list_cells` / `get_cell`                             | Read cell state (polls IOPub for external updates)          |
+| `get_status`                                          | Reproducibility status (violations, staleness)              |
+| `get_next_actionable_cell`                            | First cell needing attention                                |
+| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                     |
+| `insert_cell` / `delete_cell`                         | Add a code/markdown cell after another; remove a cell       |
+| `checkpoint` / `restore`                              | Save/restore notebook state                                 |
+| `save_notebook`                                       | Write to disk                                               |
 
 ### MCP ↔ JupyterLab Collaboration
 
@@ -438,7 +440,7 @@ This normalization happens transparently at entry points:
 
 **MCP Server**:
 
-- Server entry point: `flowbook/mcp/server.py` (23 tools)
+- Server entry point: `flowbook/mcp/server.py` (26 tools)
 - Session management: `flowbook/mcp/session.py`
 - Jupyter server discovery: `flowbook/mcp/jupyter_config.py`
 - Kernel discovery: `flowbook/kernel_discovery.py`
@@ -522,3 +524,12 @@ This project maintains a formal specification in `FORMAL_DEVELOPMENT.md` that ma
 - **Code → Spec:** When source code implementing a formal concept is created, modified, renamed, or deleted, the mapping in `FORMAL_DEVELOPMENT.md` MUST be updated to reflect the change.
 
 Before completing any task, verify that `FORMAL_DEVELOPMENT.md` and the source code it references are consistent with each other.
+
+### Reproducibility Primer
+
+`flowbook/docs/REPRODUCIBILITY_PRIMER.md` is the canonical prose explanation of
+rerun consistency, the four validity predicates, UNRECOVERABLE_MUTATION, and
+staleness. The slash commands (`fix-notebook`, `reproducibility-fixer`) and the
+in-product AI fix suggester (`flowbook/server/fix_suggester.py`) all reference
+it. When you change the primer, verify it stays consistent with `FORMAL_DEVELOPMENT.md`
+and any other prose that paraphrases it.

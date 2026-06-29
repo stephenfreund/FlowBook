@@ -44,9 +44,19 @@ COMM_TARGET = "flowbook"
 # Kernel -> Client message builders
 # ===========================================================================
 
-def build_metadata_message(metadata: "ReproducibilityMetadata") -> dict:
-    """Build a metadata message from a ReproducibilityMetadata instance."""
-    return {
+def build_metadata_message(
+    metadata: "ReproducibilityMetadata", actor: Optional[str] = None
+) -> dict:
+    """Build a metadata message from a ReproducibilityMetadata instance.
+
+    ``actor`` (``"ai"`` | ``"user"``) identifies who drove the execution that
+    produced this metadata. It lets a co-located frontend (e.g. the FlowBook
+    plugin alongside LogBook) attribute out-of-process AI activity — an MCP
+    client running a cell over the shared kernel — to ``origin: 'ai'`` in
+    LogBook. Omitted from the payload when unknown, so existing consumers are
+    unaffected.
+    """
+    msg = {
         "type": METADATA,
         "cell_id": metadata.cell_id,
         "execution_seq": metadata.execution_seq,
@@ -63,6 +73,9 @@ def build_metadata_message(metadata: "ReproducibilityMetadata") -> dict:
         "staleness_reasons": metadata.staleness_reasons,
         "errors": metadata.errors,
     }
+    if actor is not None:
+        msg["actor"] = actor
+    return msg
 
 
 def build_violation_message(

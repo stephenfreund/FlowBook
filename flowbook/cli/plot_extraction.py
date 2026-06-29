@@ -36,7 +36,7 @@ from flowbook.util.output import log
 
 # Minimum thresholds to avoid division by zero or noise
 MIN_RUN_SEC = 0.01
-MIN_BASE_MB = 0.1  # 100KB - low enough for small notebooks, high enough to filter noise
+MIN_BASE_MB = 0  # 100KB - low enough for small notebooks, high enough to filter noise
 
 
 def extract_gpu_overhead_from_timing(data: Dict) -> Optional[List[float]]:
@@ -150,7 +150,9 @@ def extract_plot1_data(result: ComparisonResult) -> Optional[Plot1Data]:
     )
 
 
-def extract_plot2_data(result: ComparisonResult, top_n: int = 10) -> Optional[Plot2Data]:
+def extract_plot2_data(
+    result: ComparisonResult, top_n: int = 10
+) -> Optional[Plot2Data]:
     """Extract data for Plot 2: Checkpoint Time by Variable.
 
     Shows stacked area chart of deepcopy time per variable.
@@ -177,7 +179,9 @@ def extract_plot2_data(result: ComparisonResult, top_n: int = 10) -> Optional[Pl
     # Collect all variable names
     all_vars: Set[str] = set()
     for cell in all_cells:
-        var_timing = cell.get("checkpoint_var_timing", {}) or cell.get("checkpoint_var_costs", {})
+        var_timing = cell.get("checkpoint_var_timing", {}) or cell.get(
+            "checkpoint_var_costs", {}
+        )
         all_vars.update(var_timing.keys())
 
     if not all_vars:
@@ -191,7 +195,9 @@ def extract_plot2_data(result: ComparisonResult, top_n: int = 10) -> Optional[Pl
         idx = cell.get("cell_index", 0)
         cells.append(idx + 1)
 
-        var_timing = cell.get("checkpoint_var_timing", {}) or cell.get("checkpoint_var_costs", {})
+        var_timing = cell.get("checkpoint_var_timing", {}) or cell.get(
+            "checkpoint_var_costs", {}
+        )
         for v in all_vars:
             # Time in seconds
             info = var_timing.get(v, {})
@@ -292,7 +298,9 @@ def extract_plot3_data(result: ComparisonResult) -> Optional[Plot3Data]:
         peak_overhead = 0
         peak_pct = 0
 
-    log(f"Plot 3: {len(cells)} cells, peak overhead {peak_pct:.1f}% at cell {peak_idx + 1}")
+    log(
+        f"Plot 3: {len(cells)} cells, peak overhead {peak_pct:.1f}% at cell {peak_idx + 1}"
+    )
 
     return Plot3Data(
         cells=cells,
@@ -307,7 +315,9 @@ def extract_plot3_data(result: ComparisonResult) -> Optional[Plot3Data]:
     )
 
 
-def extract_plot4_data(result: ComparisonResult, top_n: int = 10) -> Optional[Plot4Data]:
+def extract_plot4_data(
+    result: ComparisonResult, top_n: int = 10
+) -> Optional[Plot4Data]:
     """Extract data for Plot 4: Checkpoint Memory by Variable.
 
     Shows stacked area chart:
@@ -444,7 +454,9 @@ def extract_plot5_data(result: ComparisonResult) -> Optional[Plot5Data]:
         check_sec.append(check_ms / 1000)
         other_sec.append(other_ms / 1000)
 
-    log(f"Plot 5: {len(cells)} cells, total overhead {sum(state_sec) + sum(check_sec) + sum(other_sec):.2f}s")
+    log(
+        f"Plot 5: {len(cells)} cells, total overhead {sum(state_sec) + sum(check_sec) + sum(other_sec):.2f}s"
+    )
 
     return Plot5Data(
         cells=cells,
@@ -487,11 +499,14 @@ def extract_plot6_data(result: ComparisonResult) -> Optional[Plot6Data]:
             base_mb = 0.0  # No prior namespace for first cell
         else:
             prev_cell = fb_all[i - 1]
-            delta_mb = max(0, cell.post.total_checkpoint_mb - prev_cell.post.total_checkpoint_mb)
+            delta_mb = max(
+                0, cell.post.total_checkpoint_mb - prev_cell.post.total_checkpoint_mb
+            )
             base_mb = prev_cell.post.user_ns_mb + prev_cell.post.gpu_mb
 
-        # Compute ratio (0 if base is too small for meaningful ratio)
-        if base_mb >= MIN_BASE_MB:
+        # Compute ratio (0 if base is too small for meaningful ratio).
+        # base_mb > 0 guards the division when MIN_BASE_MB is 0.
+        if base_mb >= MIN_BASE_MB and base_mb > 0:
             ratio = delta_mb / base_mb
         else:
             ratio = 0.0
@@ -531,21 +546,32 @@ def extract_cdf_data(
     """
     time_overhead_ms = []
     memory_ratios = []
+    memory_abs_mb = []
     peak_memory_pct = []
 
     for i, result in enumerate(results):
-        # Time overhead from timing data (raw ms values)
+        # Time overhead from timing data (raw ms values). Also record per-cell
+        # overhead keyed by cell_index so the memory panel below can be gated to
+        # the exact same cell population as this time panel.
         timing = result.timing
+        time_overhead_by_idx: Dict[int, float] = {}
         if timing:
             fb_timing = timing.get("kernels", {}).get("flowbook", {}).get("timing", {})
             for cell in fb_timing.get("cells", []):
                 # Get timing values with fallbacks for different JSON format versions
-                state_ms = cell.get("state_ms", 0) or cell.get("state_duration_ms", 0) or 0
-                check_ms = cell.get("check_ms", 0) or cell.get("check_duration_ms", 0) or 0
+                state_ms = (
+                    cell.get("state_ms", 0) or cell.get("state_duration_ms", 0) or 0
+                )
+                check_ms = (
+                    cell.get("check_ms", 0) or cell.get("check_duration_ms", 0) or 0
+                )
 
                 overhead_ms = state_ms + check_ms
                 if overhead_ms > 0:
                     time_overhead_ms.append(overhead_ms)
+                idx = cell.get("cell_index")
+                if idx is not None:
+                    time_overhead_by_idx[idx] = overhead_ms
 
         # Memory ratios - use v5 extraction if raw data provided
         p3 = None
@@ -566,14 +592,25 @@ def extract_cdf_data(
             p3 = extract_plot3_data(result)
 
         if p3:
-            # Use same delta-based ratio as Plot 6: checkpoint_delta / prev_base
-            # This measures incremental overhead per cell, not cumulative
             for j in range(len(p3.overhead_mb)):
+                # Absolute per-cell checkpoint size. Include exactly the cells the
+                # time panel keeps: those whose analysis time (state + check) is
+                # > 0. No base-size gate and no first-cell skip; the cell is
+                # matched to its timing record by cell_index (p3.cells[j] is
+                # cell_index + 1). overhead_mb is flowbook.total - baseline.total,
+                # i.e. the checkpoint memory present at this cell.
+                cell_idx = p3.cells[j] - 1
+                if time_overhead_by_idx.get(cell_idx, 0) > 0:
+                    memory_abs_mb.append(p3.overhead_mb[j])
+
+                # The delta-based ratio (checkpoint_delta / prev_base) still needs
+                # a prior cell with a non-trivial base to divide by, so it keeps
+                # the first-cell skip and the MIN_BASE_MB gate. Its cell
+                # population is therefore no longer identical to memory_abs_mb.
                 if j == 0:
-                    # First cell: delta = overhead, prev_base = 0 (skip)
                     continue
                 prev_base = p3.base_mb[j - 1]
-                if prev_base >= MIN_BASE_MB:
+                if prev_base >= MIN_BASE_MB and prev_base > 0:
                     delta = max(0, p3.overhead_mb[j] - p3.overhead_mb[j - 1])
                     memory_ratios.append(delta / prev_base)
 
@@ -601,14 +638,18 @@ def extract_cdf_data(
             # Use GPU-only base (not CPU+GPU) for GPU-specific overhead
             for j in range(1, len(p3.gpu_checkpoint_mb)):
                 prev_gpu_base = p3.gpu_mb[j - 1]
-                if prev_gpu_base >= MIN_BASE_MB:
-                    delta = max(0, p3.gpu_checkpoint_mb[j] - p3.gpu_checkpoint_mb[j - 1])
+                if prev_gpu_base >= MIN_BASE_MB and prev_gpu_base > 0:
+                    delta = max(
+                        0, p3.gpu_checkpoint_mb[j] - p3.gpu_checkpoint_mb[j - 1]
+                    )
                     gpu_memory_ratios.append(delta / prev_gpu_base)
 
             # Peak GPU checkpoint overhead %
             # Use GPU-only base (not CPU+GPU) for GPU-specific overhead
             gpu_base_totals = p3.gpu_mb
-            gpu_totals = [g + gc for g, gc in zip(gpu_base_totals, p3.gpu_checkpoint_mb)]
+            gpu_totals = [
+                g + gc for g, gc in zip(gpu_base_totals, p3.gpu_checkpoint_mb)
+            ]
             peak_gpu_base = max(gpu_base_totals) if gpu_base_totals else 0
             peak_gpu_total = max(gpu_totals) if gpu_totals else 0
             if peak_gpu_base > 0:
@@ -622,13 +663,19 @@ def extract_cdf_data(
             fb_timing = timing.get("kernels", {}).get("flowbook", {}).get("timing", {})
             for cell in fb_timing.get("cells", []):
                 # Get timing values
-                state_ms = cell.get("state_ms", 0) or cell.get("state_duration_ms", 0) or 0
-                check_ms = cell.get("check_ms", 0) or cell.get("check_duration_ms", 0) or 0
+                state_ms = (
+                    cell.get("state_ms", 0) or cell.get("state_duration_ms", 0) or 0
+                )
+                check_ms = (
+                    cell.get("check_ms", 0) or cell.get("check_duration_ms", 0) or 0
+                )
 
                 # Get base (code execution time)
                 code_ms = cell.get("code_duration_ms")
                 if code_ms is None:
-                    code_ms = cell.get("run_ms", 0) or cell.get("cell_runtime_ms", 0) or 0
+                    code_ms = (
+                        cell.get("run_ms", 0) or cell.get("cell_runtime_ms", 0) or 0
+                    )
 
                 # Compute overhead percentage: (state + check) / (base + 150) * 100
                 # Add 150ms to base to reflect Jupyter frontend overhead
@@ -645,11 +692,18 @@ def extract_cdf_data(
             for cell in fb_timing.get("cells", []):
                 code_ms = cell.get("code_duration_ms")
                 if code_ms is None:
-                    code_ms = cell.get("run_ms", 0) or cell.get("cell_runtime_ms", 0) or 0
+                    code_ms = (
+                        cell.get("run_ms", 0) or cell.get("cell_runtime_ms", 0) or 0
+                    )
                 if code_ms > 0:
                     base_runtime_ms.append(code_ms)
 
-    if not time_overhead_ms and not memory_ratios and not overhead_pct and not base_runtime_ms:
+    if (
+        not time_overhead_ms
+        and not memory_ratios
+        and not overhead_pct
+        and not base_runtime_ms
+    ):
         return None
 
     def build_cdf(values: List[float]):
@@ -662,13 +716,16 @@ def extract_cdf_data(
 
     time_sorted, time_pct = build_cdf(time_overhead_ms)
     memory_sorted, memory_pct = build_cdf(memory_ratios)
+    memory_abs_sorted, memory_abs_pct = build_cdf(memory_abs_mb)
     peak_sorted, peak_pct = build_cdf(peak_memory_pct)
     gpu_memory_sorted, gpu_memory_pct = build_cdf(gpu_memory_ratios)
     gpu_peak_sorted, gpu_peak_pct = build_cdf(gpu_peak_memory_pct)
     overhead_pct_sorted, overhead_pct_pct = build_cdf(overhead_pct)
     base_runtime_sorted, base_runtime_pct = build_cdf(base_runtime_ms)
 
-    log(f"CDF: {len(time_overhead_ms)} time samples, {len(memory_ratios)} memory ratios, {len(overhead_pct)} overhead pct, {len(base_runtime_ms)} base runtimes")
+    log(
+        f"CDF: {len(time_overhead_ms)} time samples, {len(memory_ratios)} memory ratios, {len(overhead_pct)} overhead pct, {len(base_runtime_ms)} base runtimes"
+    )
 
     return CDFData(
         time_overhead_ms=time_overhead_ms,
@@ -692,6 +749,9 @@ def extract_cdf_data(
         base_runtime_ms=base_runtime_ms,
         base_runtime_sorted=base_runtime_sorted,
         base_runtime_percentiles=base_runtime_pct,
+        memory_abs_mb=memory_abs_mb,
+        memory_abs_sorted=memory_abs_sorted,
+        memory_abs_percentiles=memory_abs_pct,
     )
 
 
@@ -759,7 +819,7 @@ def extract_plot2_data_v5(
         vars_ordered = top_vars + ["other"]
 
     # Count initial (non-rerun) cells
-    initial_count = len([c for c in cells if not getattr(c, 'is_rerun', False)])
+    initial_count = len([c for c in cells if not getattr(c, "is_rerun", False)])
 
     log(f"Plot 2 v5: {len(vars_ordered)} vars, top: {vars_ordered[:3]}")
 
@@ -816,10 +876,12 @@ def extract_plot3_data_v5(
         if has_baseline and i < len(baseline_cells):
             # Cross-run comparison: overhead = flowbook.total - baseline.total
             bl_cell = baseline_cells[i]
-            if hasattr(bl_cell, 'post'):
+            if hasattr(bl_cell, "post"):
                 bl_total = bl_cell.post.total_mb
             else:
-                bl_total = getattr(bl_cell, 'user_ns_mb', 0) + getattr(bl_cell, 'gpu_mb', 0)
+                bl_total = getattr(bl_cell, "user_ns_mb", 0) + getattr(
+                    bl_cell, "gpu_mb", 0
+                )
             flow_total = cell.total_mb  # user_ns + gpu + checkpoint
             overhead = max(0, flow_total - bl_total)
         else:
@@ -833,7 +895,9 @@ def extract_plot3_data_v5(
     # Compute peak FlowBook total and peak base total across all cells
     # flowbook_total = user_ns + gpu + checkpoint
     # base_total = user_ns + gpu
-    flowbook_totals = [cell.user_ns_mb + cell.gpu_mb + cell.checkpoint_mb for cell in cells]
+    flowbook_totals = [
+        cell.user_ns_mb + cell.gpu_mb + cell.checkpoint_mb for cell in cells
+    ]
     base_totals = [cell.user_ns_mb + cell.gpu_mb for cell in cells]
     peak_flowbook_mb = max(flowbook_totals) if flowbook_totals else 0
     peak_base_mb = max(base_totals) if base_totals else 0
@@ -853,15 +917,19 @@ def extract_plot3_data_v5(
         peak_overhead = 0
 
     mode = "cross-run" if has_baseline else "FlowBook-only"
-    log(f"Plot 3 v5 ({mode}): {len(cells)} cells, peak overhead {peak_pct:.1f}% "
-        f"(FlowBook: {peak_flowbook_mb:.1f} MB, Base: {peak_base_mb:.1f} MB)")
+    log(
+        f"Plot 3 v5 ({mode}): {len(cells)} cells, peak overhead {peak_pct:.1f}% "
+        f"(FlowBook: {peak_flowbook_mb:.1f} MB, Base: {peak_base_mb:.1f} MB)"
+    )
 
     # GPU checkpoint overhead per cell
     # Prefer timing-derived diff (flowbook_gpu - baseline_gpu) over cudf-based measurement
-    if gpu_overhead_from_timing is not None and len(gpu_overhead_from_timing) == len(cells):
+    if gpu_overhead_from_timing is not None and len(gpu_overhead_from_timing) == len(
+        cells
+    ):
         gpu_ckpt_mb = list(gpu_overhead_from_timing)
     else:
-        gpu_ckpt_mb = [getattr(cell, 'gpu_checkpoint_mb', 0.0) for cell in cells]
+        gpu_ckpt_mb = [getattr(cell, "gpu_checkpoint_mb", 0.0) for cell in cells]
 
     return Plot3Data(
         cells=cell_nums,
@@ -879,7 +947,9 @@ def extract_plot3_data_v5(
     )
 
 
-def extract_plot4_data_v5(cells: List[V5CellMemory], top_n: int = 10) -> Optional[Plot4Data]:
+def extract_plot4_data_v5(
+    cells: List[V5CellMemory], top_n: int = 10
+) -> Optional[Plot4Data]:
     """Extract data for Plot 4 from v5 memory cells.
 
     Shows stacked area chart:
@@ -984,16 +1054,21 @@ def extract_plot6_data_v5(cells: List[V5CellMemory]) -> Optional[Plot6Data]:
         # Compute checkpoint delta (new checkpoint data at this cell)
         if i == 0:
             delta_mb = cell.checkpoint_mb
-            gpu_delta_mb = getattr(cell, 'gpu_checkpoint_mb', 0.0)
+            gpu_delta_mb = getattr(cell, "gpu_checkpoint_mb", 0.0)
             prev_base_mb = 0.0
         else:
             prev_cell = cells[i - 1]
             delta_mb = max(0, cell.checkpoint_mb - prev_cell.checkpoint_mb)
-            gpu_delta_mb = max(0, getattr(cell, 'gpu_checkpoint_mb', 0.0) - getattr(prev_cell, 'gpu_checkpoint_mb', 0.0))
+            gpu_delta_mb = max(
+                0,
+                getattr(cell, "gpu_checkpoint_mb", 0.0)
+                - getattr(prev_cell, "gpu_checkpoint_mb", 0.0),
+            )
             prev_base_mb = prev_cell.base_mb
 
-        # Compute ratio (0 if base is too small)
-        if prev_base_mb >= MIN_BASE_MB:
+        # Compute ratio (0 if base is too small).
+        # prev_base_mb > 0 guards the division when MIN_BASE_MB is 0.
+        if prev_base_mb >= MIN_BASE_MB and prev_base_mb > 0:
             ratio = delta_mb / prev_base_mb
             gpu_ratio = gpu_delta_mb / prev_base_mb
         else:
@@ -1041,7 +1116,11 @@ def extract_baseline_cells(data: Dict) -> Optional[List]:
             # V4 format has post_user_ns_mb, post_gpu_mb
             user_ns = d.get("post_user_ns_mb", 0.0)
             gpu = d.get("post_gpu_mb", 0.0)
-            self.post = type('Post', (), {'total_mb': user_ns + gpu, 'user_ns_mb': user_ns, 'gpu_mb': gpu})()
+            self.post = type(
+                "Post",
+                (),
+                {"total_mb": user_ns + gpu, "user_ns_mb": user_ns, "gpu_mb": gpu},
+            )()
 
     all_cells = [SimpleCell(c) for c in cells_data + rerun_data]
     return all_cells if all_cells else None
@@ -1095,16 +1174,20 @@ def extract_v5_memory_result(data: Dict) -> Optional[V5MemoryResult]:
                         size_mb = var_info.get("size_mb", 0.0)
                     else:
                         size_mb = float(var_info)
-                    checkpoint_vars[var_name] = checkpoint_vars.get(var_name, 0.0) + size_mb
+                    checkpoint_vars[var_name] = (
+                        checkpoint_vars.get(var_name, 0.0) + size_mb
+                    )
 
-            v5_cells.append(V5CellMemory(
-                cell_id=cell_data.get("cell_id", ""),
-                cell_index=cell_data.get("cell_index", 0),
-                user_ns_mb=user_ns_mb,
-                gpu_mb=gpu_mb,
-                checkpoint_mb=overhead_mb,
-                checkpoint_vars=checkpoint_vars,
-            ))
+            v5_cells.append(
+                V5CellMemory(
+                    cell_id=cell_data.get("cell_id", ""),
+                    cell_index=cell_data.get("cell_index", 0),
+                    user_ns_mb=user_ns_mb,
+                    gpu_mb=gpu_mb,
+                    checkpoint_mb=overhead_mb,
+                    checkpoint_vars=checkpoint_vars,
+                )
+            )
 
         # Convert rerun cells similarly
         v5_reruns = []
@@ -1121,16 +1204,20 @@ def extract_v5_memory_result(data: Dict) -> Optional[V5MemoryResult]:
                         size_mb = var_info.get("size_mb", 0.0)
                     else:
                         size_mb = float(var_info)
-                    checkpoint_vars[var_name] = checkpoint_vars.get(var_name, 0.0) + size_mb
+                    checkpoint_vars[var_name] = (
+                        checkpoint_vars.get(var_name, 0.0) + size_mb
+                    )
 
-            v5_reruns.append(V5CellMemory(
-                cell_id=cell_data.get("cell_id", ""),
-                cell_index=cell_data.get("cell_index", 0),
-                user_ns_mb=user_ns_mb,
-                gpu_mb=gpu_mb,
-                checkpoint_mb=overhead_mb,
-                checkpoint_vars=checkpoint_vars,
-            ))
+            v5_reruns.append(
+                V5CellMemory(
+                    cell_id=cell_data.get("cell_id", ""),
+                    cell_index=cell_data.get("cell_index", 0),
+                    user_ns_mb=user_ns_mb,
+                    gpu_mb=gpu_mb,
+                    checkpoint_mb=overhead_mb,
+                    checkpoint_vars=checkpoint_vars,
+                )
+            )
 
         return V5MemoryResult(cells=v5_cells, rerun_cells=v5_reruns)
 

@@ -25,6 +25,14 @@ import { ViolationNoticeManager } from './violationnotice';
 import { getCodeCellOrder } from '../cellindexutils';
 import { indexToAlpha } from '../cellindexutils';
 
+/**
+ * Minimal interface the highlighter needs from FixSuggester. Defined here
+ * (not imported) to avoid an import cycle between the two files.
+ */
+export interface IFixSuggesterProbe {
+  isFixApplied(cellId: string): boolean;
+}
+
 export class ReproducibilityCellHighlighter {
   private _tracker: INotebookTracker;
   private _panel: ReproducibilityMetadataPanel;
@@ -36,6 +44,7 @@ export class ReproducibilityCellHighlighter {
   private _monitoredNotebooks = new Set<string>();
   private _stalenessNotice = new StalenessNoticeManager();
   private _violationNotice = new ViolationNoticeManager();
+  private _fixSuggester: IFixSuggesterProbe | null = null;
   private _isDisposed = false;
 
   constructor(tracker: INotebookTracker, panel: ReproducibilityMetadataPanel) {
@@ -46,6 +55,14 @@ export class ReproducibilityCellHighlighter {
 
   setDependenciesPanel(panel: DependenciesPanel): void {
     this._dependenciesPanel = panel;
+  }
+
+  /**
+   * Wire in the AI fix suggester. updateCell consults it to suppress
+   * staleness rendering while a fix is applied but not yet re-run.
+   */
+  setFixSuggester(suggester: IFixSuggesterProbe | null): void {
+    this._fixSuggester = suggester;
   }
 
   /**
@@ -127,7 +144,21 @@ export class ReproducibilityCellHighlighter {
     cell.node.classList.remove('flowbook-cell-unexecuted');
     cell.node.classList.remove('flowbook-cell-error');
 
-    if (isEmpty) {
+    // When a fix has been applied to this cell and the user hasn't yet
+    // re-run, edited, or undone it, suppress staleness rendering — the
+    // AI-fix notice is the only thing they should see. Still call
+    // updateStalenessNotice(false) so any previously-rendered stale
+    // notice gets removed.
+    const isFixApplied = this._fixSuggester?.isFixApplied(cellId) === true;
+
+    if (isFixApplied) {
+      this._stalenessNotice.updateStalenessNotice(
+        cell,
+        false,
+        stalenessManager,
+        cellOrder
+      );
+    } else if (isEmpty) {
       this._stalenessNotice.updateStalenessNotice(
         cell,
         false,

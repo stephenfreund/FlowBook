@@ -226,6 +226,11 @@ export class ViolationNoticeManager {
       .join('');
     const plainText = plainMessages.map(m => `${icon} ${m}`).join('\n');
 
+    // The AI fix UI (diagnosis, buttons, undo) lives in its own dedicated
+    // display_data output managed by FixSuggester. Keeping the violation
+    // notice and the AI fix notice as independent outputs lets us clear
+    // the violation message after an applied fix without also wiping the
+    // suggester's "Source updated" / undo UI.
     const noticeOutput: IOutput = {
       output_type: 'display_data',
       data: {

@@ -13,6 +13,7 @@ import { ReproducibilityMetadataPanel } from './metadatapanel';
 import { DependenciesPanel } from './dependenciespanel';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
+import { FixSuggester } from './fixsuggester';
 import { CellIndexManager } from '../cellindex';
 import { IReproducibilityMetadata } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
@@ -118,6 +119,7 @@ class FlowbookActivationManager {
   private _dependenciesPanel: DependenciesPanel | null = null;
   private _highlighter: ReproducibilityCellHighlighter | null = null;
   private _executionHook: ReproducibilityExecutionHookManager | null = null;
+  private _fixSuggester: FixSuggester | null = null;
   private _cellIndexManager: CellIndexManager;
   private _toolbarExtension: FlowbookToolbarExtension;
   private _isActive = false;
@@ -236,6 +238,17 @@ class FlowbookActivationManager {
       this._highlighter
     );
 
+    // Create AI fix suggester and wire it into the execution hook so it gets
+    // notified when a violation is observed. The highlighter and the
+    // suggester each hold a reference to the other: the suggester uses the
+    // highlighter to trigger re-renders after applying a fix; the
+    // highlighter probes the suggester (isFixApplied) so it can suppress
+    // staleness rendering for cells with an applied-but-not-rerun fix.
+    this._fixSuggester = new FixSuggester(this._tracker);
+    this._fixSuggester.setHighlighter(this._highlighter);
+    this._highlighter.setFixSuggester(this._fixSuggester);
+    this._executionHook.setFixSuggester(this._fixSuggester);
+
     // Trigger initial dependency graph update (highlighter's constructor may
     // have called _updateAllCells before the dependencies panel was set)
     this._highlighter.refreshDependencies();
@@ -344,10 +357,21 @@ class FlowbookActivationManager {
       this._executionHook = null;
     }
 
+    // Dispose AI fix suggester (aborts any in-flight requests)
+    if (this._fixSuggester) {
+      this._fixSuggester.dispose();
+      this._fixSuggester = null;
+    }
+
     // Clear bridge context
     setBridgeContext(null, null, null, null);
 
     this._isActive = false;
+  }
+
+  /** Internal: exposed to plugin commands for button click handling. */
+  fixSuggester(): FixSuggester | null {
+    return this._fixSuggester;
   }
 }
 
@@ -374,11 +398,168 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
     const toolbarExtension = new FlowbookToolbarExtension(kernelDetector);
     app.docRegistry.addWidgetExtension('Notebook', toolbarExtension);
 
-    new FlowbookActivationManager(
+    const activationManager = new FlowbookActivationManager(
       app,
       tracker,
       kernelDetector,
       toolbarExtension
     );
+
+    registerFixSuggesterCommands(app, tracker, activationManager);
   }
 };
+
+/**
+ * Register the AI fix-suggester commands and the delegated click handler.
+ *
+ * Buttons live inside the violation notice's HTML output area, which is
+ * rendered into the cell DOM. We can't put inline onclick handlers there
+ * (output sandboxing strips them), so we attach a single document-level
+ * listener that walks up from the click target to find a flowbook button.
+ */
+function registerFixSuggesterCommands(
+  app: JupyterFrontEnd,
+  tracker: INotebookTracker,
+  activationManager: FlowbookActivationManager
+): void {
+  app.commands.addCommand('flowbook:apply-fix', {
+    label: 'Apply AI fix suggestion',
+    execute: async (args: any) => {
+      const cellId = String(args?.cellId || '');
+      const fixIdx = Number(args?.fixIdx || 0);
+      const suggester = activationManager.fixSuggester();
+      if (!suggester || !cellId) {
+        return;
+      }
+      const cell = findCellById(tracker, cellId);
+      if (cell) {
+        await suggester.applyFix(cell, fixIdx);
+      }
+    }
+  });
+
+  app.commands.addCommand('flowbook:undo-fix', {
+    label: 'Undo AI fix',
+    execute: async (args: any) => {
+      const cellId = String(args?.cellId || '');
+      const suggester = activationManager.fixSuggester();
+      if (!suggester || !cellId) {
+        return;
+      }
+      const cell = findCellById(tracker, cellId);
+      if (cell) {
+        await suggester.undoFix(cell);
+      }
+    }
+  });
+
+  app.commands.addCommand('flowbook:open-other-fix', {
+    label: 'Other AI fix (describe your own)',
+    execute: (args: any) => {
+      const cellId = String(args?.cellId || '');
+      const suggester = activationManager.fixSuggester();
+      if (!suggester || !cellId) {
+        return;
+      }
+      const cell = findCellById(tracker, cellId);
+      if (cell) {
+        suggester.openOtherFix(cell);
+      }
+    }
+  });
+
+  app.commands.addCommand('flowbook:cancel-other-fix', {
+    label: 'Cancel custom fix composition',
+    execute: (args: any) => {
+      const cellId = String(args?.cellId || '');
+      const suggester = activationManager.fixSuggester();
+      if (!suggester || !cellId) {
+        return;
+      }
+      const cell = findCellById(tracker, cellId);
+      if (cell) {
+        suggester.cancelOtherFix(cell);
+      }
+    }
+  });
+
+  app.commands.addCommand('flowbook:submit-other-fix', {
+    label: 'Submit custom AI fix',
+    execute: async (args: any) => {
+      const cellId = String(args?.cellId || '');
+      const suggester = activationManager.fixSuggester();
+      if (!suggester || !cellId) {
+        return;
+      }
+      const cell = findCellById(tracker, cellId);
+      if (cell) {
+        await suggester.submitOtherFix(cell);
+      }
+    }
+  });
+
+  // Single delegated click listener — survives output re-renders. We walk
+  // up from the click target looking for buttons we own, identified by
+  // data-flowbook-action or class. The action takes priority over fixIdx
+  // so the "Other Fix…" button (also a .fb-fix-button) routes correctly.
+  document.addEventListener('click', event => {
+    const target = event.target as HTMLElement | null;
+    if (!target) {
+      return;
+    }
+    const actionEl = target.closest(
+      '[data-flowbook-action]'
+    ) as HTMLElement | null;
+    if (actionEl && !(actionEl as HTMLButtonElement).disabled) {
+      const cellId = actionEl.dataset.cellId;
+      const action = actionEl.dataset.flowbookAction;
+      if (!cellId || !action) {
+        return;
+      }
+      switch (action) {
+        case 'open-other-fix':
+          void app.commands.execute('flowbook:open-other-fix', { cellId });
+          return;
+        case 'submit-other-fix':
+          void app.commands.execute('flowbook:submit-other-fix', { cellId });
+          return;
+        case 'cancel-other-fix':
+          void app.commands.execute('flowbook:cancel-other-fix', { cellId });
+          return;
+        case 'undo':
+          void app.commands.execute('flowbook:undo-fix', { cellId });
+          return;
+      }
+    }
+    const applyBtn = target.closest('.fb-fix-button') as HTMLElement | null;
+    if (applyBtn && !(applyBtn as HTMLButtonElement).disabled) {
+      const cellId = applyBtn.dataset.cellId;
+      const fixIdx = applyBtn.dataset.fixIdx;
+      if (cellId && fixIdx !== undefined) {
+        void app.commands.execute('flowbook:apply-fix', {
+          cellId,
+          fixIdx: Number(fixIdx)
+        });
+      }
+    }
+  });
+}
+
+function findCellById(
+  tracker: INotebookTracker,
+  cellId: string
+): import('@jupyterlab/cells').Cell | null {
+  let found: import('@jupyterlab/cells').Cell | null = null;
+  tracker.forEach(panel => {
+    if (found) {
+      return;
+    }
+    for (const widget of panel.content.widgets) {
+      if (widget.model.id === cellId) {
+        found = widget;
+        return;
+      }
+    }
+  });
+  return found;
+}

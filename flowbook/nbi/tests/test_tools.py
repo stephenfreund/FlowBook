@@ -307,44 +307,62 @@ class TestContinueAfterViolation:
 # Category 4: Source Refactoring Tools
 # ==================================================================
 
+def _bridge(sources):
+    """A fake `run_ui_command` backed by an in-memory list of code-cell sources.
+
+    The unified refactoring tools snapshot the whole notebook (get-cell-count +
+    get-cell for every cell), run a shared handler, then replay edit-cell-source
+    by index. This responder serves those commands from `state`, so tests can
+    assert on the resulting cell sources rather than a brittle call sequence.
+    Returns ``(async_run_fn, state_list)``.
+    """
+    state = list(sources)
+
+    async def run(cmd, params=None):
+        params = params or {}
+        if cmd == 'flowbook:get-cell-count':
+            return {'total': len(state), 'code_cells': len(state), 'markdown_cells': 0}
+        if cmd == 'flowbook:get-cell':
+            i = params['cellIndex']
+            return {
+                'cell_id': f'c{i:02d}',
+                'source': state[i],
+                'cell_type': 'code',
+                'label': index_to_alpha(i),
+            }
+        if cmd == 'flowbook:edit-cell-source':
+            state[params['cellIndex']] = params['source']
+            return {'ok': True, 'cell_id': f"c{params['cellIndex']:02d}"}
+        return {}
+
+    return run, state
+
+
+def _install_bridge(mock_response, sources):
+    run, state = _bridge(sources)
+    mock_response.run_ui_command = AsyncMock(side_effect=run)
+    return state
+
+
+from flowbook.util.cell_index import index_to_alpha  # noqa: E402
+
+
 class TestAlphaRename:
     @pytest.mark.asyncio
     async def test_renames_in_multiple_cells(self, mock_response, mock_request):
-        """Rename 'x' to 'y' starting from @A across 3 code cells."""
-        # Order: get-cell-count, then for each cell in sequence:
-        #   get-cell -> (if renamed) edit-cell-source -> next cell
-        mock_response.run_ui_command.side_effect = [
-            # get-cell-count
-            {'code_cells': 3},
-            # get-cell for @A (index 0) -> has x, will be renamed
-            _make_cell('x = 1'),
-            # edit-cell-source for @A
-            {'ok': True},
-            # get-cell for @B (index 1) -> has x, will be renamed
-            _make_cell('print(x)'),
-            # edit-cell-source for @B
-            {'ok': True},
-            # get-cell for @C (index 2) -> no x, not renamed
-            _make_cell('z = 42'),
-        ]
+        """Rename 'x' to 'y' from @A; @C (no x) is untouched."""
+        state = _install_bridge(mock_response, ['x = 1', 'print(x)', 'z = 42'])
         result = await _call(
             tools.alpha_rename, mock_response, mock_request,
             cell='@A', old_name='x', new_name='y'
         )
-        assert '@A' in result
-        assert '@B' in result
-        # @C should NOT appear since z=42 doesn't contain 'x'
-        assert '@C' not in result
-        assert "'x' -> 'y'" in result
-        assert '2 cells' in result
+        assert '@A' in result and '@B' in result and '@C' not in result
+        assert "'x' -> 'y'" in result and '2 cells' in result
+        assert state == ['y = 1', 'print(y)', 'z = 42']
 
     @pytest.mark.asyncio
     async def test_no_occurrences(self, mock_response, mock_request):
-        mock_response.run_ui_command.side_effect = [
-            {'code_cells': 2},
-            _make_cell('a = 1'),
-            _make_cell('b = 2'),
-        ]
+        _install_bridge(mock_response, ['a = 1', 'b = 2'])
         result = await _call(
             tools.alpha_rename, mock_response, mock_request,
             cell='@A', old_name='x', new_name='y'
@@ -353,71 +371,40 @@ class TestAlphaRename:
 
     @pytest.mark.asyncio
     async def test_skips_empty_cells(self, mock_response, mock_request):
-        mock_response.run_ui_command.side_effect = [
-            {'code_cells': 2},
-            _make_cell(''),           # get-cell @A (empty, skipped, no edit)
-            _make_cell('x = 1'),      # get-cell @B (has x)
-            {'ok': True},             # edit @B
-        ]
+        state = _install_bridge(mock_response, ['', 'x = 1'])
         result = await _call(
             tools.alpha_rename, mock_response, mock_request,
             cell='@A', old_name='x', new_name='y'
         )
-        assert '@B' in result
-        assert '1 cells' in result
+        assert '@B' in result and '1 cells' in result
+        assert state == ['', 'y = 1']
 
     @pytest.mark.asyncio
     async def test_starts_from_specified_cell(self, mock_response, mock_request):
-        """Starting from @B should not read @A."""
-        mock_response.run_ui_command.side_effect = [
-            {'code_cells': 3},
-            # Only @B (index 1) and @C (index 2) are read, interleaved with edits
-            _make_cell('x = 1'),     # get-cell @B
-            {'ok': True},            # edit @B
-            _make_cell('print(x)'),  # get-cell @C
-            {'ok': True},            # edit @C
-        ]
-        result = await _call(
+        """Starting from @B leaves @A's use of x alone."""
+        state = _install_bridge(mock_response, ['x = 1', 'x = x + 1', 'print(x)'])
+        await _call(
             tools.alpha_rename, mock_response, mock_request,
             cell='@B', old_name='x', new_name='y'
         )
-        # Verify get-cell was called with indices 1 and 2, NOT 0
-        get_cell_calls = [
-            c for c in mock_response.run_ui_command.call_args_list
-            if c[0][0] == 'flowbook:get-cell'
-        ]
-        indices = [c[0][1]['cellIndex'] for c in get_cell_calls]
-        assert 0 not in indices
-        assert 1 in indices
-        assert 2 in indices
+        # @A untouched; @B and @C fully renamed (every x from @B onward).
+        assert state == ['x = 1', 'y = y + 1', 'print(y)']
 
 
 class TestRemoveInplace:
     @pytest.mark.asyncio
     async def test_removes_inplace(self, mock_response, mock_request):
-        source = "df.drop(columns=['x'], inplace=True)"
-        mock_response.run_ui_command.side_effect = [
-            _make_cell(source),   # get-cell
-            {'ok': True},         # edit-cell-source
-        ]
+        state = _install_bridge(mock_response, ["df.drop(columns=['x'], inplace=True)"])
         result = await _call(
             tools.remove_inplace, mock_response, mock_request,
             cell='@A', variable='df'
         )
-        assert 'drop' in result
-        assert 'Removed inplace=True' in result
-        # Verify the edited source was written
-        edit_call = [
-            c for c in mock_response.run_ui_command.call_args_list
-            if c[0][0] == 'flowbook:edit-cell-source'
-        ][0]
-        new_source = edit_call[0][1]['source']
-        assert 'inplace' not in new_source
-        assert 'df = df.drop' in new_source
+        assert 'drop' in result and 'Removed inplace=True' in result
+        assert 'inplace' not in state[0] and 'df = df.drop' in state[0]
 
     @pytest.mark.asyncio
     async def test_no_inplace_found(self, mock_response, mock_request):
-        mock_response.run_ui_command.return_value = _make_cell('x = df.head()')
+        _install_bridge(mock_response, ['x = df.head()'])
         result = await _call(
             tools.remove_inplace, mock_response, mock_request,
             cell='@A', variable='df'
@@ -425,30 +412,25 @@ class TestRemoveInplace:
         assert 'No inplace=True found' in result
 
     @pytest.mark.asyncio
-    async def test_syntax_error(self, mock_response, mock_request):
-        mock_response.run_ui_command.return_value = _make_cell('def f(:\n  pass')
-        result = await _call(
-            tools.remove_inplace, mock_response, mock_request,
-            cell='@B', variable='df'
-        )
-        assert 'syntax errors' in result
-
-    @pytest.mark.asyncio
-    async def test_multiple_inplace_calls(self, mock_response, mock_request):
-        source = (
-            "df.drop(columns=['a'], inplace=True)\n"
-            "df.fillna(0, inplace=True)"
-        )
-        mock_response.run_ui_command.side_effect = [
-            _make_cell(source),
-            {'ok': True},
-        ]
+    async def test_syntax_error_reports_no_effect(self, mock_response, mock_request):
+        # Unparseable source: the shared handler tries a regex fallback, finds no
+        # inplace call, and reports a no-op (rather than a parse error).
+        _install_bridge(mock_response, ['def f(:\n  pass'])
         result = await _call(
             tools.remove_inplace, mock_response, mock_request,
             cell='@A', variable='df'
         )
-        assert 'drop' in result
-        assert 'fillna' in result
+        assert 'No inplace=True found' in result
+
+    @pytest.mark.asyncio
+    async def test_multiple_inplace_calls(self, mock_response, mock_request):
+        source = "df.drop(columns=['a'], inplace=True)\ndf.fillna(0, inplace=True)"
+        _install_bridge(mock_response, [source])
+        result = await _call(
+            tools.remove_inplace, mock_response, mock_request,
+            cell='@A', variable='df'
+        )
+        assert 'drop' in result and 'fillna' in result
 
 
 class TestInsertDeepcopy:
@@ -456,55 +438,32 @@ class TestInsertDeepcopy:
     async def test_inserts_deepcopy_and_renames_downstream(
         self, mock_response, mock_request
     ):
-        mock_response.run_ui_command.side_effect = [
-            # get-cell for @B (start cell)
-            _make_cell('print(df.head())'),
-            # edit-cell-source for @B (deepcopy + renamed)
-            {'ok': True},
-            # get-cell-count
-            {'code_cells': 4},
-            # get-cell for @C (index 2)
-            _make_cell('result = df.describe()'),
-            # get-cell for @D (index 3)
-            _make_cell('x = 42'),
-            # edit-cell-source for @C (renamed)
-            {'ok': True},
-        ]
+        state = _install_bridge(mock_response, [
+            'df = load()',            # @A
+            'print(df.head())',       # @B (start)
+            'result = df.describe()', # @C uses df -> renamed
+            'x = 42',                 # @D no df
+        ])
         result = await _call(
             tools.insert_deepcopy, mock_response, mock_request,
             cell='@B', variable='df'
         )
-        assert 'deepcopy' in result
-        assert 'df_copy' in result
-        assert '@B' in result
-        # @C should be in downstream renames (it uses df)
-        assert '@C' in result
-
-        # Verify the edit for the start cell includes the deepcopy line
-        edit_calls = [
-            c for c in mock_response.run_ui_command.call_args_list
-            if c[0][0] == 'flowbook:edit-cell-source'
-        ]
-        start_edit = edit_calls[0]
-        new_source = start_edit[0][1]['source']
-        assert 'import copy' in new_source
-        assert 'copy.deepcopy(df)' in new_source
+        assert 'deepcopy' in result and '@B' in result and '@C' in result
+        # New name is collision-safe: {var}_{cell_id} (cell_id 'c01' for @B).
+        assert 'df_c01' in result
+        assert 'import copy' in state[1] and 'copy.deepcopy(df)' in state[1]
+        assert 'df_c01' in state[2]      # downstream renamed
+        assert state[0] == 'df = load()' and state[3] == 'x = 42'  # untouched
 
     @pytest.mark.asyncio
     async def test_no_downstream_renames(self, mock_response, mock_request):
-        mock_response.run_ui_command.side_effect = [
-            _make_cell('print(df)'),   # get-cell for @C
-            {'ok': True},              # edit @C
-            {'code_cells': 4},         # get-cell-count
-            _make_cell('x = 1'),       # @D (no df)
-        ]
+        state = _install_bridge(mock_response, ['a = 1', 'b = 2', 'print(df)', 'x = 1'])
         result = await _call(
             tools.insert_deepcopy, mock_response, mock_request,
             cell='@C', variable='df'
         )
-        assert 'deepcopy' in result
-        # No downstream mentions
-        assert '@D' not in result
+        assert 'deepcopy' in result and '@D' not in result
+        assert 'copy.deepcopy(df)' in state[2] and state[3] == 'x = 1'
 
 
 class TestMarkDiagnostic:

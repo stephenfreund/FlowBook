@@ -217,6 +217,22 @@ class ExecuteCommand(NotebookCommand):
                             # Extract all metadata types using generic extractor
                             extract_and_set_metadata(cell, result["outputs"])
 
+                            # Persist reproducibility violations onto the cell so the
+                            # saved *_processed.ipynb carries them. Violations arrive as
+                            # flowbook protocol messages (not output metadata), so the
+                            # generic extractor above does not capture them.
+                            cell_violations = [
+                                m
+                                for m in result.get("flowbook_messages", [])
+                                if m.get("type") == "violation"
+                            ]
+                            if cell_violations:
+                                if "metadata" not in cell:
+                                    cell["metadata"] = {}
+                                fb_md = cell["metadata"].get("flowbook", {})
+                                fb_md["predicate_violations"] = cell_violations
+                                cell["metadata"]["flowbook"] = fb_md
+
                             for output in result["outputs"]:
                                 if output["output_type"] == "stream":
                                     log(output["text"])

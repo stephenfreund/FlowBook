@@ -455,6 +455,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         # Continue after violation flag (default: stop on violation)
         self._continue_after_violation: bool = False
 
+        # Who drove the current execution: "ai" (MCP / NBI tool call / fix
+        # agent) or "user". Set per-execution from the request metadata; echoed
+        # on the metadata message so a co-located LogBook can attribute
+        # out-of-process AI activity. Defaults to "user".
+        self._actor: str = "user"
+
         # Comm channel for frontend communication (set when frontend opens comm)
         self._flowbook_comm = None
 
@@ -1323,6 +1329,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         with timer(message=f"do_execute: {self._cell_id}"):
             try:
+                # Who is driving this execution (default human). Clients that
+                # act on behalf of an LLM send actor="ai" in execute metadata.
+                self._actor = (cell_meta or {}).get("actor", "user")
+
                 # Process FlowBook protocol messages from execute metadata
                 # (sent by Python clients via execute request metadata)
                 if cell_meta and "flowbook" in cell_meta:
@@ -1886,8 +1896,9 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
 
         icon = "✓" if not (sdc_result and sdc_result.has_errors()) else "✗"
 
-        # Send metadata and status via protocol messages
-        self._send_flowbook_message(build_metadata_message(metadata))
+        # Send metadata and status via protocol messages. Echo the driving
+        # actor so a co-located LogBook can attribute this execution.
+        self._send_flowbook_message(build_metadata_message(metadata, actor=self._actor))
         self._send_flowbook_message(
             build_status_message(icon, " | ".join(parts), cell_id=self._cell_id or "")
         )

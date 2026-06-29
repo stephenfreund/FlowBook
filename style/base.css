@@ -24,6 +24,29 @@
   flex-shrink: 0;
 }
 
+.flowbook-fixmodel-header {
+  padding: 6px 10px;
+  background-color: var(--jp-layout-color2);
+  border-bottom: 1px solid var(--jp-border-color1);
+  flex-shrink: 0;
+}
+
+.flowbook-fixmodel-label {
+  font-size: 0.7em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #888;
+  margin-bottom: 2px;
+}
+
+.flowbook-fixmodel-value {
+  font-size: 0.85em;
+  font-family: var(--jp-code-font-family, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .flowbook-metadata-content {
   padding: 16px;
   font-family: var(--jp-ui-font-family);
@@ -271,6 +294,99 @@
   padding: 1px 4px;
   border-radius: 2px;
   margin-right: -2px;
+}
+
+/* ========================================
+   AI fix suggester regions (inside violation notice)
+   ======================================== */
+
+.fb-ai-fix {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fb-diagnosis {
+  font-style: italic;
+  font-size: 0.85em;
+  color: #5a1a22;
+  padding: 2px 0;
+}
+
+.fb-fix-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.fb-fix-button {
+  background-color: #fff;
+  border: 1px solid #842029;
+  color: #842029;
+  border-radius: 3px;
+  padding: 3px 8px;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+
+.fb-fix-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fb-fix-button:hover:not(:disabled) {
+  background-color: #842029;
+  color: #fff;
+}
+
+.fb-custom-input {
+  margin-top: 4px;
+}
+
+.fb-custom-input-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fb-custom-textarea {
+  width: 100%;
+  font-family: var(--jp-code-font-family, monospace);
+  font-size: 0.88em;
+  padding: 4px 6px;
+  border: 1px solid #842029;
+  border-radius: 3px;
+  background-color: #fff;
+  color: #212529;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.fb-custom-input-buttons {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.fb-undo {
+  margin-top: 2px;
+}
+
+.fb-undo-button {
+  background-color: #fff;
+  border: 1px solid #6c757d;
+  color: #495057;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 0.8em;
+  cursor: pointer;
+}
+
+.fb-undo-button:hover {
+  background-color: #6c757d;
+  color: #fff;
 }
 
 /* ========================================

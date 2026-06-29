@@ -654,6 +654,11 @@ class CDFData:
     base_runtime_sorted: List[float] = field(default_factory=list)
     base_runtime_percentiles: List[float] = field(default_factory=list)
 
+    # Absolute per-cell memory overhead CDF (Checkpoint - Base, in MB)
+    memory_abs_mb: List[float] = field(default_factory=list)
+    memory_abs_sorted: List[float] = field(default_factory=list)
+    memory_abs_percentiles: List[float] = field(default_factory=list)
+
 
 # ============ Comparison Result Model ============
 

@@ -16,6 +16,7 @@ import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { CellChange } from '@jupyter/ydoc';
 import { Kernel, KernelMessage } from '@jupyterlab/services';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
+import { FixSuggester } from './fixsuggester';
 import {
   IReproducibilityMetadata,
   IFrontendStalenessReason,
@@ -32,10 +33,12 @@ import {
   FlowbookClientMessage
 } from './protocol';
 import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
+import { emitAiActivity } from './aiattribution';
 
 export class ReproducibilityExecutionHookManager {
   private _tracker: INotebookTracker;
   private _highlighter: ReproducibilityCellHighlighter;
+  private _fixSuggester: FixSuggester | null = null;
   private _editTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private _executedCells: Set<string> = new Set();
   private _attachedKernel: Kernel.IKernelConnection | null = null;
@@ -54,6 +57,14 @@ export class ReproducibilityExecutionHookManager {
     this._tracker = tracker;
     this._highlighter = highlighter;
     this._setupHooks();
+  }
+
+  /**
+   * Wire in the AI fix suggester. Called by the activation manager after
+   * both the execution hook and the suggester are constructed.
+   */
+  setFixSuggester(suggester: FixSuggester | null): void {
+    this._fixSuggester = suggester;
   }
 
   /**
@@ -203,6 +214,12 @@ export class ReproducibilityExecutionHookManager {
    * [EDIT transition (§2.3)] Handle cell content change with debouncing.
    */
   private _onCellContentChanged(cellId: string, model: ICodeCellModel): void {
+    // Cancel any in-flight AI fix suggestion — the violation it was
+    // diagnosing is about to be invalidated by this edit.
+    if (this._fixSuggester) {
+      this._fixSuggester.cancel(cellId);
+    }
+
     // Only notify kernel about cells that have been previously executed
     if (!this._executedCells.has(cellId)) {
       return;
@@ -318,6 +335,30 @@ export class ReproducibilityExecutionHookManager {
               panel.context.path
             );
             this._highlighter.refreshDependencies();
+
+            // If an out-of-process agent (MCP on the shared kernel) drove this
+            // execution, announce it for an optional observer (e.g. LogBook).
+            // Frontend execution signals (NotebookActions) don't fire for ZMQ
+            // runs, so this DOM-event is the only signal an observer gets. It
+            // carries enough to record the run; dependency-free, no-op when
+            // unobserved.
+            if ((data as { actor?: string }).actor === 'ai') {
+              const codeModel =
+                cell.model.type === 'code'
+                  ? (cell.model as ICodeCellModel)
+                  : null;
+              const hasError = !!(
+                reproMeta.errors && reproMeta.errors.length > 0
+              );
+              emitAiActivity({
+                path: panel.context.path,
+                cellId: reproMeta.cell_id,
+                kind: 'execute',
+                status: hasError ? 'error' : 'ok',
+                executionCount: codeModel ? codeModel.executionCount : null,
+                outputCount: codeModel ? codeModel.outputs.length : undefined
+              });
+            }
           }
         }
 
@@ -421,6 +462,20 @@ export class ReproducibilityExecutionHookManager {
 
     // Refresh dependency graph
     this._highlighter.refreshDependencies();
+
+    // AI fix suggestion: kick off a streaming diagnosis if this cell now has
+    // violations, or clear any stale suggestion if the cell is clean.
+    if (this._fixSuggester) {
+      const meta = cell.model.getMetadata('flowbook') as
+        | IReproducibilityMetadata
+        | undefined;
+      const hasErrors = !!meta?.errors && meta.errors.length > 0;
+      if (hasErrors) {
+        this._fixSuggester.request(panel, cell);
+      } else {
+        this._fixSuggester.clear(cell);
+      }
+    }
   }
 
   // _extractPredicateViolations removed — violations now arrive via comm

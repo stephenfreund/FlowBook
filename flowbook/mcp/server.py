@@ -46,6 +46,41 @@ def _cell_label(session: NotebookSession, cell_id: str) -> str:
         return cell_id
 
 
+# Cell output shown inline by run_cell/read_cell is capped so a single chatty
+# cell can't flood the model's context. Large outputs keep their head AND tail
+# (column headers + summary rows survive) with the middle elided behind an
+# obvious banner; the full text is always retrievable via get_cell_output.
+_OUTPUT_HEAD_CHARS = 2000
+_OUTPUT_TAIL_CHARS = 2000
+
+
+def _format_cell_output(output_text: str, cell_id: str) -> str:
+    """Render a cell's output for an MCP result string.
+
+    Returns ``""`` for empty output, ``"\\nOutput:\\n<text>"`` for small output,
+    or a head + banner + tail block for large output. The banner makes
+    truncation impossible to miss and tells the client how to page the rest.
+    """
+    text = (output_text or "").strip()
+    if not text:
+        return ""
+
+    total = len(text)
+    if total <= _OUTPUT_HEAD_CHARS + _OUTPUT_TAIL_CHARS:
+        return f"\nOutput:\n{text}"
+
+    head = text[:_OUTPUT_HEAD_CHARS]
+    tail = text[-_OUTPUT_TAIL_CHARS:]
+    hidden = total - _OUTPUT_HEAD_CHARS - _OUTPUT_TAIL_CHARS
+    banner = (
+        f"\n\n‹‹‹ ⚠ OUTPUT TRUNCATED — {hidden} of {total} chars hidden "
+        f"(showing first {_OUTPUT_HEAD_CHARS} + last {_OUTPUT_TAIL_CHARS}). "
+        f"Get the full text with "
+        f"get_cell_output(cell_id='{cell_id}', offset={_OUTPUT_HEAD_CHARS}) ›››\n\n"
+    )
+    return f"\nOutput:\n{head}{banner}{tail}"
+
+
 def _logged_tool(fn):
     """Decorator that logs every tool call to the session event log.
 
@@ -274,17 +309,51 @@ def read_cell(cell_id: str, ctx: Context) -> str:
     line = f"{label} [{result['cell_id']}] ({result.get('status', '?')})"
     line += f"\n>>> {result['source']}"
 
-    output_text = result.get("outputs_text", "").strip()
-    if output_text:
-        preview = output_text[:300]
-        if len(output_text) > 300:
-            preview += "..."
-        line += f"\nOutput: {preview}"
+    line += _format_cell_output(result.get("outputs_text", ""), result["cell_id"])
 
     if "flowbook" in result:
         line += f"\n{result['flowbook']}"
 
     return line
+
+
+@mcp.tool()
+@_logged_tool
+def get_cell_output(
+    cell_id: str, ctx: Context, offset: int = 0, limit: int = 4000
+) -> str:
+    """Page through a cell's full, untruncated output text.
+
+    run_cell / run_actionable_cell / read_cell show only a head+tail preview of
+    large outputs. Use this to retrieve the rest: it returns ``limit`` chars of
+    the full output starting at ``offset``, with the total length and the next
+    offset so you can walk the whole thing.
+
+    Args:
+        cell_id: The cell ID.
+        offset: 0-based character offset to start from (default 0).
+        limit: Max characters to return (default 4000).
+    """
+    session = _get_session(ctx)
+    label = _cell_label(session, cell_id)
+    result = session.get_cell(cell_id)  # raises ValueError if the cell is absent
+    full = (result.get("outputs_text", "") or "").strip()
+    total = len(full)
+
+    if total == 0:
+        return f"Cell {label} [{cell_id}] has no output."
+    if limit <= 0:
+        return "limit must be positive."
+    offset = max(0, offset)
+    if offset >= total:
+        return f"offset {offset} is past end of output ({total} chars total)."
+
+    chunk = full[offset : offset + limit]
+    end = offset + len(chunk)
+    header = f"Output of {label} [{cell_id}] — chars {offset}–{end} of {total}"
+    if end < total:
+        header += f" (more: get_cell_output(cell_id='{cell_id}', offset={end}))"
+    return f"{header}\n{chunk}"
 
 
 @mcp.tool()
@@ -348,12 +417,7 @@ def run_cell(cell_id: str, ctx: Context) -> str:
     if result.get("error_message"):
         line += f" — {result['error_message']}"
 
-    output_text = result.get("outputs_text", "").strip()
-    if output_text:
-        preview = output_text[:200]
-        if len(output_text) > 200:
-            preview += "..."
-        line += f"\nOutput: {preview}"
+    line += _format_cell_output(result.get("outputs_text", ""), result["cell_id"])
 
     if "flowbook" in result:
         line += f"\n{result['flowbook']}"
@@ -474,12 +538,7 @@ def run_actionable_cell(ctx: Context) -> str:
     if result.get("error_message"):
         line += f" — {result['error_message']}"
 
-    output_text = result.get("outputs_text", "").strip()
-    if output_text:
-        preview = output_text[:200]
-        if len(output_text) > 200:
-            preview += "..."
-        line += f"\nOutput: {preview}"
+    line += _format_cell_output(result.get("outputs_text", ""), result["cell_id"])
 
     if "flowbook" in result:
         line += f"\n{result['flowbook']}"
@@ -817,6 +876,49 @@ def move_cell(cell_id: str, after_cell_id: str, ctx: Context) -> str:
         f"Moved cell {moved_label} [{result['cell_id']}] to after {after_label} [{result['moved_after']}]\n"
         f"New cell order: {', '.join(order_labels)}"
     )
+
+
+@mcp.tool()
+@_logged_tool
+def insert_cell(
+    after_cell_id: str, source: str, ctx: Context, cell_type: str = "code"
+) -> str:
+    """Insert a new cell directly after another cell.
+
+    Use this to build up a notebook from a conversation: add a code cell with
+    analysis or a markdown cell with narration/conclusions. The new cell is
+    inserted unrun; execute it with run_cell when ready.
+
+    Args:
+        after_cell_id: Cell ID to insert after (may be a code OR markdown cell).
+        source: Source content for the new cell.
+        cell_type: 'code' (default) or 'markdown'.
+    """
+    session = _get_session(ctx)
+    result = session.insert_cell(after_cell_id, source, cell_type=cell_type)
+    after_label = _cell_label(session, after_cell_id)
+    return (
+        f"Inserted {result['cell_type']} cell [{result['new_cell_id']}] "
+        f"after {after_label} [{result['after_cell_id']}]"
+    )
+
+
+@mcp.tool()
+@_logged_tool
+def delete_cell(cell_id: str, ctx: Context) -> str:
+    """Delete a cell from the notebook.
+
+    Use this to remove an exploratory cell that turned out to be a dead end
+    (typically after restoring a checkpoint). Distil the rejected approach into
+    a markdown note rather than leaving dead code behind.
+
+    Args:
+        cell_id: The cell ID to remove.
+    """
+    session = _get_session(ctx)
+    label = _cell_label(session, cell_id)
+    result = session.delete_cell(cell_id)
+    return f"Deleted cell {label} [{result['cell_id']}]"
 
 
 # =====================================================================

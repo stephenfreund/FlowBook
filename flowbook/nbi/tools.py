@@ -19,8 +19,55 @@ from flowbook.scripts.fix_repro_errors import (
     prepend_to_cell_source,
     InplaceRemover,
 )
+from flowbook.tools import get as _get_tool
+from flowbook.tools.adapters.dict_controller import DictController
+from flowbook.tools.controller import NoEffectError
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Shared-handler bridge: snapshot the live notebook into a dict, run a unified
+# tool handler (flowbook.tools) over a DictController, then replay the source
+# edits back through the frontend bridge. This lets the AST refactoring tools
+# reuse the exact same algorithm as the MCP server and the in-product fixer.
+# ---------------------------------------------------------------------------
+
+async def _snapshot_dict(response):
+    """Build a notebook dict (code cells in order, with real ids) from the bridge."""
+    counts = await response.run_ui_command('flowbook:get-cell-count', {})
+    num_code_cells = counts['code_cells']
+    cells = []
+    for i in range(num_code_cells):
+        data = await response.run_ui_command('flowbook:get-cell', {"cellIndex": i})
+        cells.append({
+            "cell_type": "code",
+            "id": data.get('cell_id') or f"_idx{i}",
+            "source": data.get('source', ''),
+            "metadata": {},
+            "outputs": [],
+            "execution_count": None,
+        })
+    notebook = {"cells": cells, "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    return notebook, [c["id"] for c in cells]
+
+
+async def _replay_edits(response, ctrl, order):
+    """Push a controller's source edits back to the bridge, keyed by code index.
+
+    Returns the @-labels of the edited cells. Source-only tools (rename,
+    remove_inplace, insert_deepcopy) never delete or move, so only
+    `post_sources` needs replaying.
+    """
+    id_to_index = {cid: i for i, cid in enumerate(order)}
+    labels = []
+    for cid, src in ctrl.post_sources.items():
+        await response.run_ui_command(
+            'flowbook:edit-cell-source',
+            {"cellIndex": id_to_index[cid], "source": src},
+        )
+        labels.append(index_to_alpha(id_to_index[cid]))
+    return labels
 
 # ---------------------------------------------------------------------------
 # Shared session instance — set by create_tools()
@@ -335,21 +382,21 @@ async def alpha_rename(cell: str, old_name: str, new_name: str, **args) -> str:
     """
     response = args["response"]
     start_idx = parse_cell_ref(cell)
-    counts = await response.run_ui_command('flowbook:get-cell-count', {})
-    num_code_cells = counts['code_cells']
-
-    modified = []
-    for i in range(start_idx, num_code_cells):
-        cell_data = await response.run_ui_command('flowbook:get-cell', {"cellIndex": i})
-        source = cell_data.get('source', '')
-        if not source.strip():
-            continue
-        new_source, was_renamed = rename_variable_in_code(source, old_name, new_name)
-        if was_renamed:
-            await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": i, "source": new_source})
-            modified.append(index_to_alpha(i))
-
-    return f"Renamed '{old_name}' -> '{new_name}' in {len(modified)} cells: {', '.join(modified)}" if modified else f"No occurrences of '{old_name}' found from {index_to_alpha(start_idx)} onward"
+    notebook, order = await _snapshot_dict(response)
+    if start_idx >= len(order):
+        return f"No code cell at {index_to_alpha(start_idx)}"
+    ctrl = DictController(notebook)
+    try:
+        _get_tool("alpha_rename").handler(
+            ctrl, cell_id=order[start_idx], old_name=old_name, new_name=new_name
+        )
+    except NoEffectError:
+        return (
+            f"No occurrences of '{old_name}' found from "
+            f"{index_to_alpha(start_idx)} onward"
+        )
+    labels = await _replay_edits(response, ctrl, order)
+    return f"Renamed '{old_name}' -> '{new_name}' in {len(labels)} cells: {', '.join(labels)}"
 
 
 @nbapi.auto_approve
@@ -363,24 +410,20 @@ async def remove_inplace(cell: str, variable: str, **args) -> str:
     """
     response = args["response"]
     idx = parse_cell_ref(cell)
-    cell_data = await response.run_ui_command('flowbook:get-cell', {"cellIndex": idx})
-    source = cell_data.get('source', '')
+    notebook, order = await _snapshot_dict(response)
     label = index_to_alpha(idx)
-
-    actual_var = find_actual_variable_name(source, variable)
-
+    if idx >= len(order):
+        return f"No code cell at {label}"
+    ctrl = DictController(notebook)
     try:
-        tree = ast.parse(source)
-        remover = InplaceRemover(actual_var)
-        new_tree = remover.visit(tree)
-        if remover.modified:
-            new_source = ast.unparse(new_tree)
-            await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": idx, "source": new_source})
-            methods = ', '.join(remover.method_calls_fixed)
-            return f"Removed inplace=True from {methods} on '{actual_var}' in {label}"
-        return f"No inplace=True found for '{actual_var}' in {label}"
-    except SyntaxError:
-        return f"Could not parse cell {label} — source has syntax errors"
+        result = _get_tool("remove_inplace").handler(
+            ctrl, cell_id=order[idx], variable=variable
+        )
+    except NoEffectError:
+        return f"No inplace=True found for '{variable}' in {label}"
+    await _replay_edits(response, ctrl, order)
+    methods = ', '.join(result["methods_fixed"])
+    return f"Removed inplace=True from {methods} on '{result['variable']}' in {label}"
 
 
 @nbapi.auto_approve
@@ -394,37 +437,24 @@ async def insert_deepcopy(cell: str, variable: str, **args) -> str:
     """
     response = args["response"]
     start_idx = parse_cell_ref(cell)
-    cell_data = await response.run_ui_command('flowbook:get-cell', {"cellIndex": start_idx})
-    source = cell_data.get('source', '')
+    notebook, order = await _snapshot_dict(response)
     label = index_to_alpha(start_idx)
-
-    actual_var = find_actual_variable_name(source, variable)
-    new_name = f"{actual_var}_copy"
-
-    # Modify the target cell: insert deepcopy and rename
-    magic_prefix, rest = split_cell_magic(source)
-    new_rest, _ = rename_variable_in_code(rest, actual_var, new_name)
-    copy_line = f"import copy; {new_name} = copy.deepcopy({actual_var})\n"
-    new_source = magic_prefix + copy_line + new_rest
-    await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": start_idx, "source": new_source})
-
-    # Rename in all downstream cells
-    counts = await response.run_ui_command('flowbook:get-cell-count', {})
-    num_code_cells = counts['code_cells']
-    modified_downstream = []
-
-    for i in range(start_idx + 1, num_code_cells):
-        ds_data = await response.run_ui_command('flowbook:get-cell', {"cellIndex": i})
-        ds_source = ds_data.get('source', '')
-        if not ds_source.strip():
-            continue
-        ds_new, was_renamed = rename_variable_in_code(ds_source, actual_var, new_name)
-        if was_renamed:
-            await response.run_ui_command('flowbook:edit-cell-source', {"cellIndex": i, "source": ds_new})
-            modified_downstream.append(index_to_alpha(i))
-
-    downstream_msg = f", renamed in {', '.join(modified_downstream)}" if modified_downstream else ""
-    return f"Inserted deepcopy of '{actual_var}' as '{new_name}' in {label}{downstream_msg}"
+    if start_idx >= len(order):
+        return f"No code cell at {label}"
+    ctrl = DictController(notebook)
+    result = _get_tool("insert_deepcopy").handler(
+        ctrl, cell_id=order[start_idx], variable=variable
+    )
+    id_to_index = {cid: i for i, cid in enumerate(order)}
+    await _replay_edits(response, ctrl, order)
+    downstream = [
+        index_to_alpha(id_to_index[cid]) for cid in result["modified_downstream"]
+    ]
+    downstream_msg = f", renamed in {', '.join(downstream)}" if downstream else ""
+    return (
+        f"Inserted deepcopy of '{result['variable']}' as "
+        f"'{result['new_name']}' in {label}{downstream_msg}"
+    )
 
 
 @nbapi.auto_approve

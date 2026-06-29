@@ -202,3 +202,162 @@ class TestSharedKernel:
 
         s1.close()
         assert read_discovery(abs_path) is None
+
+
+class TestRefactoringToolsOverKernelController:
+    """The 6 refactoring tools run through the unified handlers + KernelController.
+
+    Exercises the real loaded session (kernel + Contents-API batching) end to
+    end, verifying the MCP cutover preserves the historical return shapes.
+    Cell ids are taken from load() since the session normalizes them.
+    """
+
+    def test_alpha_rename_renames_downstream(self, simple_notebook):
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]  # [x=1, y=x+1, print(y)]
+        try:
+            result = session.alpha_rename(ids[1], "y", "y2")
+            assert result["total_modified"] == 2  # defines y, and the print(y)
+            assert set(result["modified_cells"]) == {ids[1], ids[2]}
+        finally:
+            session.close()
+
+    def test_alpha_rename_no_match_is_tolerant(self, simple_notebook):
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            result = session.alpha_rename(ids[0], "nonexistent", "z")
+            assert result["total_modified"] == 0
+            assert result["modified_cells"] == []
+        finally:
+            session.close()
+
+    def test_merge_and_move(self, simple_notebook):
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            merged = session.merge_cells([ids[0], ids[1]])
+            assert merged["merged_cell_id"] == ids[0]
+            assert merged["cells_removed"] == [ids[1]]
+            assert merged["new_cell_order"] == [ids[0], ids[2]]
+
+            moved = session.move_cell(ids[0], ids[2])
+            assert moved["new_cell_order"] == [ids[2], ids[0]]
+        finally:
+            session.close()
+
+    def test_insert_and_delete_code_cell(self, simple_notebook):
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]  # [x=1, y=x+1, print(y)]
+        try:
+            inserted = session.insert_cell(ids[0], "w = 99", cell_type="code")
+            new_id = inserted["new_cell_id"]
+            assert inserted["cell_type"] == "code"
+            assert inserted["new_cell_order"] == [ids[0], new_id, ids[1], ids[2]]
+
+            deleted = session.delete_cell(new_id)
+            assert deleted["removed"] is True
+            assert deleted["new_cell_order"] == ids
+        finally:
+            session.close()
+
+    def test_insert_markdown_cell_not_in_code_order(self, simple_notebook):
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            inserted = session.insert_cell(
+                ids[0], "## Decisions log", cell_type="markdown"
+            )
+            # markdown cells are absent from the code-cell order...
+            assert inserted["new_cell_order"] == ids
+            # ...but present in the underlying notebook, right after ids[0].
+            order = [c.get("id") for c in session.notebook["cells"]]
+            assert order.index(inserted["new_cell_id"]) == order.index(ids[0]) + 1
+        finally:
+            session.close()
+
+    def test_mark_diagnostic_idempotent(self, simple_notebook):
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            first = session.mark_diagnostic(ids[2])
+            assert first["new_source_preview"].startswith("%diagnostic")
+            again = session.mark_diagnostic(ids[2])
+            assert again.get("already_diagnostic") is True
+        finally:
+            session.close()
+
+
+class TestLargeOutputTruncationAndPaging:
+    """run_cell shows a head+tail preview with an obvious banner for big output;
+    get_cell_output pages the full untruncated text. Exercises the real kernel."""
+
+    def _ctx(self, session):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            request_context=SimpleNamespace(lifespan_context={"session": session})
+        )
+
+    def test_run_cell_truncates_then_get_cell_output_pages(self, simple_notebook):
+        from flowbook.mcp import server
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            ctx = self._ctx(session)
+            session.edit_cell(ids[2], "print('Z' * 5000)")
+
+            run_out = server.run_cell(ids[2], ctx)
+            # Obvious banner + paging hint; only head+tail of the Z's shown.
+            assert "OUTPUT TRUNCATED" in run_out
+            assert "get_cell_output" in run_out
+            assert run_out.count("Z") == server._OUTPUT_HEAD_CHARS + server._OUTPUT_TAIL_CHARS
+
+            # Page 1 of 2: reports the true total and points at the next offset.
+            page1 = server.get_cell_output(ids[2], ctx, offset=0, limit=3000)
+            assert "of 5000" in page1 and "offset=3000" in page1
+            assert page1.count("Z") == 3000
+
+            # Page 2: the remainder, with no further pages.
+            page2 = server.get_cell_output(ids[2], ctx, offset=3000, limit=3000)
+            assert page2.count("Z") == 2000
+            assert "offset=" not in page2
+        finally:
+            session.close()
+
+
+class TestActorAttribution:
+    """The kernel echoes the driving actor on flowbook metadata (Phase 4).
+
+    This is the data path that lets a co-located LogBook attribute
+    out-of-process MCP executions to origin: 'ai'.
+    """
+
+    def _metadata_actor(self, messages):
+        for m in messages:
+            if m.get("type") == "metadata":
+                return m.get("actor")
+        return "<<no metadata message>>"
+
+    def test_ai_actor_echoed_when_mcp_runs_a_cell(self, simple_notebook):
+        from flowbook.server.kernel_helper import KernelHelper
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            result = KernelHelper.execute_code(
+                session.kernel_client, "x = 1", cell_id=ids[0], actor="ai"
+            )
+            assert self._metadata_actor(result["flowbook_messages"]) == "ai"
+        finally:
+            session.close()
+
+    def test_defaults_to_user_when_actor_absent(self, simple_notebook):
+        from flowbook.server.kernel_helper import KernelHelper
+        session = NotebookSession()
+        ids = session.load(simple_notebook)["cell_ids"]
+        try:
+            result = KernelHelper.execute_code(
+                session.kernel_client, "x = 1", cell_id=ids[0]
+            )
+            assert self._metadata_actor(result["flowbook_messages"]) == "user"
+        finally:
+            session.close()

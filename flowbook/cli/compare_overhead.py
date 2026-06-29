@@ -1130,8 +1130,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
                 prev_cell = flowbook_mem_cells[i - 1]
                 base_mb = prev_cell.get("user_ns_mb", 0) + prev_cell.get("gpu_mb", 0)
 
-            # Compute ratio
-            if base_mb >= min_meaningful_base_mb:
+            # Compute ratio (base_mb > 0 guards the division when
+            # min_meaningful_base_mb is 0; the first cell always has base 0)
+            if base_mb >= min_meaningful_base_mb and base_mb > 0:
                 ratio = delta_mb / base_mb
             else:
                 ratio = 0.0
@@ -1150,7 +1151,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             max_base_total = max(
                 c.get("user_ns_mb", 0) + c.get("gpu_mb", 0) for c in flowbook_mem_cells
             )
-            if max_base_total >= min_meaningful_base_mb:
+            if max_base_total >= min_meaningful_base_mb and max_base_total > 0:
                 peak_memory_overhead_pct = (
                     max_flowbook_total / max_base_total - 1
                 ) * 100
@@ -1201,7 +1202,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
                 # Derive from cumulative totals
                 delta_mb = cumulative_totals[i]
 
-            if base_mb >= min_meaningful_base_mb:
+            if base_mb >= min_meaningful_base_mb and base_mb > 0:
                 ratio = delta_mb / base_mb
             else:
                 ratio = 0.0
@@ -4278,7 +4279,7 @@ def process_v4(
                         render_cdf_panel(
                             cdf_axes[1],
                             cdf_data,
-                            "memory",
+                            "memory_abs",
                             large_fonts=args.large_fonts,
                             show_sample_size=show_sample_size,
                         )
@@ -4482,9 +4483,9 @@ def process_v4(
                             render_cdf_panel(
                                 all_cdf_axes[2],
                                 cdf_data,
-                                "memory",
+                                "memory_abs",
                                 color_override="orange",
-                                title_override="Per-Cell Memory Overhead",
+                                title_override="Per-Cell Checkpoint Memory Size",
                                 large_fonts=args.large_fonts,
                                 show_sample_size=show_sample_size,
                                 font_scale=all_cdf_scale,
@@ -4506,9 +4507,9 @@ def process_v4(
                         render_cdf_panel(
                             mem_cdf_axes[0],
                             cdf_data,
-                            "memory",
+                            "memory_abs",
                             color_override="orange",
-                            title_override="Per-Cell Memory Overhead\nDistribution",
+                            title_override="Per-Cell Checkpoint Memory Size\nDistribution",
                             large_fonts=args.large_fonts,
                             show_sample_size=show_sample_size,
                         )
@@ -4525,6 +4526,28 @@ def process_v4(
                         pdf.savefig(mem_cdf_fig, dpi=150)
                         mem_cdf_fig.savefig("mem.pdf", dpi=150)
                         plt.close(mem_cdf_fig)
+
+                    # Absolute per-cell memory overhead page (Checkpoint - Base, MB)
+                    if cdf_data and cdf_data.memory_abs_mb:
+                        mem_abs_fig, mem_abs_ax = plt.subplots(figsize=(6, 5))
+                        render_cdf_panel(
+                            mem_abs_ax,
+                            cdf_data,
+                            "memory_abs",
+                            color_override="orange",
+                            title_override="Per-Cell Checkpoint Memory Size\nDistribution",
+                            large_fonts=args.large_fonts,
+                            show_sample_size=show_sample_size,
+                        )
+                        mem_abs_ax.set_xlim(0.01, 10000)
+                        mem_abs_ax.set_xticks([0.01, 1, 100, 10000])
+                        mem_abs_ax.set_xticklabels(
+                            ["0.01", "1", "100", "10000"]
+                        )
+                        mem_abs_fig.tight_layout()
+                        pdf.savefig(mem_abs_fig, dpi=150)
+                        mem_abs_fig.savefig("mem-abs.pdf", dpi=150)
+                        plt.close(mem_abs_fig)
 
             print(f"Combined plots saved to: {combined_path}")
 

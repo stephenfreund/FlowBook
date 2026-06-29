@@ -30,20 +30,33 @@ class FlowBookExtension(ExtensionApp):
         help="The fast model to use for the extension",
     ).tag(config=True)
 
+    fix_model = Unicode(
+        default_value="anthropic/claude-opus-4-7",
+        help=(
+            "litellm model identifier for the AI fix-suggestion feature. "
+            "Examples: 'anthropic/claude-opus-4-7', 'openai/gpt-4o', "
+            "'gemini/gemini-2.0-flash'. The corresponding provider API key "
+            "(ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.) must "
+            "be set in the environment; if it isn't, the feature is disabled."
+        ),
+    ).tag(config=True)
+
     aliases = {
         "model": "FlowBookExtension.model",
         "fast-model": "FlowBookExtension.fast_model",
+        "fix-model": "FlowBookExtension.fix_model",
     }
 
     def initialize_settings(self):
         """Initialize settings for the extension."""
         with timer(message="Initializing FlowBook settings..."):
             self.log.info(f"Initializing {self.name} extension")
-            self.serverapp.web_app.settings["flowbook"] = {
-                "ext": self,
-                "model": self.model,
-                "fast-model": self.fast_model,
-            }
+            # Note: jupyter_server's ExtensionApp._prepare_settings already
+            # publishes this extension instance as web_app.settings["flowbook"]
+            # (and then re-applies it after our hook runs, clobbering any dict
+            # we'd write here). Downstream readers should access traitlets
+            # like fix_model directly on that instance — see
+            # flowbook.server.fix_suggester.get_model for the pattern.
             km = self.serverapp.kernel_manager
             if km.default_kernel_name == "python3":
                 km.default_kernel_name = "flowbook_kernel"

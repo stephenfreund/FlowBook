@@ -19,11 +19,9 @@ Fix reproducibility errors in Jupyter notebooks by:
 
 ## Understanding FlowBook Reproducibility Errors
 
-FlowBook tracks variable reads and writes across cells to ensure notebooks are reproducible. Key violation types:
-
-- **Backward Conflict (BackConflict)**: A cell wrote to a variable that was read by an earlier fresh cell. This breaks reproducibility because re-running cells out of order would produce different results.
-- **Forward Contamination (FwdContaminated)**: A cell read a variable that was written by a later-executed cell. The cell is marked stale.
-- **Staleness (StaleFwd)**: A cell wrote to a variable read by a later fresh cell, making that later cell stale.
+See `flowbook/docs/REPRODUCIBILITY_PRIMER.md` for the canonical definitions of
+rerun consistency, the four validity predicates, UNRECOVERABLE_MUTATION, and
+staleness.
 
 The metadata in cell outputs contains:
 
