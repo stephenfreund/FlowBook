@@ -160,7 +160,7 @@ def build_system_prompt() -> str:
     return f"""You are diagnosing a reproducibility violation in a Jupyter notebook
 tracked by FlowBook. You will be given the violating cell, surrounding cells,
 and the violation details. Your job is to (1) explain the root cause in one
-sentence and (2) propose 1–3 concrete fixes from a fixed taxonomy.
+short phrase and (2) propose 1-3 concrete fixes from a fixed taxonomy.
 
 # Background: what FlowBook enforces
 
@@ -190,8 +190,7 @@ about the root cause.
 
 # Response format
 
-Stream your diagnosis as plain text first — one or two short sentences
-explaining the root cause. Do not use markdown headers or bullet points.
+Stream your diagnosis as plain text first — one short phrase explaining the root cause. Do not use markdown headers or bullet points.
 
 Then, on a final line, emit exactly one block in this format:
 
@@ -241,13 +240,14 @@ Cell order in this notebook: {context.cell_order}
 
 # Your task
 
-Diagnose the root cause in one or two sentences, then emit a {FIX_PLAN_OPEN}...{FIX_PLAN_CLOSE} block.
+Diagnose the root cause in one short phrase, then emit a {FIX_PLAN_OPEN}...{FIX_PLAN_CLOSE} block.
 """
 
 
 # ---------------------------------------------------------------------------
 # Streaming output
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class TextEvent:
@@ -425,15 +425,11 @@ class FixSuggester:
                                     len(joined) - len(FIX_PLAN_OPEN),
                                 )
                                 if safe_end > emitted_up_to:
-                                    yield TextEvent(
-                                        text=joined[emitted_up_to:safe_end]
-                                    )
+                                    yield TextEvent(text=joined[emitted_up_to:safe_end])
                                     emitted_up_to = safe_end
                             else:
                                 if tag_idx > emitted_up_to:
-                                    yield TextEvent(
-                                        text=joined[emitted_up_to:tag_idx]
-                                    )
+                                    yield TextEvent(text=joined[emitted_up_to:tag_idx])
                                     emitted_up_to = tag_idx
                                 in_plan = True
 
@@ -441,9 +437,7 @@ class FixSuggester:
                         _accumulate_tool_call(tool_call_buffers, tc_delta)
 
             except Exception as e:
-                yield ErrorEvent(
-                    message=f"LLM call failed: {type(e).__name__}: {e}"
-                )
+                yield ErrorEvent(message=f"LLM call failed: {type(e).__name__}: {e}")
                 return
 
             # End of turn. Did the model call tools?
@@ -460,11 +454,13 @@ class FixSuggester:
                 # Execute each tool against the notebook; feed results back.
                 for call in finalized:
                     result_str = _run_read_only_tool(notebook, call)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "content": result_str,
-                    })
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "content": result_str,
+                        }
+                    )
                 # Loop for the next turn.
                 continue
 
@@ -567,22 +563,26 @@ class FixSuggester:
 
             if tool_call_buffers:
                 finalized = _finalize_tool_calls(tool_call_buffers)
-                messages.append({
-                    "role": "assistant",
-                    "content": "".join(turn_text) or None,
-                    "tool_calls": finalized,
-                })
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "".join(turn_text) or None,
+                        "tool_calls": finalized,
+                    }
+                )
                 for call in finalized:
                     name = (call.get("function") or {}).get("name") or ""
                     if name in mutator_names:
                         result_str = _run_mutator_tool(notebook, log, call)
                     else:
                         result_str = _run_read_only_tool(notebook, call)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": call["id"],
-                        "content": result_str,
-                    })
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            "content": result_str,
+                        }
+                    )
                 continue
 
             # Terminal turn — model is done. Trailing text is the summary.
@@ -678,11 +678,13 @@ def _extract_tool_call_deltas(chunk) -> list[dict]:
             if hasattr(tc, "model_dump"):
                 out.append(tc.model_dump())
             elif hasattr(tc, "__dict__"):
-                out.append({
-                    "index": getattr(tc, "index", 0),
-                    "id": getattr(tc, "id", None),
-                    "function": _to_dict(getattr(tc, "function", None)),
-                })
+                out.append(
+                    {
+                        "index": getattr(tc, "index", 0),
+                        "id": getattr(tc, "id", None),
+                        "function": _to_dict(getattr(tc, "function", None)),
+                    }
+                )
             else:
                 out.append(dict(tc))
         return out
@@ -735,14 +737,16 @@ def _finalize_tool_calls(
     out: list[dict] = []
     for idx in sorted(buffers.keys()):
         buf = buffers[idx]
-        out.append({
-            "id": buf.id or f"call_{idx}",
-            "type": "function",
-            "function": {
-                "name": buf.name or "",
-                "arguments": buf.arguments or "{}",
-            },
-        })
+        out.append(
+            {
+                "id": buf.id or f"call_{idx}",
+                "type": "function",
+                "function": {
+                    "name": buf.name or "",
+                    "arguments": buf.arguments or "{}",
+                },
+            }
+        )
     return out
 
 
@@ -802,6 +806,7 @@ def _extract_and_parse_plan(text: str) -> FixPlan:
 # Convenience: build a ViolationContext from a raw notebook + cell_id
 # ---------------------------------------------------------------------------
 
+
 def build_context_from_notebook(
     notebook: dict, cell_id: str, neighbor_window: int = 3
 ) -> Optional[ViolationContext]:
@@ -838,7 +843,9 @@ def build_context_from_notebook(
         causer = err.get("causer_cell")
         if not causer:
             continue
-        raw = causer[1:] if isinstance(causer, str) and causer.startswith("@") else causer
+        raw = (
+            causer[1:] if isinstance(causer, str) and causer.startswith("@") else causer
+        )
         if raw in cell_order:
             alpha = _indices_to_alpha_safe(cell_order.index(raw))
             if alpha not in causer_alphas:

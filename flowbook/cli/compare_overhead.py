@@ -1130,8 +1130,9 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
                 prev_cell = flowbook_mem_cells[i - 1]
                 base_mb = prev_cell.get("user_ns_mb", 0) + prev_cell.get("gpu_mb", 0)
 
-            # Compute ratio
-            if base_mb >= min_meaningful_base_mb:
+            # Compute ratio (base_mb > 0 guards the division when
+            # min_meaningful_base_mb is 0; the first cell always has base 0)
+            if base_mb >= min_meaningful_base_mb and base_mb > 0:
                 ratio = delta_mb / base_mb
             else:
                 ratio = 0.0
@@ -1150,7 +1151,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
             max_base_total = max(
                 c.get("user_ns_mb", 0) + c.get("gpu_mb", 0) for c in flowbook_mem_cells
             )
-            if max_base_total >= min_meaningful_base_mb:
+            if max_base_total >= min_meaningful_base_mb and max_base_total > 0:
                 peak_memory_overhead_pct = (
                     max_flowbook_total / max_base_total - 1
                 ) * 100
@@ -1201,7 +1202,7 @@ def compute_file_stats(data: Dict[str, Any], file_path: str) -> FileStats:
                 # Derive from cumulative totals
                 delta_mb = cumulative_totals[i]
 
-            if base_mb >= min_meaningful_base_mb:
+            if base_mb >= min_meaningful_base_mb and base_mb > 0:
                 ratio = delta_mb / base_mb
             else:
                 ratio = 0.0
