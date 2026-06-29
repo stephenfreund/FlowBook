@@ -4,9 +4,9 @@
 
 FlowBook implements three-party bidirectional collaboration between:
 
-1. **MCP Server** (`flowbook_mcp` CLI) — AI-driven reproducibility analysis
+1. **MCP Server** (`flowbook_mcp` CLI) — AI-driven rerun-consistency analysis
 2. **JupyterLab Frontend** — notebook editor with FlowBook plugin
-3. **Shared FlowBook Kernel** — instrumented IPython kernel with reproducibility enforcement
+3. **Shared FlowBook Kernel** — instrumented IPython kernel with rerun-consistency enforcement
 
 Any two of these can run independently, but all three collaborate when available.
 
@@ -96,7 +96,7 @@ Body: {"type": "notebook", "format": "json", "content": notebook}
 ### Path 3: Comm Protocol (Kernel ↔ Frontend)
 
 The kernel and JupyterLab frontend communicate via a Jupyter comm channel
-(`target_name="flowbook"`). This carries reproducibility metadata, violations,
+(`target_name="flowbook"`). This carries rerun-consistency metadata, violations,
 and status updates.
 
 **Kernel → Frontend:**

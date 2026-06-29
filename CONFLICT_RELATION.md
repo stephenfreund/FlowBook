@@ -1,6 +1,6 @@
 # The Conflict Relation ▷
 
-FlowBook's reproducibility system tracks what each notebook cell _reads_ and _writes_, then uses a single conflict relation — **▷** (`write_conflicts_read`) — to determine whether executing one cell invalidates another. This document describes the location types, how they are generated, and the full conflict matrix.
+FlowBook's rerun-consistency system tracks what each notebook cell _reads_ and _writes_, then uses a single conflict relation — **▷** (`write_conflicts_read`) — to determine whether executing one cell invalidates another. This document describes the location types, how they are generated, and the full conflict matrix.
 
 **Notation.** We write **w ▷ r** to mean "write `w` invalidates read `r`." The relation is _asymmetric by construction_: the left operand is always a `WriteLoc` and the right is always a `ReadLoc` — they are different types, so `r ▷ w` is not even well-formed. We use the directed triangle ▷ rather than the symmetric-looking ▷ previously used in source code comments to emphasize this: the write _acts on_ the read, not the other way around.
 

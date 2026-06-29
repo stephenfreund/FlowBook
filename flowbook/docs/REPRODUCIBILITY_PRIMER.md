@@ -1,6 +1,6 @@
-# FlowBook Reproducibility Primer
+# FlowBook Rerun-consistency Primer
 
-This document is the canonical prose explanation of what FlowBook's reproducibility
+This document is the canonical prose explanation of what FlowBook's rerun-consistency
 analysis guarantees and the predicates it enforces. It is the single source of truth
 referenced by:
 
@@ -13,7 +13,7 @@ see `FORMAL_DEVELOPMENT.md` at the repo root.
 
 ---
 
-## What Reproducibility Analysis Guarantees
+## What Rerun-consistency Analysis Guarantees
 
 **Rerun consistency** means: if all cells in a notebook are CLEAN, then running the
 notebook top-to-bottom from a fresh kernel will reproduce every cell's recorded
@@ -103,7 +103,7 @@ not the violator. Two staleness causes:
 
 Fixing the _violation_ (renaming, removing inplace, etc.) and then re-running
 the stale cells resolves the staleness. Marking a cell as `%diagnostic`
-(read-only inspection that shouldn't influence reproducibility) is another
+(read-only inspection that shouldn't influence rerun-consistency) is another
 way to silence staleness on inspection cells.
 
 ## Locations: Variables and Columns

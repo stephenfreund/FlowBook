@@ -3,7 +3,7 @@
 This document formalizes notebook execution using a two-layer semantics:
 a **standard semantics** for basic notebook operations, and an
 **instrumented semantics** that tracks read/write sets and cell staleness
-to enforce reproducibility.
+to enforce rerun consistency.
 
 **Goals.** We prove:
 

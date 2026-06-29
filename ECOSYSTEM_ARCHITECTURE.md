@@ -33,7 +33,7 @@ Three independently-installable JupyterLab 4 extensions, developed in sibling re
 
 | Extension                      | Repo                     | What it is                                                                                                                                                                       | Role in the ecosystem                                                                              |
 | ------------------------------ | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| **FlowBook**                   | `FlowBook/`              | Reproducibility engine: a custom IPython kernel that tracks reads/writes per cell and enforces rerun-consistency, plus UI, a server extension, an MCP server, and an NBI plugin. | The thing being driven. Defines _what a correct notebook is_ and exposes tools to fix it.          |
+| **FlowBook**                   | `FlowBook/`              | rerun-consistency engine: a custom IPython kernel that tracks reads/writes per cell and enforces rerun-consistency, plus UI, a server extension, an MCP server, and an NBI plugin. | The thing being driven. Defines _what a correct notebook is_ and exposes tools to fix it.          |
 | **NotebookIntelligence (NBI)** | `notebook-intelligence/` | A third-party in-JupyterLab AI chat assistant with a tool/toolset system.                                                                                                        | One of the ways an LLM drives the notebook (an in-lab chat). FlowBook registers a toolset with it. |
 | **LogBook**                    | `LogBook/`               | A passive observer that records every notebook event (edits, executions, AI chat) to a JSONL event log, tagging each with an origin (`system`/`user`/`ai`).                      | The audit/telemetry layer. Records _who did what_ — including which actions were AI-driven.        |
 
@@ -63,7 +63,7 @@ contracts — never through code dependencies.
 ## 2. The shared substrate: one kernel, one document
 
 FlowBook's value depends on a _single source of truth_ for the notebook and a _single kernel_
-that tracks reproducibility. Multiple clients (the JupyterLab UI, an out-of-process MCP server)
+that tracks rerun-consistency. Multiple clients (the JupyterLab UI, an out-of-process MCP server)
 can attach to both at once.
 
 - **Shared notebook (Y.js / `jupyter-collaboration`).** The notebook is a CRDT document. The
@@ -74,11 +74,11 @@ can attach to both at once.
   records read/write _locations_ and enforces the four validity predicates (see
   `FORMAL_DEVELOPMENT.md`). Whoever starts the kernel writes a **discovery file**
   (`~/.jupyter/runtime/flowbook-{sha}.json`); a second participant reads it and attaches as an
-  additional ZMQ client. The kernel broadcasts reproducibility results to _all_ attached clients
+  additional ZMQ client. The kernel broadcasts rerun-consistency results to _all_ attached clients
   over IOPub (see [§5](#5-the-kernel-protocol)).
 - **Cell identity.** Every cell has a stable 4-char id (`flowbook/util/cell_ids.py`). Identity
   must survive edits — tools mutate sources in place rather than delete+reinsert — because the
-  kernel keys reproducibility state by cell id.
+  kernel keys rerun-consistency state by cell id.
 
 `MCP_ARCHITECTURE.md` is the authoritative description of the MCP↔JupyterLab sharing protocol
 (discovery, Contents-API sync, IOPub polling, graceful degradation).
@@ -113,7 +113,7 @@ Notes:
 
 ## 4. The unified tool layer (`flowbook/tools`)
 
-The reproducibility tools (rename a variable across cells, remove a pandas `inplace=True`, insert
+The rerun-consistency tools (rename a variable across cells, remove a pandas `inplace=True`, insert
 a deepcopy, mark a cell diagnostic, merge cells, move a cell, plus inspection/execution) are the
 _same operations_ regardless of surface. They are defined **once** and reused by all three.
 
@@ -258,7 +258,7 @@ activation (`flowbook/nbi/extension.py`):
 - **Registers a toolset** (`"flowbook-reproducibility"`) of FlowBook tools — metadata/status,
   identity-safe cell ops, execution, the six refactorings, checkpoint/log.
 - **Disables NBI's built-in `nbi-notebook-edit` and `nbi-notebook-execute` toolsets**, whose
-  delete+reinsert edit pattern would destroy cell identity and break reproducibility tracking.
+  delete+reinsert edit pattern would destroy cell identity and break rerun-consistency tracking.
   FlowBook's replacements edit in place.
 - Installs Claude slash-commands and registers the FlowBook MCP server into `~/.claude.json`.
 
@@ -317,7 +317,7 @@ NBI chat turn ─▶ FlowBook NBI tool alpha_rename(@C, old, new)
 
 ```
 flowbook/
-├── kernel/                     # the reproducibility kernel
+├── kernel/                     # the rerun-consistency kernel
 │   ├── flowbook_kernel.py      #   do_execute, comm, reads cell_meta["actor"]
 │   ├── reproducibility_enforcer.py, models.py, locations.py, change_detector.py
 │   └── protocol.py             #   flowbook_update message builders (incl. actor)
@@ -342,7 +342,7 @@ flowbook/
 │   └── kernel_helper.py        #   execute_code(..., actor=...)
 ├── scripts/fix_repro_errors.py # the AST transformation primitives (shared by the handlers)
 ├── util/cell_ids.py, cell_index.py
-└── docs/REPRODUCIBILITY_PRIMER.md, _generated/tool_catalog.md
+└── docs/rerun-consistency_PRIMER.md, _generated/tool_catalog.md
 
 src/flowbook/                   # TypeScript frontend
 ├── plugin.ts                   # activation, kernel discovery, wiring
@@ -383,7 +383,7 @@ Third-party. FlowBook depends on its **public extension API** (`notebook_intelli
 1. **Decoupling invariant.** FlowBook ⊥ LogBook: no imports, no `package.json`/`pyproject.toml`
    entry, either direction. Integration is the two string contracts in [§6](#6-logbook-and-ai-attribution).
    Each extension builds and runs with the other absent.
-2. **One tool definition.** A reproducibility operation is implemented once in
+2. **One tool definition.** A rerun-consistency operation is implemented once in
    `flowbook/tools/`. Don't re-implement it per surface — add/extend a handler + controller.
 3. **Prompts are generated, not hand-maintained.** Tool lists in LLM prompts and
    `tool_catalog.md` render from the registry/schemas. A drift-guard test enforces this.
@@ -398,7 +398,7 @@ Third-party. FlowBook depends on its **public extension API** (`notebook_intelli
 7. **Graceful degradation everywhere.** No Jupyter server → MCP runs standalone (own kernel,
    file-based). No LogBook → attribution calls are no-ops. No `notebook-intelligence` → the NBI
    plugin simply isn't built. No model API key → the in-product fix feature self-disables.
-8. **Spec ↔ code sync.** Reproducibility semantics live in `FORMAL_DEVELOPMENT.md` /
+8. **Spec ↔ code sync.** rerun-consistency semantics live in `FORMAL_DEVELOPMENT.md` /
    `REPRODUCIBILITY_PRIMER.md`; keep them in sync with the kernel and the fix prompts.
 
 ---
@@ -411,7 +411,7 @@ Third-party. FlowBook depends on its **public extension API** (`notebook_intelli
   surfaces on one tool layer, the prompt/validation single-sourcing, the LogBook attribution
   work, and the parts deliberately deferred (kernel-backed fix verification; generic-agent
   rewrite). Read this for _why_ the structure is as it is and what is intentionally unfinished.
-- **`FORMAL_DEVELOPMENT.md`** — the formal reproducibility model (the four validity predicates,
+- **`FORMAL_DEVELOPMENT.md`** — the formal rerun-consistency model (the four validity predicates,
   staleness propagation, UNRECOVERABLE_MUTATION) with an implementation map.
 - **`flowbook/docs/REPRODUCIBILITY_PRIMER.md`** — the canonical prose explanation, embedded in
   the fix prompts.
