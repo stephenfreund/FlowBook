@@ -9,12 +9,13 @@ optional Option-A agent rewrite.
 > `'flowbook'` (edits) and the `'ai-notebook-activity'` DOM CustomEvent (executions). Neither
 > repo imports the other; LogBook just recognizes the origin and listens for the event. Do not
 > reintroduce a token/package dependency in either direction.
-**Author:** Design assessment (2026-05-29)
-**Related:** `MCP_ARCHITECTURE.md`, `FORMAL_DEVELOPMENT.md`, `flowbook/docs/REPRODUCIBILITY_PRIMER.md`, `../LogBook` (event-logging extension)
+> **Author:** Design assessment (2026-05-29)
+> **Related:** `MCP_ARCHITECTURE.md`, `FORMAL_DEVELOPMENT.md`, `flowbook/docs/REPRODUCIBILITY_PRIMER.md`, `../LogBook` (event-logging extension)
 
 ## Implementation status (2026-05-29)
 
 **Done — Phase 1 (the tool-catalog collapse), all three surfaces:**
+
 - `flowbook/tools/` package: `controller.py` (`NotebookController` Protocol + `ToolError`/
   `CellNotFoundError`/`NoEffectError`), `registry.py` (`REGISTRY` of 6 refactoring tools),
   `reproducibility.py` (single-source handlers), `adapters/dict_controller.py`,
@@ -34,6 +35,7 @@ optional Option-A agent rewrite.
   mocked tool tests (require `notebook-intelligence` installed in the env).
 
 **Done — Phase 2 (unified prompt + taxonomy):**
+
 - `flowbook/tools/prompt.py`: `render_tool_catalog()` renders the tool list from `REGISTRY`;
   `FIX_TAXONOMY` holds the craft guidance. `fix_suggester.build_system_prompt()` now composes
   from these — the hand-maintained tool list is gone.
@@ -41,14 +43,16 @@ optional Option-A agent rewrite.
   (`tools/tests/test_prompt_and_registry.py`).
 
 **Done — Phase 3 (validation single-sourced on the registry):**
+
 - `fix_models.TOOL_ARG_SCHEMAS` is now derived from `REGISTRY` (was a hand-maintained dup); a
-  test asserts `FixToolName` ⟷ registry agreement. The built-in fix path's *description*
-  (prompt), *arg contract* (validation), and *application* (dispatcher) all now flow from one
+  test asserts `FixToolName` ⟷ registry agreement. The built-in fix path's _description_
+  (prompt), _arg contract_ (validation), and _application_ (dispatcher) all now flow from one
   source. (The custom-fix agent's broader inspect/mutate toolset — `fix_tools_readonly` /
   `fix_tools_mutator` — is a distinct, non-duplicated surface and was left as-is; folding it in
   is the Option-A agent rewrite, deferred.)
 
 **Done — Phase 4 (LogBook AI attribution), Python + frontend:**
+
 - Kernel protocol: `build_metadata_message(metadata, actor=None)` adds an optional `actor`
   field (omitted by default); mirrored in `src/flowbook/protocol.ts` `IMetadataMessage`.
 - `src/flowbook/aiattribution.ts` (general AI-attribution helpers — no LogBook in the name or
@@ -73,7 +77,7 @@ optional Option-A agent rewrite.
   (edits); `ai-activity-relay.ts` (`installAiActivityRelay`) listens for the
   `'ai-notebook-activity'` event and **emits an explicit `cell_execute_completed` (origin
   `'ai'`)** for the run. This is necessary because LogBook's execution listener uses
-  `NotebookActions.executed` — a *frontend* signal that never fires for an MCP ZMQ run — so
+  `NotebookActions.executed` — a _frontend_ signal that never fires for an MCP ZMQ run — so
   there is nothing to attribute via a window; the relay records the run directly from the event
   detail (`status`/`executionCount`/`outputCount`, carried from `executionhook.ts`). Tested in
   `../LogBook/src/__tests__/ai-activity-relay.spec.ts` (4 cases). The earlier `ILogBookExternal`
@@ -81,6 +85,7 @@ optional Option-A agent rewrite.
   LogBook token, violating the decoupling invariant.
 
 **Done — Phase 3 / Option A (verifiable slice): the fix agent's catalog is single-sourced.**
+
 - The custom-fix agent's system prompt (`CUSTOM_FIX_SYSTEM_PROMPT_TEMPLATE`) no longer hardcodes
   its tool list in prose; it renders the read-only + mutator tools from their actual schemas via
   `render_function_schemas()`, so the prompt cannot drift from the tools the agent is given.
@@ -88,6 +93,7 @@ optional Option-A agent rewrite.
   (Phase 2), every fix-tool surface the LLM sees is now generated from a single source.
 
 **Done — Phase 3 follow-through (registry as single schema source):**
+
 - The custom-fix mutator's tools that overlap the registry (`merge_cells`, `move_cell`,
   `mark_diagnostic`, all applied via `apply_fix`) now generate their LLM-facing function
   schemas from the registry (`_registry_fn_schema`), with a drift-guard test. The three
@@ -95,7 +101,8 @@ optional Option-A agent rewrite.
   have no registry counterpart and stay hand-defined — there is no duplication to remove there.
 
 **Remaining (deliberately deferred, with rationale):**
-- **Kernel-backed fix *verification*** (the high-value half of Option A — the agent re-runs
+
+- **Kernel-backed fix _verification_** (the high-value half of Option A — the agent re-runs
   changed cells and confirms the violation is gone). Deferred because it is a genuine new
   capability, not a refactor: the in-product fix handler is currently stateless (operates on the
   request-body dict, no kernel), so this needs the handler to gain a kernel connection to the
@@ -117,11 +124,11 @@ FlowBook now exposes its reproducibility tooling to LLMs through **three indepen
 surfaces**, each of which re-implements the same catalog of notebook operations over a
 different transport and (in one case) hosts its own agent loop:
 
-| Surface | Code | Who runs the LLM | Transport to notebook/kernel |
-| --- | --- | --- | --- |
-| **MCP server** | `flowbook/mcp/` | External (Claude Code / CLI) | ZMQ kernel (discovery) + Contents API / Y.js |
-| **NBI extension** | `flowbook/nbi/` | External (NBI chat participant) | Frontend bridge `run_ui_command()` → JupyterLab commands |
-| **In-product "Fix it"** | `flowbook/server/fix_*` + `src/flowbook/fixsuggester.ts` | **FlowBook itself** (litellm → `anthropic/claude-opus-4-7`) | Request-body notebook **dict** (no kernel) |
+| Surface                 | Code                                                     | Who runs the LLM                                            | Transport to notebook/kernel                             |
+| ----------------------- | -------------------------------------------------------- | ----------------------------------------------------------- | -------------------------------------------------------- |
+| **MCP server**          | `flowbook/mcp/`                                          | External (Claude Code / CLI)                                | ZMQ kernel (discovery) + Contents API / Y.js             |
+| **NBI extension**       | `flowbook/nbi/`                                          | External (NBI chat participant)                             | Frontend bridge `run_ui_command()` → JupyterLab commands |
+| **In-product "Fix it"** | `flowbook/server/fix_*` + `src/flowbook/fixsuggester.ts` | **FlowBook itself** (litellm → `anthropic/claude-opus-4-7`) | Request-body notebook **dict** (no kernel)               |
 
 This works, but the design has fragmented along three axes, and a fourth concern — **event
 logging / AI attribution via the LogBook extension** — is not yet satisfied by any of the
@@ -200,7 +207,7 @@ three FlowBook paths must produce a LogBook event marked `origin: 'ai'`.** §6 s
 - **One algorithm core** in `flowbook/scripts/fix_repro_errors.py`, imported by all surfaces.
 - **One grounding document** (`REPRODUCIBILITY_PRIMER.md`) referenced everywhere.
 - **Three transports for real reasons:** MCP must run headless/standalone; NBI must edit the
-  *live* frontend document and preserve cell identity in the UI; Fix-it must stream into a
+  _live_ frontend document and preserve cell identity in the UI; Fix-it must stream into a
   browser with a 30-second surgical undo. The plan does **not** collapse the transports.
 
 ---
@@ -458,7 +465,7 @@ Fix-it a **`KernelController`** when a kernel is reachable so it can **re-run an
 `fixsuggester.ts` is unaffected (it uses pre/post snapshots the handlers already return).
 
 **Option B (smaller intermediate):** Keep the loop but point its `dispatch_read_only_tool` /
-`dispatch_mutator_tool` at `REGISTRY` over a `DictController`. Unifies the tool *set/schemas*
+`dispatch_mutator_tool` at `REGISTRY` over a `DictController`. Unifies the tool _set/schemas_
 even though the harness stays bespoke; `fix_tools_readonly.py` / `fix_tools_mutator.py` become
 adapters, then are deleted.
 
@@ -490,32 +497,32 @@ with `origin: 'ai'`; with LogBook absent, FlowBook behaves exactly as before.
 
 ## 5. File-by-file change map
 
-| File | Phase | Change |
-| --- | --- | --- |
-| `flowbook/tools/controller.py` | 0 | **New.** Protocol + errors + AI-actor context. |
-| `flowbook/tools/registry.py` | 0–1 | **New.** `Tool`, `REGISTRY`, lookup/schema helpers. |
-| `flowbook/tools/{reproducibility,inspection,execution,structure}.py` | 1 | **New.** Single-source handlers. |
-| `flowbook/tools/adapters/{kernel,bridge,dict}_controller.py` | 1 | **New.** Transport adapters; AI-attribution hooks. |
-| `flowbook/tools/prompt.py` | 2 | **New.** `build_system_prompt`, `FIX_TAXONOMY`. |
-| `flowbook/mcp/server.py` | 1 | Generator replaces per-tool functions; keep `_logged_tool`, lifespan. |
-| `flowbook/mcp/session.py` | 1, 4 | Keep session/kernel/Contents-API; delete the 6 refactor methods; `log_event` gains `actor`. |
-| `flowbook/nbi/tools.py` | 1 | Generator over `BridgeController`. |
-| `flowbook/server/fix_dispatcher.py` | 1 | Reduce to a shim over registry handlers, or delete. |
-| `flowbook/server/fix_models.py` | 1–2 | `TOOL_ARG_SCHEMAS` derived from `REGISTRY`; keep wire types + `validate_plan`. |
-| `flowbook/server/fix_suggester.py` | 2–3 | Prompt → `prompt.py` (P2); loop → registry dispatch (P3). |
-| `flowbook/server/fix_tools_readonly.py`, `fix_tools_mutator.py` | 3 | Adapters over registry, then delete. |
-| `flowbook/kernel/protocol.py` | 4 | Add `actor` to `flowbook_update` / comm messages. |
-| `src/flowbook/protocol.ts` | 4 | Mirror the `actor` field. |
-| `src/flowbook/logbookbridge.ts` | 4 | **New.** Best-effort relay of FlowBook AI actions → LogBook. |
-| `src/flowbook/fixsuggester.ts` | 4 | Apply fixes inside an AI-attributed transaction / AI window. |
-| `src/flowbook/nbibridge.ts` | 4 | `flowbook:edit-cell-source` / `flowbook:run-cell` mutate inside an AI-attributed transaction. |
-| `flowbook/docs/_generated/tool_catalog.md` | 2 | **New, generated.** Referenced by skills. |
-| `.claude/commands/*.md`, `.claude/agents/reproducibility-fixer.md` | 2 | Reference the generated catalog. |
-| `../LogBook/src/origin.ts` | 4 | **(sibling repo, drafted)** AI-marker registries + `register*`/`isAi*`/`correlationIdFromArgs` helpers; seed `'flowbook'` tx origin. |
-| `../LogBook/src/tokens.ts` | 4 | **(sibling repo, drafted, new)** `ILogBookExternal` token + `IExternalToolCall`. |
-| `../LogBook/src/external.ts` | 4 | **(sibling repo, drafted, new)** `LogBookExternal` impl (`beginAiBlock`, `emit`, `emitToolCall`). |
-| `../LogBook/src/index.ts` | 4 | **(sibling repo, drafted)** Provide `ILogBookExternal`. |
-| `../LogBook/src/__tests__/origin.spec.ts` | 4 | **(sibling repo, drafted)** Tests for FlowBook attribution + opt-in prefix. |
+| File                                                                 | Phase | Change                                                                                                                               |
+| -------------------------------------------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `flowbook/tools/controller.py`                                       | 0     | **New.** Protocol + errors + AI-actor context.                                                                                       |
+| `flowbook/tools/registry.py`                                         | 0–1   | **New.** `Tool`, `REGISTRY`, lookup/schema helpers.                                                                                  |
+| `flowbook/tools/{reproducibility,inspection,execution,structure}.py` | 1     | **New.** Single-source handlers.                                                                                                     |
+| `flowbook/tools/adapters/{kernel,bridge,dict}_controller.py`         | 1     | **New.** Transport adapters; AI-attribution hooks.                                                                                   |
+| `flowbook/tools/prompt.py`                                           | 2     | **New.** `build_system_prompt`, `FIX_TAXONOMY`.                                                                                      |
+| `flowbook/mcp/server.py`                                             | 1     | Generator replaces per-tool functions; keep `_logged_tool`, lifespan.                                                                |
+| `flowbook/mcp/session.py`                                            | 1, 4  | Keep session/kernel/Contents-API; delete the 6 refactor methods; `log_event` gains `actor`.                                          |
+| `flowbook/nbi/tools.py`                                              | 1     | Generator over `BridgeController`.                                                                                                   |
+| `flowbook/server/fix_dispatcher.py`                                  | 1     | Reduce to a shim over registry handlers, or delete.                                                                                  |
+| `flowbook/server/fix_models.py`                                      | 1–2   | `TOOL_ARG_SCHEMAS` derived from `REGISTRY`; keep wire types + `validate_plan`.                                                       |
+| `flowbook/server/fix_suggester.py`                                   | 2–3   | Prompt → `prompt.py` (P2); loop → registry dispatch (P3).                                                                            |
+| `flowbook/server/fix_tools_readonly.py`, `fix_tools_mutator.py`      | 3     | Adapters over registry, then delete.                                                                                                 |
+| `flowbook/kernel/protocol.py`                                        | 4     | Add `actor` to `flowbook_update` / comm messages.                                                                                    |
+| `src/flowbook/protocol.ts`                                           | 4     | Mirror the `actor` field.                                                                                                            |
+| `src/flowbook/logbookbridge.ts`                                      | 4     | **New.** Best-effort relay of FlowBook AI actions → LogBook.                                                                         |
+| `src/flowbook/fixsuggester.ts`                                       | 4     | Apply fixes inside an AI-attributed transaction / AI window.                                                                         |
+| `src/flowbook/nbibridge.ts`                                          | 4     | `flowbook:edit-cell-source` / `flowbook:run-cell` mutate inside an AI-attributed transaction.                                        |
+| `flowbook/docs/_generated/tool_catalog.md`                           | 2     | **New, generated.** Referenced by skills.                                                                                            |
+| `.claude/commands/*.md`, `.claude/agents/reproducibility-fixer.md`   | 2     | Reference the generated catalog.                                                                                                     |
+| `../LogBook/src/origin.ts`                                           | 4     | **(sibling repo, drafted)** AI-marker registries + `register*`/`isAi*`/`correlationIdFromArgs` helpers; seed `'flowbook'` tx origin. |
+| `../LogBook/src/tokens.ts`                                           | 4     | **(sibling repo, drafted, new)** `ILogBookExternal` token + `IExternalToolCall`.                                                     |
+| `../LogBook/src/external.ts`                                         | 4     | **(sibling repo, drafted, new)** `LogBookExternal` impl (`beginAiBlock`, `emit`, `emitToolCall`).                                    |
+| `../LogBook/src/index.ts`                                            | 4     | **(sibling repo, drafted)** Provide `ILogBookExternal`.                                                                              |
+| `../LogBook/src/__tests__/origin.spec.ts`                            | 4     | **(sibling repo, drafted)** Tests for FlowBook attribution + opt-in prefix.                                                          |
 
 ---
 
@@ -529,9 +536,14 @@ model and JupyterLab signals and emit events with this envelope (`src/types/even
 `logbook/models.py`):
 
 ```jsonc
-{ "event_id": "...", "timestamp": "...", "origin": "system|user|ai",
-  "correlation_id": "msg-… | null", "kind": "cell_source_changed | cell_execute_completed | …",
-  /* payload */ }
+{
+  "event_id": "...",
+  "timestamp": "...",
+  "origin": "system|user|ai",
+  "correlation_id": "msg-… | null",
+  "kind": "cell_source_changed | cell_execute_completed | …"
+  /* payload */
+}
 ```
 
 Events are buffered and flushed to JSONL on disk via the Contents API; `logbook/ingest.py`
@@ -557,11 +569,11 @@ provides no token).
 
 ### 6.2 Gap analysis per FlowBook path
 
-| Path | Where the mutation/execution actually happens | Does LogBook see it? | Marked AI today? | Gap |
-| --- | --- | --- | --- | --- |
-| **In-product Fix-it** | **Frontend** (`fixsuggester.ts` edits the notebook model) | Yes | **No** — edits aren't tagged `'nbi'` and aren't `notebook-intelligence:` commands | Tag the apply with an AI origin / open an AI window. |
-| **NBI extension** | **Frontend** via `flowbook:`-prefixed bridge commands (`nbibridge.ts` → `sharedModel.setSource()`) | Yes | **No** — `'flowbook:'` ≠ the recognized `'notebook-intelligence:'` prefix; bridge transactions aren't tagged `'nbi'` | Same as Fix-it, in the bridge handlers; add chat correlation. |
-| **MCP server** | **Out-of-process**: Contents API PUT → Y.js, and ZMQ exec on shared kernel | **Mostly no** — Contents-API/Y.js sync transactions don't carry an AI origin; ZMQ executions bypass the frontend execute signals | **No** | Needs a frontend **relay**: the kernel/MCP must signal `actor: 'ai'`, and the FlowBook frontend re-emits it into LogBook. |
+| Path                  | Where the mutation/execution actually happens                                                      | Does LogBook see it?                                                                                                             | Marked AI today?                                                                                                     | Gap                                                                                                                       |
+| --------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **In-product Fix-it** | **Frontend** (`fixsuggester.ts` edits the notebook model)                                          | Yes                                                                                                                              | **No** — edits aren't tagged `'nbi'` and aren't `notebook-intelligence:` commands                                    | Tag the apply with an AI origin / open an AI window.                                                                      |
+| **NBI extension**     | **Frontend** via `flowbook:`-prefixed bridge commands (`nbibridge.ts` → `sharedModel.setSource()`) | Yes                                                                                                                              | **No** — `'flowbook:'` ≠ the recognized `'notebook-intelligence:'` prefix; bridge transactions aren't tagged `'nbi'` | Same as Fix-it, in the bridge handlers; add chat correlation.                                                             |
+| **MCP server**        | **Out-of-process**: Contents API PUT → Y.js, and ZMQ exec on shared kernel                         | **Mostly no** — Contents-API/Y.js sync transactions don't carry an AI origin; ZMQ executions bypass the frontend execute signals | **No**                                                                                                               | Needs a frontend **relay**: the kernel/MCP must signal `actor: 'ai'`, and the FlowBook frontend re-emits it into LogBook. |
 
 The MCP path is the hard one: a frontend-only observer fundamentally cannot attribute an action
 taken by a separate process over ZMQ + Contents API. It must be told.
@@ -608,19 +620,19 @@ optional-integration pattern) is:
    needs **no** edit to LogBook. Helpers `isAiTransactionOrigin`, `isAiCommandId`,
    `correlationIdFromArgs` are exported. Seeding:
    - **Transaction origins** seeded with `'nbi'` **and** `'flowbook'` — both tags are used
-     *only* for AI mutations, so they are safe to treat as AI unconditionally. FlowBook wraps
+     _only_ for AI mutations, so they are safe to treat as AI unconditionally. FlowBook wraps
      its in-frontend AI edits (Fix-it applier + NBI-bridge handlers) in
      `sharedModel.transact(fn, 'flowbook')`; this is what flips those `cell_source_changed`
      events to `origin: 'ai'`.
    - **Command prefixes** seeded with `'notebook-intelligence:'` **only**. `'flowbook:'` is
      deliberately **not** auto-registered, because FlowBook dispatches `flowbook:` commands
-     from both the AI bridge *and* human UI (toolbar/panels) — keying AI off the prefix would
+     from both the AI bridge _and_ human UI (toolbar/panels) — keying AI off the prefix would
      mislabel human clicks. `FLOWBOOK_COMMAND_PREFIX` is exported for a deployment that uses
      `flowbook:` exclusively for AI to opt in. FlowBook's AI executions instead open an
      explicit window via `beginAiBlock` (below).
 2. **~~A public token `ILogBookExternal`~~ — SUPERSEDED; see the "Implementation status" section
    at the top, which is authoritative.** This subsection (and the token/`emitToolCall` design in
-   §5/§6.3 below) was the *original plan*. It was **rejected and replaced** because having
+   §5/§6.3 below) was the _original plan_. It was **rejected and replaced** because having
    FlowBook consume a LogBook-provided token makes FlowBook import (depend on) LogBook. The
    shipped design is fully decoupled: executions are announced via a one-way
    `CustomEvent('ai-notebook-activity', …)` that LogBook listens for in `ai-activity-relay.ts`;
@@ -680,15 +692,15 @@ LLM-initiated edit/execution produces JSONL events whose `origin == "ai"`:
 
 ## 8. Risks & trade-offs
 
-| Risk | Likelihood | Mitigation |
-| --- | --- | --- |
-| Behavior drift between transports during cutover | Medium | One surface at a time behind its suite; cross-controller parity test; controllers isolate quirks. |
-| `BridgeController` id↔index bugs | Medium | NBI already does index math; focused tests; keep `@A` conversion in `flowbook/util/cell_index.py`. |
-| Phase 3 changes Fix-it UX subtly | Medium | Do Option B first; gate Option A behind the `fix_model` traitlet + feature flag. |
-| LogBook change lands late / coordination across two repos | Medium | Ship the §6.4 interim `'nbi'`-tag fallback for frontend paths; land the relay + token next. |
-| MCP relay double-counts or mis-times AI windows | Medium | Drive windows off discrete `actor:'ai'` update messages with explicit begin/end, not heuristics; unit-test the relay against recorded `flowbook_update` streams. |
-| Over-abstraction: a tool needs a primitive the Protocol lacks | Low | Protocol is the LCD of three working impls; extend additively on real need. |
-| FlowBook hard-depending on LogBook | Low | LogBook integration is `optional` in the plugin graph; all hooks are best-effort no-ops when absent. |
+| Risk                                                          | Likelihood | Mitigation                                                                                                                                                       |
+| ------------------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Behavior drift between transports during cutover              | Medium     | One surface at a time behind its suite; cross-controller parity test; controllers isolate quirks.                                                                |
+| `BridgeController` id↔index bugs                              | Medium     | NBI already does index math; focused tests; keep `@A` conversion in `flowbook/util/cell_index.py`.                                                               |
+| Phase 3 changes Fix-it UX subtly                              | Medium     | Do Option B first; gate Option A behind the `fix_model` traitlet + feature flag.                                                                                 |
+| LogBook change lands late / coordination across two repos     | Medium     | Ship the §6.4 interim `'nbi'`-tag fallback for frontend paths; land the relay + token next.                                                                      |
+| MCP relay double-counts or mis-times AI windows               | Medium     | Drive windows off discrete `actor:'ai'` update messages with explicit begin/end, not heuristics; unit-test the relay against recorded `flowbook_update` streams. |
+| Over-abstraction: a tool needs a primitive the Protocol lacks | Low        | Protocol is the LCD of three working impls; extend additively on real need.                                                                                      |
+| FlowBook hard-depending on LogBook                            | Low        | LogBook integration is `optional` in the plugin graph; all hooks are best-effort no-ops when absent.                                                             |
 
 ---
 

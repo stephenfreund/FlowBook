@@ -299,19 +299,19 @@ Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Cla
 
 **Key MCP Tools:**
 
-| Tool                                                  | Purpose                                                    |
-| ----------------------------------------------------- | ---------------------------------------------------------- |
-| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync |
+| Tool                                                  | Purpose                                                     |
+| ----------------------------------------------------- | ----------------------------------------------------------- |
+| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync  |
 | `run_cell`                                            | Execute cell, return outputs (head+tail preview) + metadata |
-| `get_cell_output`                                     | Page a cell's full untruncated output (offset/limit)       |
-| `edit_cell`                                           | Edit source, sync to Y.js, notify kernel                   |
-| `list_cells` / `get_cell`                             | Read cell state (polls IOPub for external updates)         |
-| `get_status`                                          | Reproducibility status (violations, staleness)             |
-| `get_next_actionable_cell`                            | First cell needing attention                               |
-| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                    |
-| `insert_cell` / `delete_cell`                         | Add a code/markdown cell after another; remove a cell      |
-| `checkpoint` / `restore`                              | Save/restore notebook state                                |
-| `save_notebook`                                       | Write to disk                                              |
+| `get_cell_output`                                     | Page a cell's full untruncated output (offset/limit)        |
+| `edit_cell`                                           | Edit source, sync to Y.js, notify kernel                    |
+| `list_cells` / `get_cell`                             | Read cell state (polls IOPub for external updates)          |
+| `get_status`                                          | Reproducibility status (violations, staleness)              |
+| `get_next_actionable_cell`                            | First cell needing attention                                |
+| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                     |
+| `insert_cell` / `delete_cell`                         | Add a code/markdown cell after another; remove a cell       |
+| `checkpoint` / `restore`                              | Save/restore notebook state                                 |
+| `save_notebook`                                       | Write to disk                                               |
 
 ### MCP ↔ JupyterLab Collaboration
 

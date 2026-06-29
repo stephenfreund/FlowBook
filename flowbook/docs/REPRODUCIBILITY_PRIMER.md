@@ -25,7 +25,7 @@ A cell is **CLEAN** when its last execution passed all four predicates with its
 current source. A cell is **STALE** when it has been edited since its last
 execution, or when another cell's execution has invalidated its outputs (e.g.,
 the value it read was later overwritten). Stale cells need to be re-run to
-restore confidence; they are a *symptom* of an unresolved dependency, not a
+restore confidence; they are a _symptom_ of an unresolved dependency, not a
 violation in themselves.
 
 ## The Four Validity Predicates
@@ -46,7 +46,7 @@ more rows to `train`.
 ### 2. WriteBeforeRead
 
 > Every variable a cell reads must have been written by an earlier cell:
-> R_i ⊆ W_{1..i-1}.
+> R*i ⊆ W*{1..i-1}.
 
 Reading from a name that no earlier cell defines means a top-to-bottom rerun
 would crash with `NameError`.
@@ -55,17 +55,17 @@ would crash with `NameError`.
 
 ### 3. NoReadBeforeWrite (forward contamination)
 
-> A cell must not read a location that is written by a *later* cell:
-> R_i ∩ W_{i+1..n} = ∅.
+> A cell must not read a location that is written by a _later_ cell:
+> R*i ∩ W*{i+1..n} = ∅.
 
 If cell @B reads `df` and cell @D later assigns `df = ...`, then running
-top-to-bottom @B sees the *old* `df`, but the current session has @D's `df`.
+top-to-bottom @B sees the _old_ `df`, but the current session has @D's `df`.
 The recorded outputs of @B reflect a value that a rerun would not produce.
 
 ### 4. NoWriteAfterRead (backward mutation)
 
-> A cell must not write a location that was read by an *earlier* cell:
-> W_i ∩ R_{1..i-1} = ∅.
+> A cell must not write a location that was read by an _earlier_ cell:
+> W*i ∩ R*{1..i-1} = ∅.
 
 If cell @D writes a location that @B already read, re-running @D would not
 change @B's recorded output — but the kernel state is now different from what
@@ -91,7 +91,7 @@ fresh copy (`model_v2 = deepcopy(model); model_v2.fit(...)`).
 
 ## Staleness as a Symptom
 
-When FlowBook flags a cell **stale**, it is communicating that *something* a
+When FlowBook flags a cell **stale**, it is communicating that _something_ a
 predicate would otherwise catch has happened — but the stale cell itself is
 not the violator. Two staleness causes:
 
@@ -101,14 +101,14 @@ not the violator. Two staleness causes:
   earlier cell j used to write. j was the last writer; now the namespace
   state differs from what j's outputs claim.
 
-Fixing the *violation* (renaming, removing inplace, etc.) and then re-running
+Fixing the _violation_ (renaming, removing inplace, etc.) and then re-running
 the stale cells resolves the staleness. Marking a cell as `%diagnostic`
 (read-only inspection that shouldn't influence reproducibility) is another
 way to silence staleness on inspection cells.
 
 ## Locations: Variables and Columns
 
-A read or write set element is a typed *location*, not just a name. The
+A read or write set element is a typed _location_, not just a name. The
 location types are:
 
 - **Var**: a top-level Python name (e.g., `train`, `model`).
@@ -118,7 +118,7 @@ location types are:
 - **Rows**: a row-set mutation (e.g., row drops, sorts, index changes).
 - **File**: a filesystem read or write.
 
-Two locations *conflict* (under the ▷ relation) when a write to one would
+Two locations _conflict_ (under the ▷ relation) when a write to one would
 invalidate a read of the other. A write to `train` conflicts with a read of
 `train.age`; a write to `train.age` conflicts with a read of `train.age` and
 with a read of `train` only when the read inspects the column. This typed

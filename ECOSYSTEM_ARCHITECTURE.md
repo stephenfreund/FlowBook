@@ -4,7 +4,7 @@
 JupyterLab extensions fit together, how an LLM drives a notebook through each of them, and
 where the code lives.
 
-**Scope:** the *interaction* architecture. Per-subsystem detail lives in the documents linked
+**Scope:** the _interaction_ architecture. Per-subsystem detail lives in the documents linked
 in [§11](#11-related-documents); this doc is the map that ties them together.
 
 ---
@@ -31,11 +31,11 @@ in [§11](#11-related-documents); this doc is the map that ties them together.
 Three independently-installable JupyterLab 4 extensions, developed in sibling repos
 (`FlowBook/`, `LogBook/`, and the third-party `notebook-intelligence/`):
 
-| Extension | Repo | What it is | Role in the ecosystem |
-| --- | --- | --- | --- |
-| **FlowBook** | `FlowBook/` | Reproducibility engine: a custom IPython kernel that tracks reads/writes per cell and enforces rerun-consistency, plus UI, a server extension, an MCP server, and an NBI plugin. | The thing being driven. Defines *what a correct notebook is* and exposes tools to fix it. |
-| **NotebookIntelligence (NBI)** | `notebook-intelligence/` | A third-party in-JupyterLab AI chat assistant with a tool/toolset system. | One of the ways an LLM drives the notebook (an in-lab chat). FlowBook registers a toolset with it. |
-| **LogBook** | `LogBook/` | A passive observer that records every notebook event (edits, executions, AI chat) to a JSONL event log, tagging each with an origin (`system`/`user`/`ai`). | The audit/telemetry layer. Records *who did what* — including which actions were AI-driven. |
+| Extension                      | Repo                     | What it is                                                                                                                                                                       | Role in the ecosystem                                                                              |
+| ------------------------------ | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **FlowBook**                   | `FlowBook/`              | Reproducibility engine: a custom IPython kernel that tracks reads/writes per cell and enforces rerun-consistency, plus UI, a server extension, an MCP server, and an NBI plugin. | The thing being driven. Defines _what a correct notebook is_ and exposes tools to fix it.          |
+| **NotebookIntelligence (NBI)** | `notebook-intelligence/` | A third-party in-JupyterLab AI chat assistant with a tool/toolset system.                                                                                                        | One of the ways an LLM drives the notebook (an in-lab chat). FlowBook registers a toolset with it. |
+| **LogBook**                    | `LogBook/`               | A passive observer that records every notebook event (edits, executions, AI chat) to a JSONL event log, tagging each with an origin (`system`/`user`/`ai`).                      | The audit/telemetry layer. Records _who did what_ — including which actions were AI-driven.        |
 
 Each runs standalone. Installed together they compose, but **no extension imports another**
 (see [§10](#10-invariants-conventions-and-gotchas) — the decoupling invariant). They cooperate
@@ -62,7 +62,7 @@ contracts — never through code dependencies.
 
 ## 2. The shared substrate: one kernel, one document
 
-FlowBook's value depends on a *single source of truth* for the notebook and a *single kernel*
+FlowBook's value depends on a _single source of truth_ for the notebook and a _single kernel_
 that tracks reproducibility. Multiple clients (the JupyterLab UI, an out-of-process MCP server)
 can attach to both at once.
 
@@ -71,10 +71,10 @@ can attach to both at once.
   (`GET`/`PUT /api/contents/{path}`), which `jupyter-collaboration` projects onto the live Y.js
   doc. All observers (including LogBook) see the same cell sources.
 - **Shared kernel (`flowbook_kernel`).** A custom IPython kernel that, on every execution,
-  records read/write *locations* and enforces the four validity predicates (see
+  records read/write _locations_ and enforces the four validity predicates (see
   `FORMAL_DEVELOPMENT.md`). Whoever starts the kernel writes a **discovery file**
   (`~/.jupyter/runtime/flowbook-{sha}.json`); a second participant reads it and attaches as an
-  additional ZMQ client. The kernel broadcasts reproducibility results to *all* attached clients
+  additional ZMQ client. The kernel broadcasts reproducibility results to _all_ attached clients
   over IOPub (see [§5](#5-the-kernel-protocol)).
 - **Cell identity.** Every cell has a stable 4-char id (`flowbook/util/cell_ids.py`). Identity
   must survive edits — tools mutate sources in place rather than delete+reinsert — because the
@@ -87,23 +87,23 @@ can attach to both at once.
 
 ## 3. The three ways an LLM drives a notebook
 
-There are three *surfaces* through which an LLM acts on a notebook. They differ in **who hosts
+There are three _surfaces_ through which an LLM acts on a notebook. They differ in **who hosts
 the LLM** and **how edits/executions reach the kernel and document** — but they share one tool
 implementation ([§4](#4-the-unified-tool-layer-flowbooktools)).
 
-| Surface | Code | Who hosts the LLM | Transport to notebook/kernel | Driven by |
-| --- | --- | --- | --- | --- |
-| **MCP server** | `flowbook/mcp/` | External (Claude Code / CLI) | ZMQ kernel via discovery + Contents API / Y.js | MCP tool calls; skills like `/fix-notebook`, `/basic-run` |
-| **NBI extension** | `flowbook/nbi/` | External (NBI chat participant) | Frontend bridge: `run_ui_command('flowbook:…')` → JupyterLab commands | NBI chat; `/basic-run-nbi`, `flowbook-nb-fix` |
-| **In-product "Fix it"** | `flowbook/server/fix_*` + `src/flowbook/fixsuggester.ts` | **FlowBook itself** (litellm → `anthropic/claude-opus-4-7` by default) | Request-body notebook dict (stateless); frontend applies edits to Y.js | The violation notice's "fix" / "Other Fix…" buttons |
+| Surface                 | Code                                                     | Who hosts the LLM                                                      | Transport to notebook/kernel                                           | Driven by                                                 |
+| ----------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------- |
+| **MCP server**          | `flowbook/mcp/`                                          | External (Claude Code / CLI)                                           | ZMQ kernel via discovery + Contents API / Y.js                         | MCP tool calls; skills like `/fix-notebook`, `/basic-run` |
+| **NBI extension**       | `flowbook/nbi/`                                          | External (NBI chat participant)                                        | Frontend bridge: `run_ui_command('flowbook:…')` → JupyterLab commands  | NBI chat; `/basic-run-nbi`, `flowbook-nb-fix`             |
+| **In-product "Fix it"** | `flowbook/server/fix_*` + `src/flowbook/fixsuggester.ts` | **FlowBook itself** (litellm → `anthropic/claude-opus-4-7` by default) | Request-body notebook dict (stateless); frontend applies edits to Y.js | The violation notice's "fix" / "Other Fix…" buttons       |
 
 Notes:
 
 - **MCP** is for an external agent working a notebook end-to-end (possibly headless, possibly
   alongside a live JupyterLab). It owns or joins a kernel and can run cells.
-- **NBI** is for in-lab chat. FlowBook exposes its tools to NBI and *disables NBI's built-in
-  notebook-edit/execute toolsets* so cell identity is preserved (see [§7](#7-notebookintelligence-integration)).
-- **In-product Fix-it** is the only surface where *FlowBook hosts the model*. It is deliberately
+- **NBI** is for in-lab chat. FlowBook exposes its tools to NBI and _disables NBI's built-in
+  notebook-edit/execute toolsets_ so cell identity is preserved (see [§7](#7-notebookintelligence-integration)).
+- **In-product Fix-it** is the only surface where _FlowBook hosts the model_. It is deliberately
   stateless (operates on the notebook JSON in the request, no kernel) and streams a diagnosis +
   proposed fixes (or applies a free-form "Other Fix") to the browser, with a 30-second surgical
   undo. Model selection is the `FlowBookExtension.fix_model` traitlet; the provider API key comes
@@ -115,7 +115,7 @@ Notes:
 
 The reproducibility tools (rename a variable across cells, remove a pandas `inplace=True`, insert
 a deepcopy, mark a cell diagnostic, merge cells, move a cell, plus inspection/execution) are the
-*same operations* regardless of surface. They are defined **once** and reused by all three.
+_same operations_ regardless of surface. They are defined **once** and reused by all three.
 
 ```
             ┌──────────────────────────────────────────────┐
@@ -162,7 +162,7 @@ Key modules:
 **Single-source guarantees (enforced by tests in `flowbook/tools/tests/`):**
 
 - The six refactoring tools have one handler each.
-- `fix_models.TOOL_ARG_SCHEMAS` (the validation allowlist) is *derived* from `REGISTRY`.
+- `fix_models.TOOL_ARG_SCHEMAS` (the validation allowlist) is _derived_ from `REGISTRY`.
 - The in-product fix prompt and the custom-fix agent prompt render their tool lists from the
   registry / the actual schemas.
 - `flowbook/docs/_generated/tool_catalog.md` is generated from the registry (a test fails if it
@@ -170,7 +170,7 @@ Key modules:
 
 So: descriptions (prompt), arg contracts (validation), and application (handlers) all flow from
 one place. See `LLM_INTEGRATION_DESIGN.md` for the migration history and the parts deliberately
-left for later (kernel-backed fix *verification*; a generic-agent rewrite of the litellm loop).
+left for later (kernel-backed fix _verification_; a generic-agent rewrite of the litellm loop).
 
 ---
 
@@ -179,10 +179,10 @@ left for later (kernel-backed fix *verification*; a generic-agent rewrite of the
 `flowbook/kernel/protocol.py` (Python) and `src/flowbook/protocol.ts` (TypeScript) define a
 JSON protocol with a `"type"` discriminator, transported two ways:
 
-| Direction | Transport |
-| --- | --- |
+| Direction       | Transport                                                                                                       |
+| --------------- | --------------------------------------------------------------------------------------------------------------- |
 | Client → kernel | Execute-request metadata (`cell_meta.flowbook`) for Python clients; comm channel (`comm.send`) for the frontend |
-| Kernel → client | Custom IOPub message `flowbook_update` (broadcast to **all** attached clients) + the comm channel |
+| Kernel → client | Custom IOPub message `flowbook_update` (broadcast to **all** attached clients) + the comm channel               |
 
 **Kernel → client** message types: `metadata` (post-execution reads/writes/changed locs, stale
 cells, timing, errors), `violation` (a predicate violation), `status` (icon + summary line).
@@ -193,7 +193,7 @@ stale), `continue_after_violation`, `sync`, `exec_restore`.
 **The `actor` field.** The `metadata` message carries an optional `actor` (`"ai"` | `"user"`).
 The kernel reads it from the execute-request metadata (`cell_meta["actor"]`, default `"user"`)
 and echoes it on `flowbook_update`. This is what lets a co-located observer attribute an
-*out-of-process* execution (an MCP run on the shared kernel) to the AI even though that run never
+_out-of-process_ execution (an MCP run on the shared kernel) to the AI even though that run never
 touched the frontend. MCP's `run_cell` sends `actor="ai"`; the JupyterLab UI sends nothing
 (→ `"user"`). See [§6](#6-logbook-and-ai-attribution).
 
@@ -214,21 +214,21 @@ events are attributed `'ai'`. It is driven by recognized markers:
 
 - **Yjs transaction origins** in a configurable set (`'nbi'`, `'flowbook'`, extensible via
   `registerAiTransactionOrigin`).
-- **Command-id prefixes** (`'notebook-intelligence:'`; `'flowbook:'` is *intentionally excluded*
+- **Command-id prefixes** (`'notebook-intelligence:'`; `'flowbook:'` is _intentionally excluded_
   because FlowBook's `flowbook:` commands are dispatched by both AI and human UI).
 - **The NBI chat token** (`INbiChatObservable`), which also supplies `correlation_id`.
 
 ### How FlowBook activity reaches LogBook — the decoupling invariant
 
-**FlowBook imports nothing from LogBook, and vice versa.** Integration is two one-way *string
-contracts*, each a no-op when the other side is absent:
+**FlowBook imports nothing from LogBook, and vice versa.** Integration is two one-way _string
+contracts_, each a no-op when the other side is absent:
 
-| FlowBook activity | Mechanism (FlowBook side) | LogBook side |
-| --- | --- | --- |
-| **Edits** (fix applier, NBI bridge edits) | `aiTransact(sharedModel, fn)` runs the mutation inside a Yjs transaction tagged `'flowbook'` (`src/flowbook/aiattribution.ts`) | `origin.ts` has `'flowbook'` in its AI-origin set → the observed `cell_source_changed` is `origin: 'ai'` |
-| **Executions** (out-of-process MCP runs) | `emitAiActivity()` dispatches a DOM `CustomEvent('ai-notebook-activity', {detail:{source:'flowbook', path, cellId, status, …}})`, fired from `executionhook.ts` when a `flowbook_update` arrives with `actor === 'ai'` | `ai-activity-relay.ts` (`installAiActivityRelay`) listens and **emits** a `cell_execute_completed` (`origin: 'ai'`) |
+| FlowBook activity                         | Mechanism (FlowBook side)                                                                                                                                                                                              | LogBook side                                                                                                        |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **Edits** (fix applier, NBI bridge edits) | `aiTransact(sharedModel, fn)` runs the mutation inside a Yjs transaction tagged `'flowbook'` (`src/flowbook/aiattribution.ts`)                                                                                         | `origin.ts` has `'flowbook'` in its AI-origin set → the observed `cell_source_changed` is `origin: 'ai'`            |
+| **Executions** (out-of-process MCP runs)  | `emitAiActivity()` dispatches a DOM `CustomEvent('ai-notebook-activity', {detail:{source:'flowbook', path, cellId, status, …}})`, fired from `executionhook.ts` when a `flowbook_update` arrives with `actor === 'ai'` | `ai-activity-relay.ts` (`installAiActivityRelay`) listens and **emits** a `cell_execute_completed` (`origin: 'ai'`) |
 
-Why the execution path *emits* rather than opens a window: LogBook's execution listener uses
+Why the execution path _emits_ rather than opens a window: LogBook's execution listener uses
 `NotebookActions.executed` — a **frontend** signal that never fires for an MCP ZMQ run — so there
 is no event to re-attribute. The relay must record the run itself, using the detail carried on
 the CustomEvent. The earlier design (a LogBook-provided `ILogBookExternal` token that FlowBook
@@ -241,11 +241,11 @@ replaces it.
 
 ### How NBI activity reaches LogBook
 
-LogBook consumes NBI's `INbiChatObservable` token *optionally* (`AiChatTap`,
+LogBook consumes NBI's `INbiChatObservable` token _optionally_ (`AiChatTap`,
 `LogBook/src/ai-chat.ts`): it records `ai_prompt_sent` / `ai_tool_call_*` / `ai_response_*`
 events and brackets each tool call in an AI window. NBI's own shared-model mutations are tagged
 with the `'nbi'` Yjs origin, and its tool-call commands carry a `__nbiChatMessageId` correlation
-arg. (This is a genuine token dependency, but it is *LogBook → NBI* and optional; it predates and
+arg. (This is a genuine token dependency, but it is _LogBook → NBI_ and optional; it predates and
 is independent of FlowBook.)
 
 ---
@@ -284,9 +284,9 @@ Claude Code ── run_cell ──▶ session.run_cell(actor="ai")
   → LogBook ai-activity-relay emits cell_execute_completed{origin:"ai"}
 ```
 
-(Note: an MCP edit pushed via the Contents API carries the *collaboration* transaction origin,
-not `'flowbook'`; attributing MCP *edits* as AI in LogBook is a known gap — see
-`LLM_INTEGRATION_DESIGN.md`. MCP *executions* are attributed via the `actor` path above.)
+(Note: an MCP edit pushed via the Contents API carries the _collaboration_ transaction origin,
+not `'flowbook'`; attributing MCP _edits_ as AI in LogBook is a known gap — see
+`LLM_INTEGRATION_DESIGN.md`. MCP _executions_ are attributed via the `actor` path above.)
 
 ### B. In-product "Fix it" (FlowBook hosts the model)
 
@@ -390,7 +390,7 @@ Third-party. FlowBook depends on its **public extension API** (`notebook_intelli
 4. **Cell identity is sacred.** Edit sources in place (`setSource`); never delete+reinsert a
    cell you mean to keep. The kernel and LogBook both key state by cell id.
 5. **`actor` defaults to `"user"`.** Only a client acting for an LLM sets `actor="ai"` on the
-   execute request (MCP does). The `flowbook:` *command* prefix is deliberately NOT an AI marker
+   execute request (MCP does). The `flowbook:` _command_ prefix is deliberately NOT an AI marker
    because humans use those commands too.
 6. **Frontend signals miss out-of-process work.** `NotebookActions.executed` fires only for
    in-UI runs. Anything an MCP client does over ZMQ is invisible to frontend-signal observers —
@@ -410,7 +410,7 @@ Third-party. FlowBook depends on its **public extension API** (`notebook_intelli
 - **`LLM_INTEGRATION_DESIGN.md`** — the design + migration plan for unifying the three LLM
   surfaces on one tool layer, the prompt/validation single-sourcing, the LogBook attribution
   work, and the parts deliberately deferred (kernel-backed fix verification; generic-agent
-  rewrite). Read this for *why* the structure is as it is and what is intentionally unfinished.
+  rewrite). Read this for _why_ the structure is as it is and what is intentionally unfinished.
 - **`FORMAL_DEVELOPMENT.md`** — the formal reproducibility model (the four validity predicates,
   staleness propagation, UNRECOVERABLE_MUTATION) with an implementation map.
 - **`flowbook/docs/REPRODUCIBILITY_PRIMER.md`** — the canonical prose explanation, embedded in

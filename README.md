@@ -252,7 +252,7 @@ buttons underneath them:
 - Confirm `flowbook-python[ai]` is installed (`pip show litellm`).
 - Confirm the provider API key for your configured `fix_model` is set in
   the same shell where you launched `jupyter lab` (run `echo
-  $ANTHROPIC_API_KEY` etc.).
+$ANTHROPIC_API_KEY` etc.).
 - Check the Jupyter server log for `503` responses from
   `/flowbook/suggest-fix` — those mean the feature self-disabled because
   no provider key was found.
