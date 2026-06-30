@@ -29,23 +29,23 @@ For technical details and a complete evaluation, see our arXiv paper: [FlowBook:
 
 1. Install from Pypi:
 
-    ```bash
-    python3 -m pip install flowbook-python
-    ```
-  
-    or from this repository:
-  
-    ```bash
-    python3 -m pip install -e .
-    ```
+   ```bash
+   python3 -m pip install flowbook-python
+   ```
 
-2. You will need Python and node.  More details on installation from source below.
+   or from this repository:
 
-    Then launch jupyter lab
-  
-    ```bash
-    jupyter lab examples/
-    ```
+   ```bash
+   python3 -m pip install -e .
+   ```
+
+2. You will need Python and node. More details on installation from source below.
+
+   Then launch jupyter lab
+
+   ```bash
+   jupyter lab examples/
+   ```
 
 Once JupyterLab opens, create or open a notebook and select the
 **FlowBook** kernel from the kernel picker.
