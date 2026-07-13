@@ -198,12 +198,22 @@ class TestForwardStalenessBindingSemantics:
     def test_col_write_doesnt_stale_var_reader(self):
         """B reads Var(df) only. A performs an in-place column write. B NOT stale.
 
-        The rerun of A is simulated faithfully as an in-place mutation
-        (df["price"] = ...): identity preserved, "df" NOT in tracking.writes.
+        Both runs of A are simulated faithfully as in-place mutations
+        (df["price"] = ..., df["qty"] = ...): identity preserved, "df" NOT in
+        tracking.writes on either run, so A's stored write set never contains
+        Var(df) — A was never df's binding provider (df comes from upstream).
+        A dropped Var(df) write would correctly stale binding-only readers.
         """
-        df = pd.DataFrame({"price": [1, 2], "qty": [3, 4]})
-        self.helper.execute_cell("a", {}, {"df": df},
-            writes={"df"}, column_writes={"df": {"price", "qty"}})
+        # df comes from upstream (pre-seeded in the namespace)
+        df = pd.DataFrame({"price": [0, 0], "qty": [0, 0]})
+
+        # A: writes both columns in place (steady-state column writer)
+        def write_cols():
+            df["price"] = [1, 2]
+            df["qty"] = [3, 4]
+
+        execute_inplace(self.helper, "a", {"df": df}, write_cols,
+            reads={"df"}, column_writes={"df": {"price", "qty"}})
 
         # B: z = df (binding-only read, no column detail)
         self.helper.execute_cell("b", {"df": df}, {"df": df, "z": True},
@@ -296,11 +306,20 @@ class TestForwardStalenessBindingSemantics:
 
         Simulated with a single shared DataFrame object so that LocRef-based
         conflict detection sees the same DataFrame — the "not stale" outcome
-        is due to column-name precision, not broken object identity.
+        is due to column-name precision, not broken object identity. Both
+        runs of A are steady-state in-place price writers (df comes from
+        upstream), so A's stored write set never contains Var(df) or
+        Col(df, qty) — a dropped write loc would correctly stale its readers.
         """
-        df = pd.DataFrame({"price": [1, 2], "qty": [3, 4]})
-        self.helper.execute_cell("a", {}, {"df": df},
-            writes={"df"}, column_writes={"df": {"price", "qty"}})
+        # df comes from upstream (pre-seeded in the namespace)
+        df = pd.DataFrame({"price": [0, 0], "qty": [3, 4]})
+
+        # A: writes price in place (steady-state column writer)
+        def write_price():
+            df["price"] = [1, 2]
+
+        execute_inplace(self.helper, "a", {"df": df}, write_price,
+            reads={"df"}, column_writes={"df": {"price"}})
 
         self.helper.execute_cell("b", {"df": df}, {"df": df},
             reads={"df"}, column_reads={"df": {"qty"}})
@@ -536,18 +555,26 @@ class TestEndToEndMethodStaleness:
 
     def test_binding_only_reader_not_staled(self):
         """
-        A: df = DataFrame(...)
+        A: df["x"] = ...  (in-place column write; df comes from upstream)
         B: z = df  (binding-only read)
         A re-executed as an in-place column write → B NOT stale.
 
-        The rerun is simulated faithfully: in-place mutation of the same
-        object, "df" NOT in tracking.writes (no rebinding).
+        Both runs of A are simulated faithfully: in-place mutation of the
+        same object, "df" NOT in tracking.writes (no rebinding), so A's
+        stored write set never contains Var(df) — A was never df's binding
+        provider (df comes from upstream). A dropped Var(df) write would
+        correctly stale binding-only readers.
         """
         self.helper.set_cell_order(["a", "b"])
-        df = pd.DataFrame({"x": [1, 2]})
+        # df comes from upstream (pre-seeded in the namespace)
+        df = pd.DataFrame({"x": [0, 0]})
 
-        self.helper.execute_cell("a", {}, {"df": df},
-            writes={"df"}, column_writes={"df": {"x"}})
+        # A: writes df["x"] in place (steady-state column writer)
+        def write_x():
+            df["x"] = [1, 2]
+
+        execute_inplace(self.helper, "a", {"df": df}, write_x,
+            reads={"df"}, column_writes={"df": {"x"}})
         self.helper.execute_cell("b", {"df": df}, {"df": df, "z": True},
             reads={"df"}, writes={"z"})
 

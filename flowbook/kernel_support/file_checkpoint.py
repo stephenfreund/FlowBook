@@ -167,20 +167,37 @@ class FileCheckpoints:
                     from flowbook.util.output import log
                     size_mb = size / (1024 * 1024)
                     log(f"File checkpoint: {os.path.basename(real_path)} ({size_mb:.1f} MB) took {file_duration_ms:.0f} ms")
-            except (OSError, IOError):
-                pass
+            except (OSError, IOError) as e:
+                # A failed snapshot means this file cannot be restored on
+                # rollback — say so instead of silently degrading.
+                from flowbook.util.output import log
+                log(f"WARNING: file checkpoint failed for {real_path}: {e} — "
+                    f"this file cannot be rolled back")
 
         cp = FileCheckpoint(name=name, files=files, deleted_files=deleted)
         self.saved[name] = cp
         return cp
 
-    def restore(self, name: str, vfs=None) -> None:
+    def restore(
+        self,
+        name: str,
+        vfs=None,
+        current_write_paths: Optional[Set[str]] = None,
+    ) -> None:
         """
         Restore files from a checkpoint.
 
         Args:
             name: Checkpoint name
             vfs: Optional VirtualFileSystem (to write to overlay instead of real FS)
+            current_write_paths: Paths written as of NOW (post-execution).
+                Paths the checkpoint has no record of were first written
+                AFTER the checkpoint — i.e. by the rejected cell. Under a
+                VFS those writes live only in the overlay, so removing the
+                overlay copy fully undoes them (a pre-existing real file
+                shows through again, and a created file is gone). Without
+                a VFS we cannot distinguish "created" from "overwrote a
+                never-snapshotted file", so we only warn.
         """
         cp = self.saved[name]
 
@@ -206,6 +223,25 @@ class FileCheckpoints:
                 vfs._deleted_paths.add(deleted_path)
             elif os.path.exists(deleted_path):
                 os.remove(deleted_path)
+
+        # Undo writes the checkpoint never saw (first written by the
+        # rejected cell). Previously these silently survived rollback.
+        if current_write_paths:
+            known = set(cp.files) | set(cp.deleted_files)
+            for path in sorted(current_write_paths - known):
+                if vfs and vfs.enabled:
+                    overlay = vfs._to_overlay_path(path)
+                    if os.path.exists(overlay):
+                        try:
+                            os.remove(overlay)
+                        except OSError:
+                            pass
+                    # Do NOT touch the real FS or _deleted_paths: if a real
+                    # file pre-existed, removing the overlay re-exposes it.
+                else:
+                    from flowbook.util.output import log
+                    log(f"WARNING: {path} was first written by the rejected "
+                        f"cell and has no checkpoint — it cannot be rolled back")
 
     @staticmethod
     def diff(a: FileCheckpoint, b: FileCheckpoint) -> FileCheckpointDiffResult:

@@ -91,16 +91,22 @@ class TestForwardStalenessColumnPrecision:
 
         Simulated with a single shared DataFrame object mutated in place, so
         the diff sees column-level changes on the SAME object (LocRef identity
-        preserved) and "df" is NOT in tracking.writes (no rebinding). The
-        rerun tracking records only the column the edited code writes (qty):
-        the canonical write set (compute_cell_write_locs) now includes ALL
-        tracked column writes, even value-identical ones, so listing price
-        would (correctly) stale its reader.
+        preserved) and "df" is NOT in tracking.writes (no rebinding). Both
+        runs of A are steady-state in-place qty writers (df comes from
+        upstream), so A's stored write set never contains Var(df) or
+        Col(df, price) — a dropped write loc would (correctly) stale its
+        readers, since ForwardStale honors (Wᵢ ∪ W'ᵢ).
         """
-        df = pd.DataFrame({"price": [1, 2], "qty": [3, 4]})
-        self.helper.execute_cell(
-            "a", {}, {"df": df},
-            writes={"df"}, column_writes={"df": {"price", "qty"}},
+        # df comes from upstream (pre-seeded in the namespace)
+        df = pd.DataFrame({"price": [1, 2], "qty": [0, 0]})
+
+        # A: writes qty in place (steady-state column writer)
+        def write_qty():
+            df["qty"] = [3, 4]
+
+        execute_inplace(
+            self.helper, "a", {"df": df}, write_qty,
+            reads={"df"}, column_writes={"df": {"qty"}},
         )
         self.helper.execute_cell(
             "b", {"df": df}, {"df": df},
@@ -133,15 +139,22 @@ class TestForwardStalenessColumnPrecision:
         Adding a new column IN PLACE (df["new"] = ...) should not stale
         downstream cells that only read existing, unchanged columns. Uses a
         single shared DataFrame object so LocRef identity is preserved and
-        the "not stale" outcome comes from column-name precision. The rerun
-        tracking records only the column the edited code writes (new): the
-        canonical write set includes ALL tracked column writes, so listing
-        price would (correctly) stale its reader.
+        the "not stale" outcome comes from column-name precision. Both runs
+        of A are in-place writers of the "new" column only (df comes from
+        upstream), so A's stored write set never contains Var(df) or
+        Col(df, price) — a dropped write loc would (correctly) stale its
+        readers, since ForwardStale honors (Wᵢ ∪ W'ᵢ).
         """
+        # df comes from upstream (pre-seeded in the namespace)
         df = pd.DataFrame({"price": [1, 2]})
-        self.helper.execute_cell(
-            "a", {}, {"df": df},
-            writes={"df"}, column_writes={"df": {"price"}},
+
+        # A: adds the "new" column in place (never writes price or Var(df))
+        def add_new():
+            df["new"] = [0, 0]
+
+        execute_inplace(
+            self.helper, "a", {"df": df}, add_new,
+            reads={"df"}, column_writes={"df": {"new"}},
         )
         self.helper.execute_cell(
             "b", {"df": df}, {"df": df},
@@ -510,13 +523,14 @@ class TestEditRerunBackwardStale:
 
     def test_edit_change_column_staleness(self):
         """
-        A writes df (all columns), B modifies df["price"] in place.
-        Edit B to only write df["qty"] -> C reads df["price"].
+        A writes df (all columns), B modifies df["qty"] in place on BOTH
+        runs (steady-state qty writer). C reads df["price"].
+        Edit B, rerun writing qty -> C is NOT stale.
 
-        The ForwardStale check uses the canonical write set from
-        compute_cell_write_locs (tracked writes ∪ diff-derived writes). Since
-        B's new tracking and diff only cover qty, and C reads price, C is NOT
-        stale via the read-conflict path.
+        The ForwardStale check uses (Wᵢ ∪ W'ᵢ): both B's stored write set
+        and its new write set are {Col(df, qty)}, and Col(df, qty) does not
+        conflict with C's Col(df, price) read. (If B's first run had written
+        price, dropping that write would correctly stale C.)
 
         B is simulated as an in-place column writer (single shared object,
         "df" NOT in tracking.writes), so no Var(df) write loc is added for
@@ -528,14 +542,14 @@ class TestEditRerunBackwardStale:
             writes={"df"}, column_writes={"df": {"price", "qty"}},
         )
 
-        # B: df["price"] = [99] in place
-        def mod_price():
-            df["price"] = [99]
+        # B: df["qty"] = [50] in place
+        def mod_qty_first():
+            df["qty"] = [50]
 
         execute_inplace(
-            self.helper, "b", {"df": df}, mod_price,
+            self.helper, "b", {"df": df}, mod_qty_first,
             reads={"df"},
-            column_reads={"df": set()}, column_writes={"df": {"price"}},
+            column_reads={"df": set()}, column_writes={"df": {"qty"}},
             continue_on_violation=True,
         )
 
@@ -546,7 +560,7 @@ class TestEditRerunBackwardStale:
             reads={"df"}, column_reads={"df": {"price"}},
         )
 
-        # Edit B, now only writes qty in place (stops writing price)
+        # Edit B, rerun still writing only qty in place (never wrote price)
         self.helper.sdc._notebook_state.handle_edit("b")
 
         def mod_qty():
@@ -559,10 +573,10 @@ class TestEditRerunBackwardStale:
             continue_on_violation=True,
         )
 
-        # B's current diff only shows qty changed. C reads price.
+        # B's write union (old ∪ new) is {Col(df, qty)}. C reads price.
         # Col(df, qty) does NOT conflict with Col(df, price), so C is NOT stale.
-        # This demonstrates column-level precision in ForwardStale: removing
-        # a column write does not stale readers of other columns.
+        # This demonstrates column-level precision in ForwardStale: a
+        # steady-state qty writer does not stale readers of other columns.
         assert "c" not in result.stale_cells
 
 

@@ -271,3 +271,161 @@ class TestCanonicalWriteSet:
         assert any(
             e.error_type.value == "no_read_and_write" for e in result.errors
         ), f"len read + row mutation must violate NoReadAndWrite; got {result.errors}"
+
+
+class TestNonStringColumnLabels:
+    """Audit M5 (enforcer level): an in-place write to an int-labeled column
+    is recoverable — previously it recorded no column write and landed in
+    the UNRECOVERABLE_MUTATION catch-all."""
+
+    def setup_method(self):
+        self.helper = ReproducibilityTestHelper()
+        self.helper.set_cell_order(["a", "b"])
+
+    def test_int_column_write_is_recoverable(self):
+        df = pd.DataFrame({0: [1, 2], "y": [3, 4]})
+        self.helper.execute_cell("a", {}, {"df": df}, writes={"df"})
+
+        self.helper.save_pre_checkpoint("b", {"df": df})
+        df[0] = [10, 20]  # in place, int label
+        result = self.helper.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.helper.get_pre_checkpoint("b"),
+            namespace={"df": df},
+            tracking=make_tracking(
+                reads={"df"},
+                column_writes={"df": {"0"}},  # tracked via str(label)
+            ),
+        )
+        assert not any(
+            e.error_type.value == "unrecoverable_mutation" for e in result.errors
+        ), f"int-labeled column write must be recoverable; got {result.errors}"
+
+
+class TestDroppedColumnWrites:
+    """Audit M6: dropped writes are now detected at LOC granularity.
+    Previously name-level: a cell that wrote df["x"] before and df["z"] now
+    showed no removed write (both are name "df")."""
+
+    def setup_method(self):
+        self.helper = ReproducibilityTestHelper()
+        self.helper.set_cell_order(["a", "b", "c"])
+
+    def _run_inplace(self, cell_id, ns, mutate, **tracking):
+        self.helper.save_pre_checkpoint(cell_id, ns)
+        mutate()
+        return self.helper.sdc.check(
+            cell_id=cell_id,
+            pre_checkpoint=self.helper.get_pre_checkpoint(cell_id),
+            namespace=ns,
+            tracking=make_tracking(**tracking),
+        )
+
+    def test_dropped_col_write_stales_downstream_reader(self):
+        # a writes df["x"] in place; b (below) reads df["x"].
+        # a is edited to write df["z"] instead → dropped Col(df, x) must
+        # invalidate b (Wᵢ ∪ W'ᵢ at loc level).
+        df = pd.DataFrame({"x": [0, 0], "z": [0, 0]})
+        ns = {"df": df}
+
+        self._run_inplace(
+            "a", ns, lambda: df.__setitem__("x", [1, 2]),
+            reads={"df"}, column_writes={"df": {"x"}},
+        )
+        self.helper.execute_cell(
+            "b", ns, {"df": df, "y": 3},
+            reads={"df"}, writes={"y"}, column_reads={"df": {"x"}},
+        )
+
+        self.helper.sdc._notebook_state.handle_edit("a")
+        result = self._run_inplace(
+            "a", {"df": df}, lambda: df.__setitem__("z", [9, 9]),
+            reads={"df"}, column_writes={"df": {"z"}},
+        )
+
+        assert "b" in result.stale_cells, (
+            "dropping the Col(df, x) write must invalidate x readers below"
+        )
+
+    def test_dropped_col_write_exposes_last_writer_above(self):
+        # a writes df["x"]; c (below) also wrote df["x"]. c is edited to
+        # write df["z"] → a is again the last writer of x → BACKWARD_STALE.
+        df = pd.DataFrame({"x": [0, 0], "z": [0, 0]})
+        ns = {"df": df}
+
+        self._run_inplace(
+            "a", ns, lambda: df.__setitem__("x", [1, 2]),
+            reads={"df"}, column_writes={"df": {"x"}},
+        )
+        self._run_inplace(
+            "c", ns, lambda: df.__setitem__("x", [5, 6]),
+            reads={"df"}, column_writes={"df": {"x"}},
+        )
+
+        self.helper.sdc._notebook_state.handle_edit("c")
+        result = self._run_inplace(
+            "c", ns, lambda: df.__setitem__("z", [9, 9]),
+            reads={"df"}, column_writes={"df": {"z"}},
+        )
+
+        assert "a" in result.stale_cells, (
+            "dropping c's Col(df, x) write must re-expose a, the last "
+            "writer of x above c"
+        )
+
+
+class TestStructuredChangeParsing:
+    """Audit M11: change classification uses structured diff payloads, not
+    regexes over human-readable messages — column names containing quotes,
+    commas, or brackets must classify correctly."""
+
+    def setup_method(self):
+        self.helper = ReproducibilityTestHelper()
+        self.helper.set_cell_order(["a", "b"])
+
+    def test_awkward_column_name_is_recoverable(self):
+        name = "it's, a ['weird'] col"
+        df = pd.DataFrame({name: [1, 2]})
+        self.helper.execute_cell("a", {}, {"df": df}, writes={"df"})
+
+        self.helper.save_pre_checkpoint("b", {"df": df})
+        df[name] = [10, 20]
+        result = self.helper.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.helper.get_pre_checkpoint("b"),
+            namespace={"df": df},
+            tracking=make_tracking(
+                reads={"df"}, column_writes={"df": {name}},
+            ),
+        )
+        assert not any(
+            e.error_type.value == "unrecoverable_mutation" for e in result.errors
+        ), f"quote/comma/bracket column name must classify correctly; got {result.errors}"
+
+    def test_awkward_column_name_stales_reader(self):
+        name = "it's, a ['weird'] col"
+        df = pd.DataFrame({name: [1, 2], "y": [3, 4]})
+        ns = {"df": df}
+        self.helper.save_pre_checkpoint("a", ns)
+        df[name] = [0, 0]
+        self.helper.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.helper.get_pre_checkpoint("a"),
+            namespace=ns,
+            tracking=make_tracking(reads={"df"}, column_writes={"df": {name}}),
+        )
+        self.helper.execute_cell(
+            "b", ns, {"df": df, "s": 1},
+            reads={"df"}, writes={"s"}, column_reads={"df": {name}},
+        )
+
+        self.helper.sdc._notebook_state.handle_edit("a")
+        self.helper.save_pre_checkpoint("a", ns)
+        df[name] = [7, 8]
+        result = self.helper.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.helper.get_pre_checkpoint("a"),
+            namespace=ns,
+            tracking=make_tracking(reads={"df"}, column_writes={"df": {name}}),
+        )
+        assert "b" in result.stale_cells

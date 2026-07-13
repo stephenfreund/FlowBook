@@ -513,8 +513,11 @@ class ReproducibilityEnforcer:
 
             # INSERT (§2.5): no action needed (new cells have no records)
 
-            # Sync NotebookState with new order (handles its own insert/delete/reorder tracking)
-            self._notebook_state.set_cell_order(order)
+            # Sync NotebookState with new order. Staleness propagation is
+            # disabled: _handle_deletions() above already applied the typed
+            # [Inst-Delete] rule (deleted-set aware); NotebookState only
+            # needs the structural cleanup here (audit M2).
+            self._notebook_state.set_cell_order(order, propagate_staleness=False)
 
             if all_newly_stale:
                 log(f"[ORDER] Cells marked stale: {all_newly_stale}")
@@ -973,7 +976,11 @@ class ReproducibilityEnforcer:
         # STEP 1: Compute r (reads) and w (writes) from tracking
         # Ref: FORMAL_DEVELOPMENT.md §3.1, line 169
         # ================================================================
-        W_i_old = self._writes_var_names(cell_id)  # Old W_i as variable names (Set[str])
+        # Wᵢ from the PREVIOUS execution, at full loc granularity (audit M6:
+        # name-level tracking missed dropped COLUMN-level writes — wrote
+        # df["x"] before, df["z"] now). Captured before record_execution
+        # overwrites the stored set at STEP 3.
+        W_i_old_locs: WriteLocSet = self._notebook_state.writes.get(cell_id, frozenset())
 
         # Compute diff to get actual changes
         with timer(key="check:compute_diff", message=f"[Inst-Run] Computing diff for {cell_id}"):
@@ -1275,24 +1282,10 @@ class ReproducibilityEnforcer:
         # Determine if this cell will be rejected by the kernel
         will_be_rejected = has_any_errors and not continue_on_violation
 
-        # W_i_current: current writes at variable-name granularity, used only
-        # for removed-write detection in BackwardStale.
-        # Must include DataFrame names from tracking.column_writes to be
-        # consistent with how W_i_old is computed (via writelocset_var_names
-        # on the stored WriteLocSet, which extracts 'df' from Col locs).
-        # tracking.column_writes records column mutations (df['col'] = ...)
-        # even when the diff detects no change (same values re-written).
-        # Without this, 'df' appears in W_i_old but not W_i_current, causing
-        # a spurious "removed write" that marks the df creator stale.
-        W_i_current = (
-            (tracking.writes or set())
-            | set((tracking.column_writes or {}).keys())
-        )
-
         if not will_be_rejected:
             with timer(key="check:ForwardStale", message=f"[Inst-Run] ForwardStale computation for {cell_id}"):
                 stale, staleness_warnings = self._compute_forward_staleness(
-                    namespace, W_i_old, tracking, typed_changes, cell_id, my_position,
+                    namespace, W_i_old_locs, tracking, typed_changes, cell_id, my_position,
                 )
             log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
             structural_warnings.extend(staleness_warnings)
@@ -1300,13 +1293,14 @@ class ReproducibilityEnforcer:
             # BackwardStale: mark cells j < i as stale if W_i ▷ R_j ≠ ∅
             # This handles the case where a later cell writes to a variable
             # that an earlier (clean) cell had read.
-            # Also handles removed writes: if cell i used to write y but no longer
-            # does, the last writer of y before i should be marked stale (its
-            # value is now "exposed" to downstream cells).
+            # Also handles removed writes: if cell i used to write a location
+            # y (at loc granularity — Var, Col, Rows, ...) but no longer
+            # does, the last writer of y before i should be marked stale
+            # (its value is now "exposed" to downstream cells).
             with timer(key="check:BackwardStale", message=f"[Inst-Run] BackwardStale computation for {cell_id}"):
                 backward_stale = self._compute_backward_staleness(
                     namespace, tracking, typed_changes, cell_id, my_position,
-                    old_writes=W_i_old, current_writes=W_i_current,
+                    old_write_locs=W_i_old_locs,
                 )
             if backward_stale:
                 log(f"[Inst-Run] {cell_id}: BackwardStale marked {len(backward_stale)} cells")
@@ -1347,12 +1341,6 @@ class ReproducibilityEnforcer:
             return self._cell_order.index(cell_id)
         except ValueError:
             return -1
-
-    def _writes_var_names(self, cell_id: str) -> Set[str]:
-        """Extract variable names from a cell's WriteLocSet."""
-        from flowbook.kernel.locations import writelocset_var_names
-        writes = self._notebook_state.writes.get(cell_id, frozenset())
-        return writelocset_var_names(writes)
 
     def _compute_diff_and_changes(
         self,
@@ -1727,7 +1715,7 @@ class ReproducibilityEnforcer:
     def _compute_forward_staleness(
         self,
         current_namespace: dict,
-        old_writes: Set[str],
+        old_write_locs: WriteLocSet,
         tracking: TrackingData,
         typed_changes: Optional[List],
         just_executed: str,
@@ -1741,13 +1729,13 @@ class ReproducibilityEnforcer:
         FORMAL_DEVELOPMENT.md §10 (Staleness Computation)
         """
         return self._compute_forward_staleness_syntactic(
-            old_writes, tracking, typed_changes, just_executed, my_position,
+            old_write_locs, tracking, typed_changes, just_executed, my_position,
             namespace=current_namespace,
         )
 
     def _compute_forward_staleness_syntactic(
         self,
-        old_writes: Set[str],
+        old_write_locs: WriteLocSet,
         tracking: TrackingData,
         typed_changes: Optional[List],
         just_executed: str,
@@ -1761,11 +1749,14 @@ class ReproducibilityEnforcer:
         or writes, using the ▷ relation for column-level precision.
 
         W'ᵢ is the canonical write set from compute_cell_write_locs
-        (tracking ∪ diff — Var/Col/Cols/Rows/File). Wᵢ (the PREVIOUS
-        execution's writes) enters as Var locs over old_writes, covering
-        locations the cell stopped writing. File conflicts flow through the
-        same ▷ check (File ▷ File is exact-path), so no separate file pass
-        is needed — and none of the ▷ checks get skipped for file-stale cells.
+        (tracking ∪ diff — Var/Col/Cols/Rows/File). Wᵢ is the PREVIOUS
+        execution's stored WriteLocSet, unioned at FULL loc granularity
+        (paper: Wᵢ ∪ W'ᵢ) — a dropped Col(df, x) invalidates x readers
+        without touching other columns' readers (audit M6). Column
+        precision survives because the locs are typed: an in-place column
+        writer's old set contributes the same Col loc it still writes.
+        File conflicts flow through the same ▷ check (File ▷ File is
+        exact-path), so no separate file pass is needed.
 
         Formal ref: FORMAL_DEVELOPMENT.md §3.3, §10.1
         """
@@ -1774,19 +1765,8 @@ class ReproducibilityEnforcer:
         # W'ᵢ: canonical current write set (single builder — audit item 6).
         W_new = compute_cell_write_locs(tracking, typed_changes, namespace, self._stable_map)
 
-        # Wᵢ ∪ W'ᵢ: the previous execution's writes enter as Var locs, but
-        # ONLY for names the cell no longer writes at all ("dropped" writes).
-        # A name still written at column level (in-place column writer) must
-        # NOT gain a Var loc, or every binding-only reader below would be
-        # staled on every re-run, destroying column precision. Dropped
-        # COLUMN-level writes (wrote df["x"] before, df["z"] now) are still
-        # only detected at name granularity — a known limitation (audit M6).
-        from flowbook.kernel.locations import writelocset_var_names
-        current_names = writelocset_var_names(W_new)
-        dropped = (old_writes or set()) - current_names
-        change_wlocs: WriteLocSet = frozenset(
-            W_new | {WriteLoc.var(v) for v in dropped}
-        )
+        # Wᵢ ∪ W'ᵢ at loc granularity.
+        change_wlocs: WriteLocSet = frozenset(W_new | (old_write_locs or frozenset()))
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
@@ -1838,8 +1818,7 @@ class ReproducibilityEnforcer:
         typed_changes: Optional[List],
         just_executed: str,
         my_position: int,
-        old_writes: Optional[Set[str]] = None,
-        current_writes: Optional[Set[str]] = None,
+        old_write_locs: Optional[WriteLocSet] = None,
     ) -> List[str]:
         """
         Compute BackwardStale for all cells j < i.
@@ -1856,7 +1835,7 @@ class ReproducibilityEnforcer:
         """
         return self._compute_backward_staleness_syntactic(
             tracking, typed_changes, just_executed, my_position,
-            old_writes=old_writes, current_writes=current_writes,
+            old_write_locs=old_write_locs,
             namespace=current_namespace,
         )
 
@@ -1866,8 +1845,7 @@ class ReproducibilityEnforcer:
         typed_changes: Optional[List],
         just_executed: str,
         my_position: int,
-        old_writes: Optional[Set[str]] = None,
-        current_writes: Optional[Set[str]] = None,
+        old_write_locs: Optional[WriteLocSet] = None,
         namespace: Optional[dict] = None,
     ) -> List[str]:
         """
@@ -1915,21 +1893,29 @@ class ReproducibilityEnforcer:
                 newly_stale.append(prior_cell_id)
 
         # Removed writes backward staleness:
-        # BackwardStale(W, W', i, j) ≝ j < i ∧ j = LastWriter(W, i, y) for y in W_old - W_new
-        # When cell i drops a write to y, the previous writer of y becomes stale
-        # because its value is now "exposed" to downstream cells.
-        if old_writes is not None and current_writes is not None:
-            removed_writes = old_writes - current_writes
-            if removed_writes:
-                for y in removed_writes:
-                    last_j = self._notebook_state.last_writer_for(y, just_executed)
-                    if last_j is not None and self._notebook_state.is_clean(last_j):
-                        self._notebook_state.add_reason(
-                            last_j,
-                            Reason(ReasonType.BACKWARD_STALE, loc=y, cell_id=just_executed)
-                        )
-                        if last_j not in newly_stale:
-                            newly_stale.append(last_j)
+        # BackwardStale(W, W', i, j) ≝ j < i ∧ j = LastWriter(W, i, y) for y ∈ Wᵢ \ W'ᵢ
+        # When cell i drops a write to y, the previous writer of y becomes
+        # stale because its value is now "exposed" to downstream cells.
+        # Computed at LOC granularity (audit M6): a dropped Col(df, x) finds
+        # the last prior writer whose write set ▷▷-conflicts with that exact
+        # loc — wrote df["x"] before, df["z"] now is no longer invisible.
+        if old_write_locs:
+            dropped_locs = frozenset(old_write_locs) - change_wlocs
+            for dropped in sorted(dropped_locs, key=lambda w: w.display_name()):
+                last_j = None
+                for cell_id in self._cell_order[:my_position]:
+                    if cell_id == just_executed:
+                        continue
+                    cell_w = self._notebook_state.writes.get(cell_id, frozenset())
+                    if wlocs_conflict_wlocs(frozenset({dropped}), cell_w):
+                        last_j = cell_id  # keep scanning; last one wins
+                if last_j is not None and self._notebook_state.is_clean(last_j):
+                    self._notebook_state.add_reason(
+                        last_j,
+                        Reason(ReasonType.BACKWARD_STALE, loc=dropped.display_name(), cell_id=just_executed)
+                    )
+                    if last_j not in newly_stale:
+                        newly_stale.append(last_j)
 
         return newly_stale
 
@@ -2347,10 +2333,8 @@ def _get_changed_columns_from_diff_node(node: DiffNode) -> Set[str]:
             # - "['column_name']" - column-level difference
             # - "['column_name'][0]" - row-level difference within column
             # - "['column_name']._dtype" - dtype difference for column
-            # Extract the column name using regex
-            match = re.match(r"\['([^']+)'\]", key)
-            if match:
-                column_name = match.group(1)
+            column_name = _column_from_child_key(key)
+            if column_name is not None:
                 changed_cols.add(column_name)
         return changed_cols
 
@@ -2365,13 +2349,30 @@ def _get_changed_columns_from_diff_node(node: DiffNode) -> Set[str]:
             # - "['column_name']" - column-level difference
             # - "['column_name'][0]" - row-level difference within column
             # - "['column_name']._dtype" - dtype difference for column
-            # Extract the column name using regex
-            match = re.match(r"\['([^']+)'\]", key)
-            if match:
-                column_name = match.group(1)
+            column_name = _column_from_child_key(key)
+            if column_name is not None:
                 changed_cols.add(column_name)
 
     return changed_cols
+
+
+
+def _column_from_child_key(key: str) -> Optional[str]:
+    """Recover a column name from a DataFrame diff child key.
+
+    Keys are constructed as f"['{col}']" with optional suffixes
+    ("['col'][0]", "['col']._dtype"). Delimiter-based parsing recovers any
+    column name — including ones containing quotes — that broke the old
+    regex (audit M11).
+    """
+    if not key.startswith("['"):
+        return None
+    if key.endswith("']") and len(key) > 4:
+        return key[2:-2]
+    end = key.rfind("']")
+    if end > 2:
+        return key[2:end]
+    return None
 
 
 def _get_value_level_changed_vars(typed_changes: List) -> Set[str]:

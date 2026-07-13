@@ -286,9 +286,19 @@ class BaseFlowbookKernel(IPythonKernel):
         return total, uncopyable_vars
 
     def _restore_checkpoint(self, checkpoint_name: str) -> None:
-        """Restore memory + file checkpoint."""
+        """Restore memory + file checkpoint.
+
+        Passes the CURRENT write-path set so files first written after the
+        checkpoint (by the rejected cell) are also undone.
+        """
+        current_write_paths = (
+            self._vfs.get_write_paths()
+            if (self._vfs.enabled or self._vfs.tracking_only)
+            else None
+        )
         self._checkpoints.restore(
             checkpoint_name,
             self.shell.user_ns,
             vfs=self._vfs if self._vfs.enabled else None,
+            current_write_paths=current_write_paths,
         )

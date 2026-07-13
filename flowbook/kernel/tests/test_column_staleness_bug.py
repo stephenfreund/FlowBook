@@ -226,20 +226,25 @@ class TestForwardStalenessColumnAware:
         Forward staleness: Cell B reads col_a, Cell A (re-executed) writes
         col_b IN PLACE. Cell B should NOT become stale.
 
-        The rerun is simulated faithfully as an in-place column write on the
-        same object (identity preserved, "df" NOT in tracking.writes), so
-        no Var(df) rebinding write loc is added.
+        Both runs of A are simulated faithfully as in-place column writes on
+        the same object (identity preserved, "df" NOT in tracking.writes), so
+        A's stored write set never contains Var(df) — dropping a write loc
+        between runs would correctly stale readers of the dropped location.
+        A is a steady-state col_b writer: df itself comes from upstream.
         """
-        df = pd.DataFrame({'col_a': [1, 2], 'col_b': [3, 4]})
+        # df comes from upstream (pre-seeded in the namespace)
+        df = pd.DataFrame({'col_a': [1, 2], 'col_b': [0, 0]})
 
-        # Cell A: Creates df
-        self.helper.execute_cell(
-            cell_id="a",
-            pre_namespace={},
-            post_namespace={"df": df},
-            writes={"df"},
-            column_writes={"df": {"col_a", "col_b"}},
+        # Cell A: Writes df['col_b'] IN PLACE (steady-state column writer)
+        def write_col_b():
+            df['col_b'] = [3, 4]
+
+        result_a = execute_inplace(
+            self.helper, "a", {"df": df}, write_col_b,
+            reads={"df"},
+            column_writes={"df": {"col_b"}},
         )
+        assert not result_a.has_errors()
 
         # Cell B: Reads df['col_a']
         self.helper.execute_cell(
@@ -312,18 +317,24 @@ class TestForwardStalenessColumnAware:
         Forward staleness with multiple downstream cells reading different columns.
         Only cells reading the modified column should become stale.
 
-        Cell A's rerun is simulated as an in-place column write on the same
-        object (identity preserved, "df" NOT in tracking.writes).
+        Both runs of Cell A are simulated as in-place column writes of col y
+        on the same object (identity preserved, "df" NOT in tracking.writes),
+        so A's stored write set never contains Var(df) and no write loc is
+        dropped between runs. df itself comes from upstream.
         """
-        df = pd.DataFrame({'x': [1], 'y': [2], 'z': [3]})
+        # df comes from upstream (pre-seeded in the namespace)
+        df = pd.DataFrame({'x': [1], 'y': [0], 'z': [3]})
 
-        # Cell A: Creates df
-        self.helper.execute_cell(
-            cell_id="a",
-            pre_namespace={},
-            post_namespace={"df": df},
-            writes={"df"},
+        # Cell A: Writes df['y'] IN PLACE (steady-state column writer)
+        def write_y():
+            df['y'] = [2]
+
+        result_a = execute_inplace(
+            self.helper, "a", {"df": df}, write_y,
+            reads={"df"},
+            column_writes={"df": {"y"}},
         )
+        assert not result_a.has_errors()
 
         # Cell B: Reads df['x']
         self.helper.execute_cell(

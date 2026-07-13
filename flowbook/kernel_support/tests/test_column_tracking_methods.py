@@ -220,3 +220,40 @@ class TestExpandedInterception:
     def test_operators_untracked_when_inactive(self, ndf):
         """Passthrough when no tracker is active (e.g. diff machinery)."""
         assert ((ndf * 2)["price"] == [20, 40, 60]).all()
+
+
+class TestNonStringColumnLabels:
+    """Audit M5: non-string column labels (df[0], MultiIndex tuples) must be
+    tracked via str(label) — matching the diff's column naming — instead of
+    being invisible and misclassified as UNRECOVERABLE_MUTATION."""
+
+    def test_int_column_write_recorded(self, tracker):
+        df = pd.DataFrame({0: [1, 2], 1: [3, 4]})
+        tracker.register_df(df, "df")
+        df[0] = [10, 20]
+        assert "0" in tracker._writes_by_id[id(df)]
+
+    def test_int_column_read_recorded(self, tracker):
+        df = pd.DataFrame({0: [1, 2], 1: [3, 4]})
+        tracker.register_df(df, "df")
+        df[0]
+        assert "0" in tracker._reads_by_id[id(df)]
+
+    def test_int_column_delete_recorded(self, tracker):
+        df = pd.DataFrame({0: [1, 2], 1: [3, 4]})
+        tracker.register_df(df, "df")
+        del df[0]
+        assert "0" in tracker._column_deletions_by_id[id(df)]
+
+    def test_tuple_column_write_recorded(self, tracker):
+        df = pd.DataFrame({("a", "x"): [1], ("a", "y"): [2]})
+        tracker.register_df(df, "df")
+        df[("a", "x")] = [9]
+        assert str(("a", "x")) in tracker._writes_by_id[id(df)]
+
+    def test_boolean_mask_not_recorded_as_label(self, tracker, ndf=None):
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        tracker.register_df(df, "df")
+        df[df["x"] > 1]  # mask selection — no bogus column names
+        recorded = tracker._reads_by_id[id(df)]
+        assert "True" not in recorded and "False" not in recorded

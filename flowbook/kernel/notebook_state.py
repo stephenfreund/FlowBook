@@ -498,7 +498,11 @@ class NotebookState:
                         ReasonType.BACKWARD_STALE, loc=w.display_name(), cell_id=deleted_cell
                     ))
 
-        # Remove deleted cell from state
+        self.remove_cell_state(deleted_cell)
+
+    def remove_cell_state(self, deleted_cell: str) -> None:
+        """Remove all per-cell state for a deleted cell (no staleness
+        propagation — see handle_delete for the propagating variant)."""
         self.status.pop(deleted_cell, None)
         self.reads.pop(deleted_cell, None)
         self.writes.pop(deleted_cell, None)
@@ -559,7 +563,9 @@ class NotebookState:
         # Cells in affected range may be affected by order change
         # but without provenance tracking we cannot check Runnable here.
 
-    def set_cell_order(self, new_order: List[str]) -> List[str]:
+    def set_cell_order(
+        self, new_order: List[str], propagate_staleness: bool = True
+    ) -> List[str]:
         """
         Update cell order and handle structural changes.
 
@@ -568,6 +574,12 @@ class NotebookState:
 
         Args:
             new_order: New list of cell IDs in document order
+            propagate_staleness: When True (default, standalone use), each
+                deletion propagates staleness via handle_delete. The
+                enforcer passes False: its _handle_deletions() has ALREADY
+                run the typed [Inst-Delete] rule (with deleted-set
+                exclusion), and running a second, divergent propagation
+                here could mark the wrong LastWriter and duplicate reasons.
 
         Returns:
             List of cell IDs that became stale due to this change
@@ -578,7 +590,10 @@ class NotebookState:
 
         # Handle deletions
         for deleted in old_set - new_set:
-            self.handle_delete(deleted)
+            if propagate_staleness:
+                self.handle_delete(deleted)
+            else:
+                self.remove_cell_state(deleted)
 
         # Handle insertions (new cells not in old order)
         for inserted in new_set - old_set:

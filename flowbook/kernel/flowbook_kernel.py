@@ -233,9 +233,13 @@ KNOWN LIMITATIONS:
    Restored iterators may behave unexpectedly.
 
 4. EXTERNAL SIDE EFFECTS
-   File I/O, network calls, database modifications are NOT rolled back:
-       f.write(data)  # File is modified even if cell is rolled back
-   Reproducibility only manages Python namespace state.
+   Tracked file writes ARE rolled back: modified files are restored from
+   the file checkpoint, deleted files re-deleted, and (under the VFS)
+   files first written by the rejected cell are removed from the overlay.
+   Without the VFS, a file FIRST written by the rejected cell has no
+   pre-image and cannot be restored (a warning is logged). Network calls,
+   database modifications, and subprocess file writes are never rolled
+   back.
 
 5. MATPLOTLIB OBJECTS EXCLUDED
    Matplotlib figures/axes are not checkpointed (unpicklable).

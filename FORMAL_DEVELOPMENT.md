@@ -426,7 +426,7 @@ Validity predicates are implemented inline within `check()`, following the [Inst
 | main.tex                   | FORMAL_DEVELOPMENT.md | Code                                                                                                                               |
 | -------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | ForwardStale(R, W, i, j)   | §3.3                  | `_compute_forward_staleness()` in `check()`, `_handle_deletions()` in `kernel/reproducibility_enforcer.py`                         |
-| BackwardStale(W, W', i, j) | §3.3                  | Computed via `NotebookState.last_writer_for()` in `_compute_backward_staleness()`, `handle_delete()` in `kernel/notebook_state.py` |
+| BackwardStale(W, W', i, j) | §3.3                  | Loc-granular removed-write scan in `_compute_backward_staleness_syntactic()`; delete-time propagation in `_handle_deletions()` (`NotebookState.handle_delete()` is a standalone API — the enforcer path syncs structure with `set_cell_order(..., propagate_staleness=False)` to avoid double propagation) |
 | LastWriter(W, i, y)        | §1.4.2                | `NotebookState.last_writer_for(loc, cell_id)` in `kernel/notebook_state.py` — pure computation over W                              |
 | Overwritten(W, i)          | §1.4.1                | Computed on-demand in staleness checks                                                                                             |
 
