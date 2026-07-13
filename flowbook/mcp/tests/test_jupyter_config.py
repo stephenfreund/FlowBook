@@ -49,3 +49,53 @@ class TestRuntimeDiscovery:
         url, token = discover_jupyter_server()
         if url is not None:
             assert url.startswith("http")
+
+
+class TestPidLiveness:
+    """Audit C10: PermissionError from os.kill(pid, 0) means the server
+    process exists (owned by another user) and must be treated as ALIVE."""
+
+    def _write_server_info(self, runtime_dir, pid):
+        import json
+
+        info = {
+            "url": "http://localhost:8888/",
+            "token": "tok",
+            "root_dir": str(runtime_dir),
+            "pid": pid,
+        }
+        path = runtime_dir / "jpserver-1234.json"
+        path.write_text(json.dumps(info))
+        return path
+
+    def _setup(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("JUPYTER_SERVER_URL", raising=False)
+        monkeypatch.delenv("JUPYTER_TOKEN", raising=False)
+        monkeypatch.setattr(
+            "flowbook.mcp.jupyter_config.jupyter_runtime_dir",
+            lambda: str(tmp_path),
+        )
+
+    def test_permission_error_treated_as_alive(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path)
+        self._write_server_info(tmp_path, pid=12345)
+
+        def raise_permission(pid, sig):
+            raise PermissionError("Operation not permitted")
+
+        monkeypatch.setattr(os, "kill", raise_permission)
+        url, token = discover_jupyter_server()
+        assert url == "http://localhost:8888"
+        assert token == "tok"
+
+    def test_process_lookup_error_treated_as_dead(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path)
+        self._write_server_info(tmp_path, pid=12345)
+
+        def raise_lookup(pid, sig):
+            raise ProcessLookupError("No such process")
+
+        monkeypatch.setattr(os, "kill", raise_lookup)
+        url, token = discover_jupyter_server()
+        assert url is None
+        assert token is None

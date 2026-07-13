@@ -48,6 +48,22 @@ CSV_DOWNSAMPLE_PATCH_TEMPLATE = textwrap.dedent('''
 ''').strip()
 
 
+def extract_flowbook_metadata(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the first ``type == "metadata"`` flowbook protocol message
+    from a ``KernelHelper.execute_code()`` result, or None.
+
+    Shared per-cell metadata extraction (audit A4) used by both
+    ``ExecuteCommand.process`` (flowbook/server/commands/execute.py) and
+    ``NotebookSession.run_cell`` (flowbook/mcp/session.py). The two callers
+    keep separate execution loops on purpose — see the cross-reference
+    comments at those call sites.
+    """
+    for msg in result.get("flowbook_messages", []):
+        if isinstance(msg, dict) and msg.get("type") == "metadata":
+            return msg
+    return None
+
+
 class KernelHelper:
     """Helper class for kernel communication."""
 
@@ -81,6 +97,9 @@ class KernelHelper:
             Dictionary with execution results from applying the patch,
             including any outputs or errors.
 
+        Raises:
+            ValueError: If proportion is not a number in [0.0, 1.0].
+
         Example:
             >>> # Keep only 10% of CSV data for faster testing
             >>> KernelHelper.inject_csv_downsampling(kernel_client, 0.1)
@@ -92,6 +111,21 @@ class KernelHelper:
               were kept vs. the original count.
             - The patch persists for the lifetime of the kernel session.
         """
+        # Coerce and validate BEFORE interpolating into kernel code (audit
+        # S5): a string or expression must never reach the template, where
+        # it would be executed verbatim in the kernel.
+        try:
+            proportion = float(proportion)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"proportion must be a number between 0.0 and 1.0, "
+                f"got {proportion!r}"
+            )
+        if not 0.0 <= proportion <= 1.0:  # also rejects NaN
+            raise ValueError(
+                f"proportion must be between 0.0 and 1.0, got {proportion!r}"
+            )
+
         patch_code = CSV_DOWNSAMPLE_PATCH_TEMPLATE.format(proportion=proportion)
         result = KernelHelper.execute_code(
             kernel_client,

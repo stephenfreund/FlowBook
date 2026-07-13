@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 
 import pytest
 
@@ -279,9 +280,54 @@ class TestAtomicWrite:
         assert doc["pid"] == os.getpid()
 
 
+class TestFilePermissions:
+    """Audit S4: discovery files must be owner-only (0o600)."""
+
+    def test_written_file_is_0o600(self, notebook_path, dummy_connection_file):
+        assert write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", os.getpid(), "mcp"
+        ) is True
+        mode = os.stat(_discovery_path(notebook_path)).st_mode
+        assert stat.S_IMODE(mode) == 0o600
+
+
 class TestIsPidAlive:
     def test_current_pid(self):
         assert _is_pid_alive(os.getpid()) is True
 
     def test_nonexistent_pid(self):
         assert _is_pid_alive(99999999) is False
+
+    def test_permission_error_means_alive(self, monkeypatch):
+        """Audit C10: a live process owned by another user raises
+        PermissionError from os.kill(pid, 0) — that is ALIVE, not dead."""
+
+        def raise_permission(pid, sig):
+            raise PermissionError("Operation not permitted")
+
+        monkeypatch.setattr(os, "kill", raise_permission)
+        assert _is_pid_alive(12345) is True
+
+    def test_process_lookup_error_means_dead(self, monkeypatch):
+        def raise_lookup(pid, sig):
+            raise ProcessLookupError("No such process")
+
+        monkeypatch.setattr(os, "kill", raise_lookup)
+        assert _is_pid_alive(12345) is False
+
+    def test_read_discovery_keeps_other_users_kernel(
+        self, notebook_path, dummy_connection_file, monkeypatch
+    ):
+        """A discovery file for a kernel owned by another user must not be
+        auto-deleted (audit C10)."""
+        assert write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", 12345, "mcp"
+        ) is True
+
+        def raise_permission(pid, sig):
+            raise PermissionError("Operation not permitted")
+
+        monkeypatch.setattr(os, "kill", raise_permission)
+        disc = read_discovery(notebook_path)
+        assert disc is not None
+        assert os.path.exists(_discovery_path(notebook_path))

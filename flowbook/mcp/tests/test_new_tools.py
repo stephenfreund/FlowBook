@@ -526,7 +526,6 @@ class TestRunCellPutsContentsApi:
         session.notebook = {"cells": [cell]}
         session.get_cell_order.return_value = ["abc1"]
         session._find_cell.return_value = (0, cell)
-        session._extract_flowbook_meta.return_value = None
         session.executed_cells = set()
         session.cell_flowbook_meta = {}
         session._stale_cells = set()

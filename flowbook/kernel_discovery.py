@@ -39,11 +39,23 @@ def _discovery_path(notebook_path: str) -> str:
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """Check whether a process with the given PID is still running."""
+    """Check whether a process with the given PID is still running.
+
+    A PermissionError from ``os.kill(pid, 0)`` means the process EXISTS but
+    is owned by another user — that is ALIVE, not dead (audit C10). Only
+    ProcessLookupError / other OSErrors mean the process is gone.
+
+    Known limitation (PID reuse): a recycled PID can make a dead kernel look
+    alive, so a stale discovery file may briefly survive. This is bounded in
+    practice by the connect/wait_for_ready timeouts of whoever tries to use
+    the stale entry.
+    """
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except PermissionError:
+        return True  # live process owned by another user
+    except OSError:
         return False
 
 
@@ -130,6 +142,11 @@ def write_discovery(
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            # Discovery files point at kernel connection files; keep them
+            # owner-only. mkstemp already creates the temp file 0o600, but
+            # set it explicitly so the final file's mode never depends on
+            # that implementation detail (audit S4).
+            os.fchmod(f.fileno(), 0o600)
             json.dump(doc, f, indent=2)
         os.replace(tmp_path, path)
     except BaseException:

@@ -25,11 +25,12 @@ from flowbook.cli.helpers import (
     setup_kernel,
 )
 from flowbook.kernel_discovery import read_discovery, write_discovery, remove_discovery
+import urllib.parse
 import urllib.request
 
 from flowbook.mcp.jupyter_config import discover_jupyter_server, discover_jupyter_server_root
 from flowbook.util.cell_ids import normalize_notebook_alpha, next_insertion_id
-from flowbook.server.kernel_helper import KernelHelper
+from flowbook.server.kernel_helper import KernelHelper, extract_flowbook_metadata
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.scripts.fix_repro_errors import (
     rename_variable_in_code,
@@ -318,7 +319,7 @@ class NotebookSession:
 
         abs_path = os.path.abspath(os.path.expanduser(path))
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(abs_path, "r", encoding="utf-8") as f:
             raw_notebook = json.load(f)
 
         # Check for existing kernel via discovery file
@@ -422,8 +423,11 @@ class NotebookSession:
             else:
                 contents_path = os.path.basename(notebook_abs_path)
 
-            # Verify the Contents API works with a test request
-            url = f"{server_url}/api/contents/{contents_path}?content=0"
+            # Verify the Contents API works with a test request.
+            # Quote the path (audit R4): spaces etc. would otherwise produce
+            # an invalid URL.
+            quoted = urllib.parse.quote(contents_path, safe="/")
+            url = f"{server_url}/api/contents/{quoted}?content=0"
             headers = {}
             if token:
                 headers["Authorization"] = f"token {token}"
@@ -493,9 +497,12 @@ class NotebookSession:
         if not self._jupyter_server_url or not self._jupyter_contents_path:
             return None
         try:
+            # Quote the path (audit R4): spaces etc. would otherwise
+            # produce an invalid URL.
             url = (
                 f"{self._jupyter_server_url}/api/contents/"
-                f"{self._jupyter_contents_path}?content=1&type=notebook"
+                f"{urllib.parse.quote(self._jupyter_contents_path, safe='/')}"
+                f"?content=1&type=notebook"
             )
             headers = {}
             if self._jupyter_token:
@@ -585,13 +592,16 @@ class NotebookSession:
 
         self.notebook["cells"] = new_cells
 
-        # Notify kernel of new cell order
+        # Notify kernel of new cell order. Notification-only send: we don't
+        # consume the reply, and it queues behind whatever the shared kernel
+        # is currently running, so a long JupyterLab cell blocks MCP for up
+        # to this timeout (audit R6) — keep it short.
         if self.kernel_client:
             new_order = [
                 c["id"] for c in new_cells if c.get("cell_type") == "code"
             ]
             KernelHelper.execute_code(
-                self.kernel_client, "", timeout=10, store_history=False,
+                self.kernel_client, "", timeout=3, store_history=False,
                 flowbook_msg={
                     "type": "notebook_structure", "cell_order": new_order
                 },
@@ -620,10 +630,14 @@ class NotebookSession:
         """
         self._require_loaded()
         self._continue_after_violation = enabled
+        # Notification-only send: we don't consume the reply, and it queues
+        # behind whatever the shared kernel is currently running, so a long
+        # JupyterLab cell blocks MCP for up to this timeout (audit R6) —
+        # keep it short.
         KernelHelper.execute_code(
             self.kernel_client,
             "",
-            timeout=10,
+            timeout=3,
             store_history=False,
             flowbook_msg={"type": "continue_after_violation", "enabled": enabled},
             on_foreign_msg=self._process_iopub_msg,
@@ -802,19 +816,6 @@ class NotebookSession:
     # Execution
     # ------------------------------------------------------------------
 
-    def _extract_flowbook_meta(
-        self, flowbook_messages: List[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        """Extract flowbook metadata from protocol messages.
-
-        Args:
-            flowbook_messages: Protocol messages from KernelHelper.execute_code()
-        """
-        for msg in flowbook_messages:
-            if msg.get("type") == "metadata":
-                return msg
-        return None
-
     def run_cell(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
         """Execute a single cell and return outputs + flowbook metadata."""
         self._require_loaded()
@@ -849,17 +850,13 @@ class NotebookSession:
         self._put_contents_api()  # Push outputs to JupyterLab via Y.js
         self.executed_cells.add(cell_id)
 
-        # Extract flowbook metadata
-        fb_meta = self._extract_flowbook_meta(
-            result.get("flowbook_messages", [])
-        )
+        # Extract flowbook metadata (shared helper — audit A4)
+        fb_meta = extract_flowbook_metadata(result)
         if fb_meta:
             self.cell_flowbook_meta[cell_id] = fb_meta
             # Update stale cell tracking
             stale = set(fb_meta.get("stale_cells", []))
             self._stale_cells = (self._stale_cells | stale) - {cell_id}
-            if cell_id in self._stale_cells:
-                self._stale_cells.discard(cell_id)
 
         # Track execution status
         if result["status"] == "error":
@@ -881,7 +878,18 @@ class NotebookSession:
         return response
 
     def run_all(self, timeout: float = 300) -> Dict[str, Any]:
-        """Execute all code cells top-to-bottom."""
+        """Execute all code cells top-to-bottom.
+
+        NOTE (audit A4): ExecuteCommand.process in
+        flowbook/server/commands/execute.py runs a similar per-cell loop.
+        The shared metadata-extraction step lives in
+        kernel_helper.extract_flowbook_metadata() (used via run_cell). The
+        loops intentionally stay separate: this one delegates to run_cell,
+        which maintains live session state (stale-cell sets, executed_cells,
+        Contents API pushes to JupyterLab), while the server command is a
+        stateless one-shot that shapes a ProcessingResult and persists
+        violations into the saved notebook's cell metadata.
+        """
         self._require_loaded()
         self._refresh_from_contents_api()
         cell_order = self.get_cell_order()
@@ -1025,6 +1033,9 @@ class NotebookSession:
         if cell_id not in self.executed_cells:
             return
 
+        # Unlike the notification-only sends (audit R6, timeout=3), this
+        # round-trip KEEPS timeout=10: we reconcile staleness from the
+        # kernel's reply below, so we must wait for it.
         result = KernelHelper.execute_code(
             self.kernel_client,
             "",
@@ -1041,22 +1052,25 @@ class NotebookSession:
 
         # Source provided: the kernel decides. It emits a metadata message only
         # when the edit changes the cell's status; reconcile from that reply.
-        for fb in result.get("flowbook_messages", []):
-            if isinstance(fb, dict) and fb.get("type") == "metadata":
-                if cell_id in set(fb.get("stale_cells", [])):
-                    self._stale_cells.add(cell_id)
-                else:
-                    self._stale_cells.discard(cell_id)
-                return
+        fb = extract_flowbook_metadata(result)
+        if fb is not None:
+            if cell_id in set(fb.get("stale_cells", [])):
+                self._stale_cells.add(cell_id)
+            else:
+                self._stale_cells.discard(cell_id)
         # No metadata reply → cosmetic no-op; leave staleness unchanged.
 
     def _notify_structure(self) -> None:
         """Tell the kernel the current code-cell order (after a structural edit)."""
         new_order = self.get_cell_order()
+        # Notification-only send: we don't consume the reply, and it queues
+        # behind whatever the shared kernel is currently running, so a long
+        # JupyterLab cell blocks MCP for up to this timeout (audit R6) —
+        # keep it short.
         KernelHelper.execute_code(
             self.kernel_client,
             "",
-            timeout=10,
+            timeout=3,
             store_history=False,
             flowbook_msg={"type": "notebook_structure", "cell_order": new_order},
             on_foreign_msg=self._process_iopub_msg,
@@ -1163,9 +1177,11 @@ class NotebookSession:
                         )
 
         try:
+            # Quote the path (audit R4): spaces etc. would otherwise
+            # produce an invalid URL.
             url = (
                 f"{self._jupyter_server_url}/api/contents/"
-                f"{self._jupyter_contents_path}"
+                f"{urllib.parse.quote(self._jupyter_contents_path, safe='/')}"
             )
             body = json.dumps({
                 "type": "notebook",
@@ -1239,11 +1255,20 @@ class NotebookSession:
             if cid in set(cell_order) and cid not in stale_with_reasons:
                 stale_with_reasons[cid] = [{"type": "code_changed"}]
 
-        executed_count = len(self.executed_cells & set(cell_order))
-        clean_count = executed_count - len(
-            set(self.cell_status.keys())
-            & {k for k, v in self.cell_status.items() if v == "error"}
-        ) - len(self._stale_cells & self.executed_cells)
+        # Clean = executed cells (in the CURRENT cell order) that are
+        # neither error nor stale. Computed as a set difference (audit C9):
+        # subtracting counts double-counted cells that were both error and
+        # stale, and error entries for since-deleted cells could drive the
+        # result negative. Set arithmetic restricted to cell_order is
+        # correct by construction (and thus never negative).
+        order_set = set(cell_order)
+        executed_in_order = self.executed_cells & order_set
+        executed_count = len(executed_in_order)
+        error_cells = {
+            cid for cid in executed_in_order
+            if self.cell_status.get(cid) == "error"
+        }
+        clean_count = len(executed_in_order - error_cells - self._stale_cells)
 
         lines = [
             f"Notebook: {self.notebook_path}",

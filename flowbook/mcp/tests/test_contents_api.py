@@ -529,6 +529,69 @@ class TestContentsApiStateReset:
         assert session._put_contents_api() is None
 
 
+class TestUrlQuoting:
+    """Audit R4: the contents path must be URL-encoded, otherwise paths
+    with spaces (or other reserved characters) produce invalid URLs."""
+
+    SPACEY_PATH = "my notebooks/test nb.ipynb"
+    QUOTED_PATH = "my%20notebooks/test%20nb.ipynb"
+
+    def test_fetch_quotes_path(self):
+        session = _setup_session_with_api(
+            [_make_code_cell("A", "x = 1")], contents_path=self.SPACEY_PATH
+        )
+        api_nb = _make_notebook([_make_code_cell("A", "x = 1")])
+        with patch(
+            "urllib.request.urlopen", return_value=_mock_urlopen_response(api_nb)
+        ) as mock_open:
+            session._fetch_contents_api()
+
+        req = mock_open.call_args[0][0]
+        assert self.QUOTED_PATH in req.full_url
+        assert " " not in req.full_url
+
+    def test_put_quotes_path(self):
+        session = _setup_session_with_api(
+            [_make_code_cell("A", "x = 1")], contents_path=self.SPACEY_PATH
+        )
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"{}"
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+            session._last_contents_refresh = time.time()  # skip conflict GET
+            assert session._put_contents_api() is not None
+
+        req = mock_open.call_args[0][0]
+        assert req.method == "PUT"
+        assert self.QUOTED_PATH in req.full_url
+        assert " " not in req.full_url
+
+    def test_setup_quotes_path_in_test_get(self):
+        session = NotebookSession()
+        session.notebook = _make_notebook([])
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"{}"
+
+        with patch(
+            "flowbook.mcp.session.discover_jupyter_server",
+            return_value=("http://localhost:8888", "tok"),
+        ), patch(
+            "flowbook.mcp.session.discover_jupyter_server_root",
+            return_value="/server/root",
+        ), patch(
+            "urllib.request.urlopen", return_value=mock_resp
+        ) as mock_open:
+            result = session._setup_contents_api(
+                "/server/root/my notebooks/test nb.ipynb"
+            )
+
+        assert result == " [live sync]"
+        req = mock_open.call_args[0][0]
+        assert self.QUOTED_PATH in req.full_url
+        assert " " not in req.full_url
+        # The stored path stays UNQUOTED; quoting happens at URL build time.
+        assert session._jupyter_contents_path == self.SPACEY_PATH
+
+
 class TestProcessIopubMsg:
     """Regression test for audit finding C2: flowbook_update messages from
     JupyterLab-initiated executions arriving WHILE an MCP kernel round-trip

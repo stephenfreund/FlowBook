@@ -141,7 +141,7 @@ The server uses the modern **ExtensionApp** pattern (not legacy extension points
   - `POST /flowbook/execute` - Execute a command (FlowbookCommandHandler; uses the shared `KernelConnectionManager`)
   - `GET /flowbook/list` - List available commands (CommandListHandler)
   - `GET/PUT /flowbook/kernel-discovery/{path}` - Kernel discovery for MCP↔JupyterLab sharing (KernelDiscoveryHandler)
-  - `POST /flowbook/suggest-fix`, `/flowbook/apply-fix`, `/flowbook/custom-fix`, `GET /flowbook/fix-status` - AI fix suggestion endpoints (see `fix_suggester.py`, `fix_dispatcher.py`, `fix_models.py`, `fix_tools_*.py`)
+  - `POST /flowbook/suggest-fix`, `/flowbook/apply-fix`, `/flowbook/custom-fix`, `GET /flowbook/fix-status` - AI fix suggestion endpoints (see `fix_suggester.py`, `fix_dispatcher.py`, `fix_models.py`, `fix_tools_*.py`). Sends the full notebook, including cell outputs, to the configured LLM provider.
 - `base.py` - `NotebookCommand` abstract base class
 - `registry.py` - `CommandRegistry` singleton managing available commands
 - `commands/` - Built-in command implementations:

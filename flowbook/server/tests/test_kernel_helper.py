@@ -8,8 +8,11 @@ Regression tests for the 2026-07-12 audit findings C2/C3/R3:
 """
 
 from queue import Empty
+from unittest.mock import patch
 
-from flowbook.server.kernel_helper import KernelHelper
+import pytest
+
+from flowbook.server.kernel_helper import KernelHelper, extract_flowbook_metadata
 
 
 def _iopub(parent_id, msg_type, content):
@@ -143,3 +146,71 @@ class TestShellReplyMatching:
         )
         result = KernelHelper.execute_code(client, "x = 1", timeout=5)
         assert result["status"] == "ok"
+
+
+class TestInjectCsvDownsampling:
+    """Audit S5: proportion is interpolated into kernel code — it must be
+    coerced to float and range-checked so no string/expression can reach
+    the code template."""
+
+    def _run(self, proportion):
+        captured = {}
+
+        def fake_execute(kernel_client, code, *args, **kwargs):
+            captured["code"] = code
+            return {"status": "ok", "outputs": [], "flowbook_messages": [],
+                    "execution_count": None, "error_message": None}
+
+        with patch.object(KernelHelper, "execute_code", side_effect=fake_execute):
+            result = KernelHelper.inject_csv_downsampling(object(), proportion)
+        return result, captured.get("code")
+
+    def test_valid_float(self):
+        result, code = self._run(0.5)
+        assert result["status"] == "ok"
+        assert "int(len(df) * 0.5)" in code
+
+    def test_string_number_coerced(self):
+        result, code = self._run("0.5")
+        assert result["status"] == "ok"
+        assert "int(len(df) * 0.5)" in code
+
+    def test_injection_string_rejected(self):
+        with patch.object(KernelHelper, "execute_code") as mock_exec:
+            with pytest.raises(ValueError):
+                KernelHelper.inject_csv_downsampling(object(), "1); import os #")
+            mock_exec.assert_not_called()
+
+    def test_out_of_range_rejected(self):
+        with pytest.raises(ValueError):
+            KernelHelper.inject_csv_downsampling(object(), 1.5)
+        with pytest.raises(ValueError):
+            KernelHelper.inject_csv_downsampling(object(), -0.1)
+
+    def test_nan_rejected(self):
+        with pytest.raises(ValueError):
+            KernelHelper.inject_csv_downsampling(object(), float("nan"))
+
+    def test_none_rejected(self):
+        with pytest.raises(ValueError):
+            KernelHelper.inject_csv_downsampling(object(), None)
+
+
+class TestExtractFlowbookMetadata:
+    """Shared metadata-extraction helper (audit A4)."""
+
+    def test_returns_first_metadata_message(self):
+        result = {
+            "flowbook_messages": [
+                {"type": "status", "text": "..."},
+                {"type": "metadata", "cell_id": "abcd"},
+                {"type": "metadata", "cell_id": "wxyz"},
+            ]
+        }
+        assert extract_flowbook_metadata(result) == {
+            "type": "metadata", "cell_id": "abcd"
+        }
+
+    def test_returns_none_when_absent(self):
+        assert extract_flowbook_metadata({"flowbook_messages": []}) is None
+        assert extract_flowbook_metadata({}) is None

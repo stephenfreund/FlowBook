@@ -8,7 +8,7 @@ import traceback
 from typing import Any, Dict, List, Optional
 
 from flowbook.server.base import NotebookCommand, ProcessingResult
-from flowbook.server.kernel_helper import KernelHelper
+from flowbook.server.kernel_helper import KernelHelper, extract_flowbook_metadata
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.util.metadata_extractor import extract_and_set_metadata
 from flowbook.util.output import error, log, timer
@@ -132,6 +132,17 @@ class ExecuteCommand(NotebookCommand):
             if downsample_csv is not None:
                 KernelHelper.inject_csv_downsampling(kernel_client, downsample_csv)
 
+            # NOTE (audit A4): NotebookSession.run_all/run_cell in
+            # flowbook/mcp/session.py runs a similar per-cell loop. The
+            # shared step — pulling the type=="metadata" flowbook message
+            # out of an execute_code() result — lives in
+            # kernel_helper.extract_flowbook_metadata(). The loops
+            # themselves intentionally stay separate: this one is stateless
+            # (deep-copied notebook, ProcessingResult with sdc_results,
+            # violations persisted into cell metadata for the saved
+            # *_processed.ipynb), while the MCP session maintains live
+            # per-session state (stale-cell sets, Contents API push to
+            # JupyterLab, executed_cells bookkeeping).
             with timer(key="execute:sdc", message="Executing all cells with SDC"):
                 for idx, cell in enumerate(cells):
                     if cell.get("cell_type") != "code":
@@ -173,7 +184,7 @@ class ExecuteCommand(NotebookCommand):
                             self.print_flowbook_messages(result, cell_order)
 
                             # Extract SDC metadata from protocol messages
-                            sdc_meta = self.extract_flowbook_metadata(result)
+                            sdc_meta = extract_flowbook_metadata(result)
                             if sdc_meta:
                                 sdc_results.append(
                                     {
