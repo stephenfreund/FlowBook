@@ -216,15 +216,31 @@ class BaseFlowbookKernel(IPythonKernel):
             max_size_mb=None,
         )
 
+        uncopyable_vars = self._report_uncopyable(removed)
+
+        return total, uncopyable_vars
+
+    def _report_uncopyable(self, removed: dict) -> Set[str]:
+        """Collect uncopyable variable names, warning once per variable.
+
+        Variables already read-blocked (by a previous checkpoint) are still
+        returned but not re-announced \u2014 the value persists in the namespace,
+        so every later checkpoint re-detects it.
+        """
+        from flowbook.util.output import log
+
+        already_blocked = getattr(
+            self.shell.user_ns, "blocked_variables", frozenset()
+        )
         uncopyable_vars: Set[str] = set()
         for k, v in removed.items():
-            from flowbook.util.output import log
+            uncopyable_vars.add(k)
+            if k in already_blocked:
+                continue
             message = f"The object {k} (type {v}) cannot be checkpointed"
             log(message)
             self._display.display_icon_and_text("\u26a0\ufe0f", message)
-            uncopyable_vars.add(k)
-
-        return total, uncopyable_vars
+        return uncopyable_vars
 
     def _take_checkpoint_incremental(
         self,
@@ -265,13 +281,7 @@ class BaseFlowbookKernel(IPythonKernel):
             max_size_mb=None,
         )
 
-        uncopyable_vars: Set[str] = set()
-        for k, v in removed.items():
-            from flowbook.util.output import log
-            message = f"The object {k} (type {v}) cannot be checkpointed"
-            log(message)
-            self._display.display_icon_and_text("\u26a0\ufe0f", message)
-            uncopyable_vars.add(k)
+        uncopyable_vars = self._report_uncopyable(removed)
 
         return total, uncopyable_vars
 

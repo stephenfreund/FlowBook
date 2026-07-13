@@ -51,6 +51,17 @@ from flowbook.kernel_support.column_tracking import ColumnAccessTracker, walk_da
 from flowbook.kernel_support.structural_tracking import StructuralAccessTracker, StructuralTrackingMode
 
 
+class UncopyableReadError(NameError):
+    """Raised when user code reads a variable whose value could not be
+    checkpointed.
+
+    FlowBook cannot restore such a value on rollback, so allowing reads
+    would let unreproducible state flow into downstream cells. The variable
+    stays alive in the namespace; rebinding it (or deleting it) lifts the
+    block. See FORMAL_DEVELOPMENT.md (Uncopyable Variables).
+    """
+
+
 def _is_ipython_result_var(key: str) -> bool:
     """Check if key is an IPython auto-result variable.
 
@@ -124,6 +135,10 @@ class TrackingDict(dict):
         object.__setattr__(self, '_reads_before_writes', set())
         object.__setattr__(self, '_writes', set())
         object.__setattr__(self, '_tracking_enabled', True)  # Track by default
+        # Variables whose values could not be checkpointed (name -> type
+        # description). Tracked reads of these raise UncopyableReadError;
+        # rebinding or deleting the name lifts the block.
+        object.__setattr__(self, '_blocked_reads', {})
         # Pass namespace reference to trackers for lazy fallback walks
         object.__setattr__(self, '_column_tracker', ColumnAccessTracker(namespace_ref=real_ns_actual))
         object.__setattr__(self, '_structural_tracker', StructuralAccessTracker(namespace_ref=real_ns_actual))
@@ -133,6 +148,17 @@ class TrackingDict(dict):
     # =========================================================================
 
     def __getitem__(self, key):
+        if self._tracking_enabled and key in self._blocked_reads:
+            # Paper semantics for non-checkpointable objects: warn once and
+            # block all subsequent reads (the value cannot be restored on
+            # rollback, so reads would leak unreproducible state downstream).
+            type_desc = self._blocked_reads[key]
+            raise UncopyableReadError(
+                f"FlowBook blocked this read of '{key}': its value "
+                f"({type_desc}) cannot be checkpointed, so state depending "
+                f"on it cannot be restored or reproduced. Rebind '{key}' to "
+                f"a new value (or delete it) to use the name again."
+            )
         value = self._real_ns[key]
         if self._tracking_enabled:
             if key not in self._writes:
@@ -147,6 +173,8 @@ class TrackingDict(dict):
         return value
 
     def __setitem__(self, key, value):
+        # Rebinding replaces the uncopyable value — lift the read block.
+        self._blocked_reads.pop(key, None)
         if self._tracking_enabled:
             self._writes.add(key)
             # Lazy registration: register DataFrames/Series when assigned to namespace
@@ -167,6 +195,7 @@ class TrackingDict(dict):
 
     def __delitem__(self, key):
         del self._real_ns[key]
+        self._blocked_reads.pop(key, None)
         if self._tracking_enabled:
             # `del x` is a write to x in the formal model: it changes what
             # downstream readers of x observe. Recording it puts x in the
@@ -241,6 +270,29 @@ class TrackingDict(dict):
 
     def copy(self):
         return dict(self._real_ns)
+
+    # =========================================================================
+    # Uncopyable variable read blocking
+    # =========================================================================
+
+    def block_variable(self, name: str, type_desc: str = "uncopyable object") -> None:
+        """Block tracked reads of a variable whose value cannot be checkpointed.
+
+        The value stays alive in the namespace (open files keep working,
+        displayed figures stay displayed), but user-code reads raise
+        UncopyableReadError until the name is rebound or deleted.
+        Idempotent.
+        """
+        self._blocked_reads[name] = type_desc
+
+    def unblock_variable(self, name: str) -> None:
+        """Lift the read block for a variable (no-op if not blocked)."""
+        self._blocked_reads.pop(name, None)
+
+    @property
+    def blocked_variables(self) -> Set[str]:
+        """Names currently read-blocked as uncopyable."""
+        return set(self._blocked_reads)
 
     # =========================================================================
     # Tracking control

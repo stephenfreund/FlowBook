@@ -47,6 +47,8 @@ COLS_READ_ATTRS: FrozenSet[str] = frozenset({
     "keys",      # Same as columns
     "dtypes",    # Column dtypes
     "iter",      # Iteration over DataFrame yields columns
+    "dtype",     # Series dtype — column-type domain
+    "name",      # Series name — column-name domain
 })
 
 # Attributes that map to Rows(d) read — row structure
@@ -57,14 +59,27 @@ ROWS_READ_ATTRS: FrozenSet[str] = frozenset({
 })
 
 # Attributes that map to BOTH Cols(d) AND Rows(d) — cross-cutting
+# Every name recordable by structural tracking (structural_tracking.py) must
+# appear in one of these three sets, or tracking_to_readlocset falls back to
+# a conservative both-mapping with a logged warning.
 BOTH_READ_ATTRS: FrozenSet[str] = frozenset({
-    "shape",     # (rows, cols)
-    "size",      # rows * cols
-    "axes",      # [index, columns]
-    "values",    # Full array (both dimensions)
-    "T",         # Transpose (both dimensions)
-    "describe",  # describe() — statistics over all columns
-    "copy",      # copy() — reads every row and column
+    "shape",         # (rows, cols)
+    "size",          # rows * cols
+    "axes",          # [index, columns]
+    "values",        # Full array (both dimensions)
+    "T",             # Transpose (both dimensions)
+    "describe",      # describe() — statistics over all columns
+    "copy",          # copy() — reads every row and column
+    "info",          # info() — prints full structure
+    "to_dict",       # Full data as dict
+    "to_records",    # Full data as records
+    "to_numpy",      # Full data as array
+    "to_list",       # Series full data as list
+    "head",          # First rows of every column
+    "tail",          # Last rows of every column
+    "sample",        # Sampled rows of every column
+    "select_dtypes", # Column selection by dtype (reads dtypes + data)
+    "memory_usage",  # Per-column sizes (depends on rows)
 })
 
 
@@ -682,9 +697,11 @@ def tracking_to_readlocset(
     - File reads → File(p)
 
     Structural attribute names are classified into Cols/Rows domains:
-    - COLS_READ_ATTRS (columns, keys, dtypes, iter) → Cols(d)
+    - COLS_READ_ATTRS (columns, keys, dtypes, iter, dtype, name) → Cols(d)
     - ROWS_READ_ATTRS (index, len, empty) → Rows(d)
-    - BOTH_READ_ATTRS (shape, size, axes, values, T, describe) → both
+    - BOTH_READ_ATTRS (shape, size, axes, values, T, describe, copy,
+      info, to_dict, to_records, to_numpy, to_list, head, tail, sample,
+      select_dtypes, memory_usage) → both
     - Unknown attributes → both (conservative) with warning
 
     Var(x) is always emitted alongside Col/Cols/Rows reads. This ensures

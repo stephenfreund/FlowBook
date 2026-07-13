@@ -142,3 +142,81 @@ class TestNoTrackingWhenInactive:
         """No tracker active — values should still work."""
         vals = df.values
         assert vals.shape == (3, 3)
+
+
+class TestExpandedInterception:
+    """Audit H4: whole-frame reads via operators, expressions, iteration,
+    numpy conversion, and pd.concat must record all-column reads — before
+    this, `y = (df * 2).sum()` produced only a binding-level Var read and a
+    later in-place column write raised no violation."""
+
+    @pytest.fixture
+    def ndf(self):
+        """Numeric-only frame (string columns reject arithmetic/astype)."""
+        return pd.DataFrame({"price": [10, 20, 30], "qty": [1, 2, 3]})
+
+    def test_mul_records_all_columns(self, tracker, ndf):
+        reads = _get_reads(tracker, ndf)
+        ndf * 2
+        assert reads == {"price", "qty"}
+
+    def test_rmul_records_all_columns(self, tracker, ndf):
+        reads = _get_reads(tracker, ndf)
+        2 * ndf
+        assert reads == {"price", "qty"}
+
+    def test_add_frames_records_all_columns(self, tracker, ndf):
+        reads = _get_reads(tracker, ndf)
+        ndf + ndf
+        assert reads == {"price", "qty"}
+
+    def test_comparison_records_all_columns(self, tracker, ndf):
+        reads = _get_reads(tracker, ndf)
+        ndf > 5
+        assert reads == {"price", "qty"}
+
+    def test_neg_records_all_columns(self, tracker, ndf):
+        reads = _get_reads(tracker, ndf)
+        -ndf
+        assert reads == {"price", "qty"}
+
+    def test_query_records_all_columns(self, tracker, ndf):
+        reads = _get_reads(tracker, ndf)
+        ndf.query("price > 15")
+        assert "price" in reads and "qty" in reads
+
+    def test_asarray_records_all_columns(self, tracker, ndf):
+        import numpy as np
+
+        reads = _get_reads(tracker, ndf)
+        np.asarray(ndf)
+        assert reads == {"price", "qty"}
+
+    def test_iterrows_records_all_columns(self, tracker, ndf):
+        reads = _get_reads(tracker, ndf)
+        list(ndf.iterrows())
+        assert reads == {"price", "qty"}
+
+    def test_astype_records_all_columns(self, tracker, ndf):
+        reads = _get_reads(tracker, ndf)
+        ndf.astype("float64")
+        assert reads == {"price", "qty"}
+
+    def test_concat_records_all_inputs(self, tracker, ndf):
+        other = pd.DataFrame({"price": [40], "qty": [5]})
+        reads = _get_reads(tracker, ndf)
+        other_reads = _get_reads(tracker, other)
+        pd.concat([ndf, other])
+        assert reads == {"price", "qty"}
+        assert other_reads == {"price", "qty"}
+
+    def test_concat_generator_input_still_works(self, tracker, ndf):
+        other = pd.DataFrame({"price": [40], "qty": [5]})
+        reads = _get_reads(tracker, ndf)
+        result = pd.concat(d for d in [ndf, other])
+        assert len(result) == 4
+        assert reads == {"price", "qty"}
+
+    def test_operators_untracked_when_inactive(self, ndf):
+        """Passthrough when no tracker is active (e.g. diff machinery)."""
+        assert ((ndf * 2)["price"] == [20, 40, 60]).all()

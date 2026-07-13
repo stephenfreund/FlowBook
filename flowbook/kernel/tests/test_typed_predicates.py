@@ -483,16 +483,44 @@ class TestReadAttrClassification:
     """Verify attribute classification constants are correct."""
 
     def test_cols_read_attrs_contents(self):
-        """COLS_READ_ATTRS contains columns, keys, dtypes, iter."""
-        assert COLS_READ_ATTRS == frozenset({"columns", "keys", "dtypes", "iter"})
+        """COLS_READ_ATTRS: column-structure attrs (incl. Series dtype/name)."""
+        assert COLS_READ_ATTRS == frozenset(
+            {"columns", "keys", "dtypes", "iter", "dtype", "name"}
+        )
 
     def test_rows_read_attrs_contents(self):
         """ROWS_READ_ATTRS contains index, len, empty."""
         assert ROWS_READ_ATTRS == frozenset({"index", "len", "empty"})
 
     def test_both_read_attrs_contents(self):
-        """BOTH_READ_ATTRS contains shape, size, axes, values, T, describe."""
-        assert BOTH_READ_ATTRS == frozenset({"shape", "size", "axes", "values", "T", "describe"})
+        """BOTH_READ_ATTRS: cross-cutting attrs and full-data methods."""
+        assert BOTH_READ_ATTRS == frozenset({
+            "shape", "size", "axes", "values", "T", "describe", "copy",
+            "info", "to_dict", "to_records", "to_numpy", "to_list",
+            "head", "tail", "sample", "select_dtypes", "memory_usage",
+        })
+
+    def test_all_structurally_tracked_attrs_are_classified(self):
+        """Every name structural tracking can record must be classified,
+        or tracking_to_readlocset degrades to a warning + both-mapping."""
+        from flowbook.kernel_support.structural_tracking import (
+            DATAFRAME_STRUCTURAL_ATTRS,
+            DATAFRAME_STRUCTURAL_METHODS,
+            SERIES_STRUCTURAL_ATTRS,
+            SERIES_STRUCTURAL_METHODS,
+        )
+
+        recordable = (
+            DATAFRAME_STRUCTURAL_ATTRS
+            | DATAFRAME_STRUCTURAL_METHODS
+            | SERIES_STRUCTURAL_ATTRS
+            | SERIES_STRUCTURAL_METHODS
+            | {"len", "iter"}
+        )
+        classified = COLS_READ_ATTRS | ROWS_READ_ATTRS | BOTH_READ_ATTRS
+        assert recordable <= classified, (
+            f"unclassified structural attrs: {recordable - classified}"
+        )
 
     def test_col_conflicts_with_cols_read(self):
         """Col(df, c) ▷ Cols(df) = True."""

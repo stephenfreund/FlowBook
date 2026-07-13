@@ -294,24 +294,38 @@ then applying the same ForwardStale and BackwardStale predicates used in [Inst-R
 Since W''ᵢ = {}, ForwardStale simplifies to Wᵢ ∩ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i,
 and BackwardStale checks all y ∈ Wᵢ (since Wᵢ \ {} = Wᵢ).
 
-**[Inst-Move-Down]** (s < d)
+**[Inst-Move-Down]** (s < d) and **[Inst-Move-Up]** (s > d)
+
+The paper defines Move as the composition of Delete and Insert:
 
 ```
-S · I ⇒^{Delete(s)} S'' · I'' ⇒^{Insert(d-1, Cₛ)} S' · I'
+S · I ⇒^{Delete(s)} S'' · I'' ⇒^{Insert(d-1, Cₛ)} S' · I'      (s < d)
+S · I ⇒^{Delete(s)} S'' · I'' ⇒^{Insert(d, Cₛ)} S' · I'        (s > d)
 ─────────────────────────────────────────────────
 S · I ⇒^{Move(s, d)} S' · I'
 ```
 
-**[Inst-Move-Up]** (s > d)
+Under Delete∘Insert the moved cell is always STALE with R = W = ∅, and the
+delete-side ForwardStale/BackwardStale propagation runs unconditionally.
 
-```
-S · I ⇒^{Delete(s)} S'' · I'' ⇒^{Insert(d, Cₛ)} S' · I'
-─────────────────────────────────────────────────
-S · I ⇒^{Move(s, d)} S' · I'
-```
+**The implementation refines this rule** (`_handle_moves()`): the moved
+cell keeps its recorded R/W, and staleness is applied only where a real
+conflict exists between the moved cell and the cells it *crossed* (cells
+whose order relative to the moved cell changed):
 
-Move is the composition of delete and insert. The delete may mark cells stale
-via ForwardStale and BackwardStale, and the insert adds a stale cell at the destination.
+- Moved cell past cells that read/write what it writes (Wₘ ▷ Rⱼ ∪ Wⱼ for
+  crossed j) → those cells are stale (their input's writer moved).
+- Moved cell reads what a crossed cell writes (Wⱼ ▷ Rₘ) → the moved cell
+  is stale (its input's position relative to it changed).
+- No conflict with any crossed cell → no staleness at all.
+
+This is a sound refinement of Delete∘Insert: if the moved cell has no
+▷-conflict with any crossed cell, then every cell's reads still see the
+same last writer in the new order, so re-running nothing preserves
+well-formedness (§4). Cells that did not cross the moved cell are
+unaffected in both formulations. The practical effect is that dragging a
+cell past unrelated cells does not force any re-execution.
+
 Batch operations follow the same decompositions as in the standard semantics.
 
 ---
@@ -402,7 +416,7 @@ Validity predicates are implemented inline within `check()`, following the [Inst
 | main.tex                   | FORMAL_DEVELOPMENT.md | Code                                                              |
 | -------------------------- | --------------------- | ----------------------------------------------------------------- |
 | NoReadAndWrite(R, W, i)    | §3.2                  | `_check_no_read_and_write()` using typed `wlocs_conflict_rlocs()` |
-| WriteBeforeRead(R, W, i)   | §3.2                  | Not strictly enforced (would reject reading undefined variables)  |
+| WriteBeforeRead(R, W, i)   | §3.2                  | `_check_write_before_read()` in `check()` — enforced, though in practice a read of an undefined variable usually raises NameError before the predicate is evaluated |
 | NoReadBeforeWrite(R, W, i) | §3.2                  | `_check_forward_contamination()` in `check()`                     |
 | NoWriteAfterRead(R, W, i)  | §3.2                  | `_check_backward_mutation_new()` in `check()`                     |
 | RecoverableMutation(W, i)  | §3.2                  | `_check_unrecoverable_mutation()` in `check()`                    |
@@ -517,9 +531,37 @@ the pointer from name `x` to an object. Sub-variable writes (Col,
 Rows, Cols) do NOT change the binding, so they do NOT conflict with `Var(x)`.
 Only `Var(x)` writes (replacing the entire variable) conflict with `Var(x)` reads.
 
-DataFrame methods like `df.sum()` that read column data are intercepted to produce
+DataFrame operations that read column data are intercepted to produce
 individual `Col(d, c)` reads, not `Var(d)`. This ensures column-level staleness
-precision.
+precision. The soundness of `Col/Cols/Rows ▷ Var = false` depends on this
+interception: an operation that reads column data but is NOT intercepted
+yields only a `Var(d)` read, which a later column write does not invalidate.
+
+**Interception coverage** (`ALL_COL_READ_METHODS` in
+`kernel_support/column_tracking.py`, plus `__getitem__`, `.loc`/`.iloc`,
+`groupby`, `merge`, `sort_values`, `drop_duplicates`, the `values` property,
+and `pd.concat`):
+
+- Aggregations and whole-frame readers: `sum mean std var min max median
+  describe corr cov quantile nunique apply to_numpy to_dict to_records agg
+  aggregate transform round rank diff shift cumsum cumprod cummax cummin
+  isna isnull notna notnull count mode all any prod astype clip`
+- Expression/iteration readers: `query`, `eval`, `iterrows`, `itertuples`
+- NumPy conversion: `__array__` (covers `np.asarray(df)`, matplotlib, sklearn)
+- Binary arithmetic and comparisons: `__add__ __sub__ __mul__ __truediv__
+  __floordiv__ __mod__ __pow__` (+ reflected forms), `__eq__ __ne__ __lt__
+  __le__ __gt__ __ge__`
+- Unary: `__neg__ __pos__ __abs__ __invert__`
+- Structural attribute reads (`columns`, `shape`, `head`, ... ) are covered
+  separately by structural tracking (§12) and map to `Cols`/`Rows` reads.
+
+**Residual gap (known limitation):** interception is inherently a list, not
+a proof. Operations outside it — e.g. third-party functions that reach into
+DataFrame internals (`df._mgr`), NumPy ufuncs applied via `__array_ufunc__`
+paths not routed through `__array__`, or C extensions holding a reference —
+still produce only `Var(d)` reads. For those, a later column write does not
+mark the reading cell stale. The dynamic-analysis caveat in the paper's
+threats section covers this class.
 
 Key rules:
 
@@ -768,6 +810,44 @@ modes:
   independence is preserved because `Col/Rows/Cols ▷ Var = false`.
 
 **Code:** `write_conflicts_read()`, `wlocs_conflict_rlocs()` in `kernel/locations.py`
+
+### 9.4 Uncopyable Variables (Warn + Block Reads)
+
+Some objects cannot be deep-copied into a checkpoint (generators, open file
+handles, matplotlib figures, thread/lock objects, ...). Since their state
+cannot be restored on rollback, any read of them could leak unreproducible
+state into downstream cells.
+
+**Semantics (matches the paper):** when a checkpoint detects an uncopyable
+variable, FlowBook
+
+1. excludes it from the checkpoint,
+2. displays a one-time ⚠️ warning naming the variable and its type, and
+3. **blocks all subsequent tracked reads** of the variable: a read raises
+   `UncopyableReadError` (a `NameError` subclass) until the name is rebound
+   or deleted. The object itself stays alive in the namespace — open files
+   keep working, displayed figures stay displayed — only *reads through the
+   variable name in user cells* are refused.
+
+**Escape hatch:** `FLOWBOOK_UNCOPYABLE_AS_WRITE=1` keeps reads allowed and
+instead adds the variable to Wᵢ (conservative staleness propagation). This
+mode is unsound across rollback: a rejected cell cannot restore the
+variable's prior state.
+
+**Coverage caveat:** blocking is enforced by `TrackingDict.__getitem__`,
+so it covers exactly the reads that read-tracking covers. Reads that bypass
+the namespace mapping (e.g. `globals().get('x')`, aliases created before
+the variable became uncopyable) are not blocked.
+
+**Code:**
+
+- Blocking: `TrackingDict.block_variable()` / `UncopyableReadError` in
+  `kernel_support/tracking.py`
+- Detection + warn-once: `_report_uncopyable()` in
+  `kernel_support/base_kernel.py`
+- Policy selection: uncopyable handling in `do_execute` and
+  `_uncopyable_as_write` in `kernel/flowbook_kernel.py`
+- Tests: `kernel/tests/test_uncopyable_as_write.py`
 
 ---
 

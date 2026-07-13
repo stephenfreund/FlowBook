@@ -32,6 +32,36 @@ from flowbook.util.output import log, error, timer
 # Below this size, the overhead of checking isn't worth it.
 _LARGE_CONTAINER_THRESHOLD = 1000
 
+# DataFrame methods that read the data of EVERY column. Each is patched with
+# a wrapper that records all-column reads for tracked DataFrames.
+# Shared by install and _restore_dataframe_methods — keep the two in sync by
+# construction. FORMAL_DEVELOPMENT.md §8.3 enumerates this coverage; anything
+# NOT listed here (and not covered by __getitem__/loc/iloc/structural
+# tracking) produces only a binding-level Var read — a documented gap.
+ALL_COL_READ_METHODS = (
+    # Aggregations / whole-frame readers
+    'sum', 'mean', 'std', 'var', 'min', 'max', 'median',
+    'describe', 'corr', 'cov', 'quantile', 'nunique',
+    'apply', 'to_numpy', 'to_dict', 'to_records',
+    'agg', 'aggregate', 'transform', 'round', 'rank',
+    'diff', 'shift', 'cumsum', 'cumprod', 'cummax', 'cummin',
+    'isna', 'isnull', 'notna', 'notnull', 'count', 'mode',
+    'all', 'any', 'prod', 'astype', 'clip',
+    # Expression / iteration readers
+    'query', 'eval', 'iterrows', 'itertuples',
+    # Numpy conversion (np.asarray(df), np.array(df), matplotlib, sklearn)
+    '__array__',
+    # Binary arithmetic (df * 2, df + other, ...)
+    '__add__', '__radd__', '__sub__', '__rsub__',
+    '__mul__', '__rmul__', '__truediv__', '__rtruediv__',
+    '__floordiv__', '__rfloordiv__', '__mod__', '__rmod__',
+    '__pow__', '__rpow__',
+    # Element-wise comparisons (df == x, df > x, ...)
+    '__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__',
+    # Unary
+    '__neg__', '__pos__', '__abs__', '__invert__',
+)
+
 # Primitive immutable types - lists/tuples containing only these cannot
 # contain DataFrames or Series, so we can skip iterating through them.
 _PRIMITIVE_TYPES = frozenset({
@@ -736,13 +766,7 @@ class ColumnAccessTracker:
         # every column so that column-level staleness works correctly.
         # Without this, df.sum() would only produce Var(df) in the read set,
         # and Col writes wouldn't trigger staleness (Col ▷ Var = false).
-        _ALL_COL_METHODS = [
-            'sum', 'mean', 'std', 'var', 'min', 'max', 'median',
-            'describe', 'corr', 'cov', 'quantile', 'nunique',
-            'apply', 'to_numpy', 'to_dict', 'to_records',
-        ]
-
-        for method_name in _ALL_COL_METHODS:
+        for method_name in ALL_COL_READ_METHODS:
             original = getattr(pd.DataFrame, method_name, None)
             if original is None:
                 continue
@@ -778,6 +802,40 @@ class ColumnAccessTracker:
                 return original_values_fget(df_self)
 
             pd.DataFrame.values = property(tracked_values)
+
+        # ========== pandas.concat (module-level function) ==========
+        # pd.concat([df1, df2]) reads every column of each input frame.
+        original_concat = pd.concat
+        self._original_methods['pandas.concat'] = original_concat
+
+        def tracked_concat(objs, *args, **kwargs):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None:
+                if isinstance(objs, dict):
+                    frames = list(objs.values())
+                elif isinstance(objs, (list, tuple)):
+                    frames = list(objs)
+                elif isinstance(objs, (pd.DataFrame, pd.Series)):
+                    frames = [objs]
+                else:
+                    # Generator/iterable: materialize so we can both inspect
+                    # it and still hand a usable sequence to pandas.
+                    try:
+                        objs = list(objs)
+                        frames = objs
+                    except TypeError:
+                        frames = []
+                for obj in frames:
+                    if isinstance(obj, pd.DataFrame):
+                        df_id = id(obj)
+                        if df_id in tracker._id_to_path:
+                            tracker.record_read(
+                                df_id, [str(c) for c in obj.columns]
+                            )
+            return original_concat(objs, *args, **kwargs)
+
+        tracked_concat.__doc__ = original_concat.__doc__
+        pd.concat = tracked_concat
 
         # ========== DataFrame._set_axis (index/columns setter) ==========
         # pd.DataFrame.index is an AxisProperty (Cython descriptor), not a
@@ -874,13 +932,15 @@ class ColumnAccessTracker:
         if 'DataFrame.drop_duplicates' in self._original_methods:
             pd.DataFrame.drop_duplicates = self._original_methods['DataFrame.drop_duplicates']
 
-        # Restore aggregation/transformation methods
-        for method_name in ['sum', 'mean', 'std', 'var', 'min', 'max', 'median',
-                            'describe', 'corr', 'cov', 'quantile', 'nunique',
-                            'apply', 'to_numpy', 'to_dict', 'to_records']:
+        # Restore aggregation/transformation/operator methods
+        for method_name in ALL_COL_READ_METHODS:
             key = f'DataFrame.{method_name}'
             if key in self._original_methods:
                 setattr(pd.DataFrame, method_name, self._original_methods[key])
+
+        # Restore pandas.concat
+        if 'pandas.concat' in self._original_methods:
+            pd.concat = self._original_methods['pandas.concat']
 
         # Restore values property
         if 'DataFrame.values' in self._original_methods:

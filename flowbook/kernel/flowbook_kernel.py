@@ -432,9 +432,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
     _max_passes = 2  # Max timeout handler passes
 
     # Environment variable to control handling of uncopyable variables.
-    # When False (default): uncopyable variables are removed from user_ns
+    # When False (default): the variable stays alive but subsequent reads are
+    #            blocked (UncopyableReadError) until it is rebound — paper
+    #            semantics: warn once + block reads.
     # When True: uncopyable variables are added to W (writes) as a conservative
-    #            treatment that preserves analysis soundness
+    #            treatment; reads stay allowed but rollback cannot restore them
     _uncopyable_as_write = os.environ.get("FLOWBOOK_UNCOPYABLE_AS_WRITE", "").lower() in ("1", "true", "yes")
 
     def __init__(self, **kwargs):
@@ -1258,12 +1260,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             self._patch_run_code(tracking_dict)
 
             # Save initial state checkpoint (σ_0) for EXEC-RESTORE on the first cell
-            # For initial state, uncopyable vars are handled by old behavior (removed)
-            # since there's no tracking context yet
+            # Uncopyable vars in the initial namespace are read-blocked, same
+            # as during normal execution (paper semantics: warn + block reads).
             _, initial_uncopyable = self._take_checkpoint("_initial_state")
             for k in initial_uncopyable:
-                if k in self.shell.user_ns:
-                    del self.shell.user_ns[k]
+                tracking_dict.block_variable(k)
 
     def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
         """
@@ -1391,10 +1392,19 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 # Handle uncopyable variables based on configuration
                 if uncopyable_vars:
                     if not self._uncopyable_as_write:
-                        # Old behavior: remove uncopyable vars from namespace
-                        for k in uncopyable_vars:
-                            if k in self.shell.user_ns:
-                                del self.shell.user_ns[k]
+                        # Default (paper semantics): keep the object alive but
+                        # block subsequent reads until the name is rebound.
+                        # Its state cannot be restored on rollback, so reads
+                        # would leak unreproducible state downstream.
+                        if isinstance(user_ns, TrackingDict):
+                            for k in uncopyable_vars:
+                                user_ns.block_variable(k)
+                        else:
+                            # No TrackingDict to enforce blocking — fall back
+                            # to removal so reads at least fail loudly.
+                            for k in uncopyable_vars:
+                                if k in self.shell.user_ns:
+                                    del self.shell.user_ns[k]
                     # If _uncopyable_as_write is True, we add them to tracking.writes
                     # after execution (see below where tracking data is processed)
 
