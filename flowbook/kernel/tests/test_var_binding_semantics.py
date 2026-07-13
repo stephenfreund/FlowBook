@@ -139,14 +139,21 @@ class TestNoReadAndWriteColumnAssignment:
         self.helper.set_cell_order(["a", "b"])
 
     def test_column_assignment_no_error(self):
-        """df["y"] = [1,2,3]: reads Var(df), writes Col(df,y) → no NoReadAndWrite."""
+        """df["y"] = [1,2,3]: reads Var(df), writes Col(df,y) → no NoReadAndWrite.
+
+        Simulated faithfully as an in-place column write: "df" is NOT in
+        tracking.writes (no rebinding), so the tracked write is Col(df, y),
+        which does not conflict with the Var(df) read (Col ▷ Var = false).
+        """
         df = pd.DataFrame({"x": [1, 2, 3]})
-        self.helper.execute_cell("a", {}, {"df": df.copy()},
+        self.helper.execute_cell("a", {}, {"df": df},
             writes={"df"}, column_writes={"df": {"x"}})
 
-        df2 = df.copy(); df2["y"] = [10, 20, 30]
-        result = self.helper.execute_cell("b", {"df": df.copy()}, {"df": df2},
-            reads={"df"}, writes={"df"},
+        def mutate():
+            df["y"] = [10, 20, 30]
+
+        result = execute_inplace(self.helper, "b", {"df": df}, mutate,
+            reads={"df"},
             column_reads={"df": set()}, column_writes={"df": {"y"}},
             continue_on_violation=True)
 
@@ -324,14 +331,22 @@ class TestBackwardMutationBindingSemantics:
         self.helper.set_cell_order(["a", "b"])
 
     def test_col_write_no_violation_for_var_reader(self):
-        """A reads Var(df). B writes Col(df, price). No NoWriteAfterRead violation."""
+        """A reads Var(df). B writes Col(df, price) in place. No NoWriteAfterRead.
+
+        B is simulated faithfully as an in-place column write on the SAME
+        object A read: "df" is NOT in tracking.writes (no rebinding — a
+        Var(df) write would correctly conflict with A's Var(df) read), so
+        B's write is Col(df, price) and Col ▷ Var = false.
+        """
         df = pd.DataFrame({"price": [1, 2]})
-        self.helper.execute_cell("a", {"df": df.copy()}, {"df": df.copy(), "z": True},
+        self.helper.execute_cell("a", {"df": df}, {"df": df, "z": True},
             reads={"df"}, writes={"z"})
 
-        df2 = df.copy(); df2["price"] = [10, 20]
-        result = self.helper.execute_cell("b", {"df": df.copy()}, {"df": df2},
-            reads={"df"}, writes={"df"},
+        def mutate():
+            df["price"] = [10, 20]
+
+        result = execute_inplace(self.helper, "b", {"df": df, "z": True}, mutate,
+            reads={"df"},
             column_reads={"df": set()}, column_writes={"df": {"price"}},
             continue_on_violation=True)
 

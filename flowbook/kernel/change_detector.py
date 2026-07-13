@@ -44,7 +44,7 @@ from flowbook.kernel.changes import (
     ValueChanged,
 )
 from flowbook.kernel.loc_ids import StableIdMap, get_qualifier
-from flowbook.kernel.locations import WriteLoc, WriteLocSet
+from flowbook.kernel.locations import WriteLoc, WriteLocSet, tracking_to_writelocset
 
 
 def detect_changes(diff: MemoryCheckpointDiffResult) -> List[Change]:
@@ -507,6 +507,38 @@ def detect_write_locs(
     """Convert diff result to WriteLocSet."""
     changes = detect_changes(diff)
     return changes_to_write_locs(changes, namespace, stable_map)
+
+
+def compute_cell_write_locs(
+    tracking,
+    typed_changes: Optional[List[Change]],
+    namespace: Optional[dict] = None,
+    stable_map: Optional[StableIdMap] = None,
+) -> WriteLocSet:
+    """The canonical Wᵢ for a cell execution.
+
+    Union of:
+    - tracking-derived write locs (`tracking_to_writelocset`): rebinds (Var),
+      column writes (Col), structural mutations (Rows/Cols), column deletions
+      (Col), and file writes (File). Present even when the diff is empty —
+      e.g. an idempotent column rewrite or a re-run structural mutation.
+    - diff-derived write locs (`changes_to_write_locs`): value replacements
+      (Var), column changes (Col), row-count/index changes (Rows), dtype
+      changes (Col+Cols) actually detected by the checkpoint diff.
+
+    This is the single builder used by NoReadAndWrite, NoWriteAfterRead,
+    ForwardStale, and BackwardStale, so that no predicate can silently drop
+    a class of write locations again (audit item 6; previously three
+    divergent builders caused exactly that: H2/M3/M4).
+
+    Note on precision: Var(x) appears for rebinds only — an in-place column
+    write records Col(d, c) without Var(d) (`df["y"] = ...` never assigns
+    the name), preserving binding-only ▷ semantics.
+    """
+    w = tracking_to_writelocset(tracking, namespace, stable_map)
+    if typed_changes:
+        w = w | changes_to_write_locs(typed_changes, namespace, stable_map)
+    return frozenset(w)
 
 
 def get_changed_variables(diff: MemoryCheckpointDiffResult) -> set:

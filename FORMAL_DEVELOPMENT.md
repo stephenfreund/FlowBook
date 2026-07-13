@@ -518,7 +518,10 @@ w ∈ WriteLoc ::= Var(x) | Col(d, c) | Cols(d) | Rows(d) | File(p)
 | Rows(d)     | Rows added/removed                      | df.append(...)        |
 | File(p)     | File written                            | df.to_csv("out.csv")  |
 
-**Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects
+**Code:** `WriteLoc` in `kernel/locations.py`, `changes_to_write_locs()` converts Change objects.
+`compute_cell_write_locs()` in `kernel/change_detector.py` is the SINGLE
+canonical Wᵢ builder (tracking-derived ∪ diff-derived locs) used by
+NoReadAndWrite, NoWriteAfterRead, ForwardStale, and BackwardStale.
 
 **Storage:** `NotebookState.writes[cell_id]` stores the union of tracking-derived WriteLocs (Var, Col, Cols, Rows, File — from `tracking_to_writelocset()`, which converts structural mutations recorded at operation time by TrackingData) and diff-derived WriteLocs (Col, Rows — from `changes_to_write_locs()`), filtered to only include diff-derived locs for variables that tracking also considers writes (recoverable mutations). See `record_execution()` in `kernel/notebook_state.py`.
 

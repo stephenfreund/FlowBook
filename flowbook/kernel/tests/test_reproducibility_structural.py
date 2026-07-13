@@ -527,13 +527,17 @@ class TestSDCStructuralMultipleVariables:
         enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
-        # Cell B adds column to df2 (not read by A)
+        # Cell B adds column to df2 in place (not read by A).
+        # In-place column write (df2['y'] = [2]) does NOT rebind df2, so
+        # 'df2' is NOT in tracking.writes — only column_writes records it.
+        # (A Var(df2) write alongside the Var(df2) read would incorrectly
+        # trigger NoReadAndWrite.)
         df2_b = pd.DataFrame({'x': [1], 'y': [2]})
         ns_b_post = {'df1': df1.copy(), 'df2': df2_b}
         pre_b = MemoryCheckpoint('pre_b', ns_a.copy(), {})
         tracking_b = TrackingData(
             reads_before_writes={'df2'},
-            writes={'df2'},
+            writes=set(),
             column_writes={'df2': {'y'}},
         )
 

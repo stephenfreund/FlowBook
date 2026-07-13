@@ -866,22 +866,37 @@ class ColumnAccessTracker:
                 if not inplace or tracker is None or tracker._cell_id is None:
                     return original(df_self, *args, inplace=inplace, **kwargs)
 
-                pre_len = len(df_self)
-                pre_index = df_self.index.copy()
-                pre_dtypes = {str(c): df_self[c].dtype for c in df_self.columns}
+                # Snapshot under suspension: len()/.index/.dtypes go through
+                # patched accessors and would otherwise record spurious
+                # structural/column READS of the mutated frame, turning every
+                # inplace call into a false read-and-write conflict.
+                from flowbook.kernel_support.structural_tracking import (
+                    suspend_structural_tracking,
+                )
+
+                with suspend_column_tracking(), suspend_structural_tracking():
+                    pre_len = len(df_self)
+                    pre_index = df_self.index.copy()
+                    pre_dtypes = {str(c): t for c, t in df_self.dtypes.items()}
 
                 result = original(df_self, *args, inplace=True, **kwargs)
 
+                with suspend_column_tracking(), suspend_structural_tracking():
+                    len_changed = len(df_self) != pre_len
+                    index_changed = not df_self.index.equals(pre_index)
+                    post_dtypes = {str(c): t for c, t in df_self.dtypes.items()}
+
+                # Record OUTSIDE the suspension blocks — the record_* methods
+                # are no-ops while suspended.
                 from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                 cell_id = tracker._cell_id
                 df_id = id(df_self)
-                if len(df_self) != pre_len:
+                if len_changed:
                     DataFrameProvenanceTracker.record_row_mutation(df_self, cell_id)
                     tracker.record_row_mutation(df_id)
-                if not df_self.index.equals(pre_index):
+                if index_changed:
                     DataFrameProvenanceTracker.record_index_mutation(df_self, cell_id)
                     tracker.record_index_mutation(df_id)
-                post_dtypes = {str(c): df_self[c].dtype for c in df_self.columns}
                 for col in post_dtypes:
                     if col in pre_dtypes and pre_dtypes[col] != post_dtypes[col]:
                         DataFrameProvenanceTracker.record_dtype_change(df_self, col, cell_id)

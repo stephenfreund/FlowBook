@@ -185,3 +185,89 @@ class TestDeletePropagatesStaleness:
         assert "b" in result.stale_cells, (
             "deleting x must mark downstream readers of x stale"
         )
+
+
+class TestCanonicalWriteSet:
+    """Audit item 6: one canonical Wᵢ builder (compute_cell_write_locs) for
+    all predicates and staleness. These cover the M3/M4 gaps the divergent
+    builders caused: tracked writes checked even with an empty diff, and
+    structural/file writes visible to NoReadAndWrite/NoWriteAfterRead."""
+
+    def setup_method(self):
+        self.helper = ReproducibilityTestHelper()
+        self.helper.set_cell_order(["a", "b", "c"])
+
+    def test_file_write_after_read_is_violation(self):
+        # a reads data.csv; c (below) writes data.csv → NoWriteAfterRead.
+        from flowbook.kernel_support.models import TrackingData
+
+        self.helper.save_pre_checkpoint("a", {})
+        self.helper.sdc.check(
+            cell_id="a",
+            pre_checkpoint=self.helper.get_pre_checkpoint("a"),
+            namespace={"d": 1},
+            tracking=TrackingData(
+                reads_before_writes=set(), writes={"d"},
+                file_reads_before_writes={"data.csv"},
+            ),
+        )
+        self.helper.save_pre_checkpoint("c", {"d": 1})
+        result = self.helper.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.helper.get_pre_checkpoint("c"),
+            namespace={"d": 1},
+            tracking=TrackingData(
+                reads_before_writes=set(), writes=set(),
+                file_writes={"data.csv"},
+            ),
+        )
+        assert any(
+            e.error_type.value == "no_write_after_read" for e in result.errors
+        ), f"file write below a file reader must violate NoWriteAfterRead; got {result.errors}"
+
+    def test_idempotent_column_rewrite_still_conflicts(self):
+        # b reads df['x']; c rewrites df['x'] with IDENTICAL values (empty
+        # diff). The tracked Col write must still conflict with b's read —
+        # previously the check was skipped entirely when the diff was empty.
+        df = pd.DataFrame({"x": [1, 2]})
+        self.helper.execute_cell("a", {}, {"df": df}, writes={"df"})
+        self.helper.execute_cell(
+            "b", {"df": df}, {"df": df, "y": 3},
+            reads={"df"}, writes={"y"}, column_reads={"df": {"x"}},
+        )
+        self.helper.save_pre_checkpoint("c", {"df": df, "y": 3})
+        df["x"] = [1, 2]  # in place, values unchanged → empty diff
+        result = self.helper.sdc.check(
+            cell_id="c",
+            pre_checkpoint=self.helper.get_pre_checkpoint("c"),
+            namespace={"df": df, "y": 3},
+            tracking=make_tracking(reads={"df"}, column_writes={"df": {"x"}}),
+        )
+        assert any(
+            e.error_type.value == "no_write_after_read" for e in result.errors
+        ), f"tracked column write with empty diff must still conflict; got {result.errors}"
+
+    def test_read_len_then_mutate_rows_is_read_and_write(self):
+        # A cell that reads len(df) and then mutates rows in place reads and
+        # writes the same location (Rows ▷ Rows) — the paper's
+        # "diagnostic inspection before mutation" category. Previously
+        # structural writes were invisible to NoReadAndWrite.
+        df = pd.DataFrame({"x": [1, 2, 3]})
+        self.helper.execute_cell("a", {}, {"df": df}, writes={"df"})
+        self.helper.save_pre_checkpoint("b", {"df": df})
+        df.drop(index=[0], inplace=True)
+        result = self.helper.sdc.check(
+            cell_id="b",
+            pre_checkpoint=self.helper.get_pre_checkpoint("b"),
+            namespace={"df": df},
+            tracking=make_tracking(
+                reads={"df"},
+                structural_reads={"df": {"len"}},
+                row_mutations={"df"},
+                column_writes={"df": {"x"}},
+            ),
+            continue_on_violation=True,
+        )
+        assert any(
+            e.error_type.value == "no_read_and_write" for e in result.errors
+        ), f"len read + row mutation must violate NoReadAndWrite; got {result.errors}"

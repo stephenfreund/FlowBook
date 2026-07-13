@@ -1469,7 +1469,11 @@ class TestColumnGranularity:
         @B: result = df["x"].sum()   (reads df.x)
         @C: df["y"] = [99]           (writes df.y)
 
-        C writes df.y, B reads df.x → no conflict at column level.
+        C writes df.y in place, B reads df.x → no conflict at column level.
+        C does not rebind df, so "df" is NOT in tracking.writes (a Var(df)
+        write would correctly conflict with B's Var(df) read). Uses the SAME
+        DataFrame object throughout so the "no conflict" outcome comes from
+        column-name precision, not broken object identity.
         """
         self.helper.set_cell_order(["a", "b", "c"])
 
@@ -1478,29 +1482,33 @@ class TestColumnGranularity:
         self.helper.execute_cell(
             cell_id="a",
             pre_namespace={},
-            post_namespace={"df": df.copy()},
+            post_namespace={"df": df},
             writes={"df"},
             column_writes={"df": {"x", "y"}},
         )
 
+        # B reads df.x from the ORIGINAL df object so its recorded read
+        # locs carry df's object identity.
         self.helper.execute_cell(
             cell_id="b",
-            pre_namespace={"df": df.copy()},
-            post_namespace={"df": df.copy(), "result": 1},
+            pre_namespace={"df": df},
+            post_namespace={"df": df, "result": 1},
             reads={"df"},
             writes={"result"},
             column_reads={"df": {"x"}},
         )
 
-        # C writes df["y"], B reads df["x"] → disjoint, no backward conflict
-        df_modified = df.copy()
-        df_modified["y"] = [99]
+        # C writes df["y"] in place (SAME object B read), B reads df["x"]
+        # → disjoint, no backward conflict.
+        # Snapshot the pre state first, then mutate the original df.
+        df_before = df.copy()
+        df["y"] = [99]
         result_c = self.helper.execute_cell(
             cell_id="c",
-            pre_namespace={"df": df.copy(), "result": 1},
-            post_namespace={"df": df_modified, "result": 1},
+            pre_namespace={"df": df_before, "result": 1},
+            post_namespace={"df": df, "result": 1},
             reads={"df"},
-            writes={"df"},
+            writes=set(),
             column_reads={"df": set()},
             column_writes={"df": {"y"}},
             continue_on_violation=True,
@@ -1568,7 +1576,11 @@ class TestColumnGranularity:
         @B: print(df["x"].sum())   (reads df.x only)
         @C: df["z"] = [5, 6]      (writes df.z only)
 
-        C adds df.z, B only reads df.x → B should NOT be stale.
+        C adds df.z IN PLACE, B only reads df.x → B should NOT be stale.
+        C does not rebind df, so "df" is NOT in tracking.writes (a Var(df)
+        write would correctly stale B's Var(df) read). Uses the SAME
+        DataFrame object throughout so the "not stale" outcome comes from
+        column-name precision, not broken object identity.
         """
         self.helper.set_cell_order(["a", "b", "c"])
 
@@ -1577,26 +1589,30 @@ class TestColumnGranularity:
         self.helper.execute_cell(
             cell_id="a",
             pre_namespace={},
-            post_namespace={"df": df.copy()},
+            post_namespace={"df": df},
             writes={"df"},
             column_writes={"df": {"x", "y"}},
         )
+        # B reads df.x from the ORIGINAL df object so its recorded read
+        # locs carry df's object identity.
         self.helper.execute_cell(
             cell_id="b",
-            pre_namespace={"df": df.copy()},
-            post_namespace={"df": df.copy()},
+            pre_namespace={"df": df},
+            post_namespace={"df": df},
             reads={"df"},
             column_reads={"df": {"x"}},
         )
 
-        df_with_z = df.copy()
-        df_with_z["z"] = [5, 6]
+        # C adds df["z"] in place (SAME object B read).
+        # Snapshot the pre state first, then mutate the original df.
+        df_before = df.copy()
+        df["z"] = [5, 6]
         result_c = self.helper.execute_cell(
             cell_id="c",
-            pre_namespace={"df": df.copy()},
-            post_namespace={"df": df_with_z},
+            pre_namespace={"df": df_before},
+            post_namespace={"df": df},
             reads={"df"},
-            writes={"df"},
+            writes=set(),
             column_reads={"df": set()},
             column_writes={"df": {"z"}},
             continue_on_violation=True,

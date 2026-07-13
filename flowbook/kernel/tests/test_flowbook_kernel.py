@@ -152,17 +152,23 @@ class TestHelperFunctions:
         )
         assert not result_a.has_errors()
 
-        # B modifies df.qty (different column) - no backward mutation
+        # B modifies df.qty IN PLACE (different column) - no backward mutation.
+        # Faithful simulation: df["qty"] = ... never rebinds df ("df" not in
+        # writes) and preserves object identity for LocRef conflict checks.
         from flowbook.kernel.models import ErrorType
-        df_modified = df.copy()
-        df_modified["qty"] = [10, 20]
-        result_b = helper.execute_cell(
-            "b", {"df": df, "total": 30}, {"df": df_modified, "total": 30},
-            reads={"df"}, writes={"df"},
-            column_reads={"df": set()},
-            column_writes={"df": {"qty"}}
+        helper.save_pre_checkpoint("b", {"df": df, "total": 30})
+        df["qty"] = [10, 20]
+        result_b = helper.sdc.check(
+            cell_id="b",
+            pre_checkpoint=helper.get_pre_checkpoint("b"),
+            namespace={"df": df, "total": 30},
+            tracking=make_tracking(
+                reads={"df"},
+                column_reads={"df": set()},
+                column_writes={"df": {"qty"}},
+            ),
         )
-        # B reads and writes df so NoReadAndWrite fires, but no backward mutation
+        # Col(df, qty) does not conflict with A's reads {Var(df), Col(df, price)}
         assert not any(
             e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_b.errors
         )

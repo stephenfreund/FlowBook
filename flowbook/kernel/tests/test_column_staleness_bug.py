@@ -92,19 +92,18 @@ class TestColumnIndependentStaleness:
         assert not result_b.has_errors()
         assert "b" not in result_b.stale_cells
 
-        # Cell C: Adds df['cluster'] - a completely different column
-        df_with_cluster = df.copy()
-        df_with_cluster['cluster'] = [0, 1, 0]  # Simulated KMeans output
+        # Cell C: Adds df['cluster'] IN PLACE — a completely different column.
+        # Faithful simulation: df["cluster"] = ... never rebinds the name df,
+        # so "df" is NOT in writes and object identity is preserved.
+        def add_cluster():
+            df['cluster'] = [0, 1, 0]  # Simulated KMeans output
 
-        result_c = self.helper.execute_cell(
-            cell_id="c",
-            pre_namespace={"df": df},
-            post_namespace={"df": df_with_cluster},
+        result_c = execute_inplace(
+            self.helper, "c", {"df": df}, add_cluster,
             reads={"df"},
-            writes={"df"},
             column_reads={"df": {"eruptions", "waiting"}},  # C also reads these to compute clusters
             column_writes={"df": {"cluster"}},  # C only WRITES to 'cluster'
-            continue_on_violation=True,  # C reads and writes df (NoReadAndWrite), but staleness should still propagate
+            continue_on_violation=True,
         )
 
         # THE BUG: Cell B should NOT be stale!
@@ -195,18 +194,16 @@ class TestColumnIndependentStaleness:
             # NO column_reads - produces Var(df), a binding-only read
         )
 
-        # Cell C: Adds a new column WITH column tracking
-        df_with_cluster = df.copy()
-        df_with_cluster['cluster'] = [0, 1, 0]
+        # Cell C: Adds a new column IN PLACE with column tracking
+        # (in-place column add never rebinds df — "df" not in writes)
+        def add_cluster():
+            df['cluster'] = [0, 1, 0]
 
-        result_c = self.helper.execute_cell(
-            cell_id="c",
-            pre_namespace={"df": df},
-            post_namespace={"df": df_with_cluster},
+        result_c = execute_inplace(
+            self.helper, "c", {"df": df}, add_cluster,
             reads={"df"},
-            writes={"df"},
             column_writes={"df": {"cluster"}},
-            continue_on_violation=True,  # Allow staleness propagation
+            continue_on_violation=True,
         )
 
         # Cell B should NOT be stale: Var(df) is a binding-only read,
@@ -655,7 +652,10 @@ class TestEdgeCases:
             column_reads={"df": {"x"}},
         )
 
-        # Cell C: Writes df WITHOUT column info
+        # Cell C: REBINDS df without column info. Rebinding a variable an
+        # earlier cell read is a NoWriteAfterRead violation under the
+        # syntactic predicate (Var(df) ∈ Wᶜ ∩ R_b); accept it so staleness
+        # still propagates (a rejected cell propagates nothing).
         df_modified = df.copy()
         df_modified['y'] = [200]
 
@@ -665,6 +665,12 @@ class TestEdgeCases:
             post_namespace={"df": df_modified},
             writes={"df"},
             # NO column_writes - conservative case
+            continue_on_violation=True,
+        )
+
+        # The rebind below reader B is itself a backward violation
+        assert any(
+            e.error_type.value == "no_write_after_read" for e in result_c.errors
         )
 
         # Cell B SHOULD be stale (conservative: writer has no column info)
