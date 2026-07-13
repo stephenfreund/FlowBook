@@ -332,6 +332,12 @@ class NotebookSession:
         self._event_log = []
         self._session_start = time.time()
 
+        # Reset Contents API state BEFORE kernel/contents setup. If setup for
+        # this notebook fails partway, stale config from a previously loaded
+        # notebook must not survive — a later _put_contents_api() would PUT
+        # this notebook's content over the OLD notebook's Y.js document.
+        self._reset_contents_api_state()
+
         if discovery:
             # Join existing kernel — skip ID normalization to preserve
             # the cell IDs that the other client is already using
@@ -381,6 +387,19 @@ class NotebookSession:
             "contents_api_connected": self._jupyter_contents_path is not None,
             "info": f"Loaded{joined}{contents_status}",
         }
+
+    def _reset_contents_api_state(self) -> None:
+        """Clear all Contents API sync state.
+
+        Called on load() (before setup) and close(). Stale values pointing at
+        a previously loaded notebook are dangerous: _put_contents_api() would
+        overwrite that notebook's live document with this session's content.
+        """
+        self._jupyter_server_url = None
+        self._jupyter_token = None
+        self._jupyter_contents_path = None
+        self._last_contents_refresh = 0
+        self._last_known_api_sources = {}
 
     def _setup_contents_api(self, notebook_abs_path: str) -> str:
         """Configure Contents API for reading live notebook state from JupyterLab.
@@ -454,6 +473,7 @@ class NotebookSession:
         self.cell_status = {}
         self._stale_cells = set()
         self._checkpoints = {}
+        self._reset_contents_api_state()
 
     # ------------------------------------------------------------------
     # Contents API sync (read live JupyterLab edits)
@@ -560,6 +580,7 @@ class NotebookSession:
                 flowbook_msg={
                     "type": "notebook_structure", "cell_order": new_order
                 },
+                on_foreign_msg=self._process_iopub_msg,
             )
 
         # Clean up tracking for removed cells
@@ -590,11 +611,37 @@ class NotebookSession:
             timeout=10,
             store_history=False,
             flowbook_msg={"type": "continue_after_violation", "enabled": enabled},
+            on_foreign_msg=self._process_iopub_msg,
         )
 
     # ------------------------------------------------------------------
     # IOPub polling (catch JupyterLab-initiated executions)
     # ------------------------------------------------------------------
+
+    def _process_iopub_msg(self, msg: Dict[str, Any]) -> None:
+        """Process one IOPub message from an external execution.
+
+        Applies flowbook_update metadata (staleness, executed cells) to keep
+        MCP's state current when JupyterLab runs cells on the shared kernel.
+        Used both by _poll_iopub (drain between tool calls) and as the
+        on_foreign_msg handler for KernelHelper.execute_code (messages that
+        arrive WHILE an MCP execution is in flight would otherwise be drained
+        off the shared IOPub socket and lost).
+        """
+        msg_type = msg.get("msg_type", "")
+        if msg_type != "flowbook_update":
+            return
+        content = msg.get("content", {})
+        data = content.get("data", content)
+        if isinstance(data, dict) and data.get("type") == "metadata":
+            cell_id = data.get("cell_id")
+            if cell_id:
+                self.cell_flowbook_meta[cell_id] = data
+                self.executed_cells.add(cell_id)
+                stale = set(data.get("stale_cells", []))
+                self._stale_cells = (self._stale_cells | stale) - {cell_id}
+                # Update cell outputs if we have them
+                # (outputs come via separate IOPub messages, not flowbook_update)
 
     def _poll_iopub(self) -> None:
         """Drain pending IOPub messages to catch external executions.
@@ -610,19 +657,7 @@ class NotebookSession:
         try:
             while True:
                 msg = self.kernel_client.get_iopub_msg(timeout=0)
-                msg_type = msg.get("msg_type", "")
-                if msg_type == "flowbook_update":
-                    content = msg.get("content", {})
-                    data = content.get("data", content)
-                    if isinstance(data, dict) and data.get("type") == "metadata":
-                        cell_id = data.get("cell_id")
-                        if cell_id:
-                            self.cell_flowbook_meta[cell_id] = data
-                            self.executed_cells.add(cell_id)
-                            stale = set(data.get("stale_cells", []))
-                            self._stale_cells = (self._stale_cells | stale) - {cell_id}
-                            # Update cell outputs if we have them
-                            # (outputs come via separate IOPub messages, not flowbook_update)
+                self._process_iopub_msg(msg)
         except Empty:
             pass  # No more messages — normal
         except Exception as e:
@@ -790,6 +825,7 @@ class NotebookSession:
             cell_id=cell_id,
             cell_metadata=cell_metadata,
             actor="ai",  # MCP runs cells on behalf of an LLM
+            on_foreign_msg=self._process_iopub_msg,
         )
 
         # Update cell in notebook
@@ -980,6 +1016,7 @@ class NotebookSession:
             timeout=10,
             store_history=False,
             flowbook_msg={"type": "cell_edited", "cell_id": cell_id, "source": new_source},
+            on_foreign_msg=self._process_iopub_msg,
         )
 
         if new_source is None:
@@ -1007,6 +1044,7 @@ class NotebookSession:
             timeout=10,
             store_history=False,
             flowbook_msg={"type": "notebook_structure", "cell_order": new_order},
+            on_foreign_msg=self._process_iopub_msg,
         )
 
     def edit_cell(self, cell_id: str, new_source: str) -> Dict[str, Any]:

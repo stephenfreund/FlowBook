@@ -415,3 +415,69 @@ class TestConflictDetection:
             session._refresh_from_contents_api()
 
         assert session._last_known_api_sources == {"A": "x = 42"}
+
+
+class TestContentsApiStateReset:
+    """Regression tests for audit finding C1: stale Contents API config
+    surviving close()/load() could make a later PUT overwrite the WRONG
+    notebook's live Y.js document."""
+
+    def test_close_clears_contents_state(self):
+        session = _setup_session_with_api(
+            [_make_code_cell("a", "x = 1")], contents_path="old/notebook.ipynb"
+        )
+        session._last_known_api_sources = {"a": "x = 1"}
+        session._last_contents_refresh = time.time()
+
+        session.close()
+
+        assert session._jupyter_server_url is None
+        assert session._jupyter_token is None
+        assert session._jupyter_contents_path is None
+        assert session._last_known_api_sources == {}
+        assert session._last_contents_refresh == 0
+
+    def test_reset_makes_put_and_fetch_noops(self):
+        session = _setup_session_with_api(
+            [_make_code_cell("a", "x = 1")], contents_path="old/notebook.ipynb"
+        )
+        session._reset_contents_api_state()
+
+        # With cleared state, neither direction of sync may touch the old
+        # notebook's document.
+        assert session._fetch_contents_api() is None
+        assert session._put_contents_api() is None
+
+
+class TestProcessIopubMsg:
+    """Regression test for audit finding C2: flowbook_update messages from
+    JupyterLab-initiated executions arriving WHILE an MCP kernel round-trip
+    is in flight are now routed to _process_iopub_msg instead of dropped."""
+
+    def _metadata_msg(self, cell_id, stale_cells):
+        return {
+            "msg_type": "flowbook_update",
+            "content": {
+                "data": {
+                    "type": "metadata",
+                    "cell_id": cell_id,
+                    "stale_cells": stale_cells,
+                }
+            },
+        }
+
+    def test_metadata_updates_session_state(self):
+        session = _setup_session_with_api([_make_code_cell("a", "x = 1")])
+        session._process_iopub_msg(self._metadata_msg("a", ["b", "c"]))
+
+        assert "a" in session.executed_cells
+        assert session.cell_flowbook_meta["a"]["cell_id"] == "a"
+        assert session._stale_cells == {"b", "c"}
+
+    def test_non_flowbook_messages_ignored(self):
+        session = _setup_session_with_api([_make_code_cell("a", "x = 1")])
+        session._process_iopub_msg(
+            {"msg_type": "stream", "content": {"name": "stdout", "text": "hi"}}
+        )
+        assert session.executed_cells == set()
+        assert session.cell_flowbook_meta == {}

@@ -5,7 +5,8 @@ This module provides utilities for executing code in Jupyter kernels and
 injecting runtime modifications like CSV downsampling.
 """
 import textwrap
-from typing import Any, Dict, Optional
+from queue import Empty
+from typing import Any, Callable, Dict, Optional
 
 import time
 from flowbook.server.kernel_manager import FlowbookKernelClient
@@ -111,6 +112,7 @@ class KernelHelper:
         store_history: bool = True,
         flowbook_msg: dict = None,
         actor: str = None,
+        on_foreign_msg: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
         Execute code in the kernel and return results.
@@ -124,6 +126,12 @@ class KernelHelper:
             store_history: Whether to store the code in the kernel's history (default: True)
             flowbook_msg: Optional FlowBook protocol message to send via execute metadata.
                 e.g. {"type": "cell_edited", "cell_id": "abc"}
+            on_foreign_msg: Optional callback invoked with each IOPub message
+                whose parent is NOT this execution. On a shared kernel, another
+                client's executions (e.g. JupyterLab while MCP is inside this
+                call) produce messages on the same IOPub socket; without a
+                handler they are drained and lost, silently desyncing the
+                caller's state. Callback errors are logged and swallowed.
         Returns:
             Dictionary with execution results including outputs, status, and
             flowbook_messages (list of protocol messages received from kernel).
@@ -156,10 +164,17 @@ class KernelHelper:
 
             try:
                 msg = kernel_client.get_iopub_msg(timeout=1.0)
-            except:
+            except Empty:
                 continue
 
             if msg['parent_header'].get('msg_id') != msg_id:
+                # Message from another execution on a shared kernel — hand it
+                # to the caller instead of dropping it.
+                if on_foreign_msg is not None:
+                    try:
+                        on_foreign_msg(msg)
+                    except Exception as e:
+                        log(f"on_foreign_msg handler error: {e}")
                 continue
 
             msg_type = msg['header']['msg_type']
@@ -209,9 +224,19 @@ class KernelHelper:
                 if content['execution_state'] == 'idle':
                     break
 
-        # Get the execute_reply message
+        # Get the execute_reply message. Replies on the shell channel can only
+        # be for OUR requests, but an earlier call that timed out may have
+        # abandoned its reply in the queue — discard stale replies until we
+        # find the one matching this request.
         try:
-            reply = kernel_client.get_shell_msg(timeout=1.0)
+            shell_deadline = time.time() + 1.0
+            while True:
+                remaining = shell_deadline - time.time()
+                if remaining <= 0:
+                    raise Empty
+                reply = kernel_client.get_shell_msg(timeout=remaining)
+                if reply['parent_header'].get('msg_id') == msg_id:
+                    break
             reply_status = reply['content']['status']
             if reply_status == 'error':
                 status = 'error'
