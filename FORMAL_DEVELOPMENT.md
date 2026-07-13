@@ -498,7 +498,7 @@ w ∈ WriteLoc ::= Var(x) | Col(d, c) | Cols(d) | Rows(d) | File(p)
 
 | Constructor | Meaning                                 | Example               |
 | ----------- | --------------------------------------- | --------------------- |
-| Var(x)      | Variable completely replaced            | x = 42                |
+| Var(x)      | Variable completely replaced or deleted | x = 42, del x         |
 | Col(d, c)   | Column written (add, modify, or delete) | df["price"] = [1,2,3] |
 | Cols(d)     | Column structure changed                | dtype changes         |
 | Rows(d)     | Rows added/removed                      | df.append(...)        |
@@ -1023,6 +1023,7 @@ These are the same predicates from §10 — no additional `Σ` parameter is need
 | Dtype change hook              | `__setitem__` dtype detection in `kernel_support/column_tracking.py`                                                               |
 | Inplace wrapper                | `_wrap_inplace_for_provenance()` in `kernel_support/column_tracking.py`                                                            |
 | Var write hook                 | `TrackingDict.__setitem__` in `kernel_support/tracking.py`                                                                         |
+| Var delete hook (`del x` is a Var write) | `TrackingDict.__delitem__` in `kernel_support/tracking.py`                                                               |
 | cell_id threading              | `track_execution(cell_id=...)` in `kernel_support/tracking.py`                                                                     |
 | Tracking → WriteLoc conversion | `tracking_to_writelocset()` in `kernel/locations.py`                                                                               |
 | Write set storage              | `record_execution()` in `kernel/notebook_state.py`                                                                                 |

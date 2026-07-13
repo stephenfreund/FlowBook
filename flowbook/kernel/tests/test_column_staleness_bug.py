@@ -26,6 +26,32 @@ import pandas as pd
 from flowbook.kernel.tests.conftest import make_tracking, ReproducibilityTestHelper
 
 
+def execute_inplace(
+    helper, cell_id, namespace, mutate, continue_on_violation=False, **tracking_kwargs
+):
+    """Simulate a cell that mutates DataFrames IN PLACE (no rebinding).
+
+    Real in-place execution preserves object identity: the pre-checkpoint is
+    a deep copy of the namespace, then the SAME live objects are mutated.
+    This keeps StableIdMap loc_ids consistent between other cells' recorded
+    read locs and this cell's diff-detected write locs. (Passing a modified
+    copy as the post-namespace would break identity, so the enforcer would
+    correctly see a *different* DataFrame and report no conflict.)
+
+    Note: an in-place column write (df["c"] = ...) does NOT put "df" in
+    tracking.writes — only namespace rebindings (df = ...) do.
+    """
+    helper.save_pre_checkpoint(cell_id, namespace)
+    mutate()
+    return helper.sdc.check(
+        cell_id=cell_id,
+        pre_checkpoint=helper.get_pre_checkpoint(cell_id),
+        namespace=namespace,
+        tracking=make_tracking(**tracking_kwargs),
+        continue_on_violation=continue_on_violation,
+    )
+
+
 class TestColumnIndependentStaleness:
     """Tests for column-level staleness precision."""
 
@@ -200,8 +226,12 @@ class TestForwardStalenessColumnAware:
 
     def test_forward_stale_independent_columns(self):
         """
-        Forward staleness: Cell B reads col_a, Cell A (re-executed) writes col_b.
-        Cell B should NOT become stale.
+        Forward staleness: Cell B reads col_a, Cell A (re-executed) writes
+        col_b IN PLACE. Cell B should NOT become stale.
+
+        The rerun is simulated faithfully as an in-place column write on the
+        same object (identity preserved, "df" NOT in tracking.writes), so
+        no Var(df) rebinding write loc is added.
         """
         df = pd.DataFrame({'col_a': [1, 2], 'col_b': [3, 4]})
 
@@ -223,15 +253,13 @@ class TestForwardStalenessColumnAware:
             column_reads={"df": {"col_a"}},
         )
 
-        # Re-run Cell A but only modify col_b
-        df_modified = df.copy()
-        df_modified['col_b'] = [30, 40]
+        # Re-run Cell A as in-place write of col_b only: df["col_b"] = [30, 40]
+        def mutate():
+            df['col_b'] = [30, 40]
 
-        result_a2 = self.helper.execute_cell(
-            cell_id="a",
-            pre_namespace={},
-            post_namespace={"df": df_modified},
-            writes={"df"},
+        result_a2 = execute_inplace(
+            self.helper, "a", {"df": df}, mutate,
+            reads={"df"},
             column_writes={"df": {"col_b"}},  # Only wrote col_b
         )
 
@@ -286,6 +314,9 @@ class TestForwardStalenessColumnAware:
         """
         Forward staleness with multiple downstream cells reading different columns.
         Only cells reading the modified column should become stale.
+
+        Cell A's rerun is simulated as an in-place column write on the same
+        object (identity preserved, "df" NOT in tracking.writes).
         """
         df = pd.DataFrame({'x': [1], 'y': [2], 'z': [3]})
 
@@ -324,15 +355,13 @@ class TestForwardStalenessColumnAware:
             column_reads={"df": {"z"}},
         )
 
-        # Re-run Cell A, modifying only col y
-        df_modified = df.copy()
-        df_modified['y'] = [200]
+        # Re-run Cell A, modifying only col y in place: df["y"] = [200]
+        def mutate():
+            df['y'] = [200]
 
-        result_a2 = self.helper.execute_cell(
-            cell_id="a",
-            pre_namespace={},
-            post_namespace={"df": df_modified},
-            writes={"df"},
+        result_a2 = execute_inplace(
+            self.helper, "a", {"df": df}, mutate,
+            reads={"df"},
             column_writes={"df": {"y"}},
         )
 

@@ -406,11 +406,12 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies df.price (same column)
-        df_modified = df.copy()
-        df_modified["price"] = [100, 200]
+        # Cell B: modifies df.price in place (same column, SAME object).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        ns_b = self._make_namespace({"df": df_modified, "y": 30})
+        df["price"] = [100, 200]
+        ns_b = self._make_namespace({"df": df, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
@@ -500,10 +501,12 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies entire df (no column tracking)
-        df_modified = df * 2
+        # Cell B: modifies entire df in place (no column tracking).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        ns_b = self._make_namespace({"df": df_modified, "y": 30})
+        df.loc[:, :] = df * 2
+        ns_b = self._make_namespace({"df": df, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
@@ -591,12 +594,13 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies both df.price and df.quantity
-        df_modified = df.copy()
-        df_modified["price"] = [100, 200]
-        df_modified["quantity"] = [10, 20]
+        # Cell B: modifies both df.price and df.quantity in place (SAME object).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        ns_b = self._make_namespace({"df": df_modified, "y": 30})
+        df["price"] = [100, 200]
+        df["quantity"] = [10, 20]
+        ns_b = self._make_namespace({"df": df, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
@@ -1150,12 +1154,13 @@ class TestStructuralTrackingEnforce:
         )
         assert not result_b.has_errors()
 
-        # Cell C: Adds a new column raw_data['x'] = 3
-        # With ENFORCE mode, this SHOULD cause a violation
-        df_modified = df.copy()
-        df_modified["x"] = 3
+        # Cell C: Adds a new column raw_data['x'] = 3 in place (SAME object).
+        # With ENFORCE mode, this SHOULD cause a violation.
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("c", {"raw_data": df})
-        ns_c = self._make_namespace({"raw_data": df_modified})
+        df["x"] = 3
+        ns_c = self._make_namespace({"raw_data": df})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
@@ -1216,12 +1221,13 @@ class TestStructuralTrackingEnforce:
         )
         assert not result_b.has_errors()
 
-        # Cell C: Adds a new column df['x'] = 3
-        # No overlap with columns a,b but structural read of .columns is violated
-        df_modified = df.copy()
-        df_modified["x"] = 3
+        # Cell C: Adds a new column df['x'] = 3 in place (SAME object).
+        # No overlap with columns a,b but structural read of .columns is violated.
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("c", {"df": df})
-        ns_c = self._make_namespace({"df": df_modified})
+        df["x"] = 3
+        ns_c = self._make_namespace({"df": df})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
@@ -1377,10 +1383,12 @@ class TestAccessedVarsOnlyOptimization:
             tracking=make_tracking(reads={"df"}, writes={"df_alias"}),
         )
 
-        # Cell C: modifies through alias
-        df_modified = pd.DataFrame({"price": [999, 999], "quantity": [5, 10]})
+        # Cell C: modifies through alias, in place (SAME object as df).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # shared object so identity is preserved for LocRef matching.
         self._save_pre_checkpoint("c", {"df": df, "df_alias": df_alias})
-        ns_c = self._make_namespace({"df": df_modified, "df_alias": df_modified})
+        df_alias["price"] = [999, 999]
+        ns_c = self._make_namespace({"df": df, "df_alias": df_alias})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],

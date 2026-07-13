@@ -447,9 +447,10 @@ def _changes_to_writelocset(
     For variables with column-level change info, emits Col write locs.
     For variables without column info, emits Var write locs (conservative).
 
-    Note: ValueChanged (complete replacement) is handled separately via
-    typed_changes in _compute_forward_staleness_syntactic, which adds
-    Var(x) for variables whose identity/binding changed.
+    Note: the Var(x) suppression for column-changed vars is only sound for
+    in-place column writes. _compute_forward_staleness_syntactic augments
+    this set with Var(x) for rebound variables and with Rows/Cols/Var locs
+    derived from typed changes, which this function cannot represent.
     """
     locs: Set[WriteLoc] = set()
     for var in changed_vars:
@@ -948,6 +949,14 @@ class ReproducibilityEnforcer:
                 clear_container_cache()
             self._pending_checkpoint_deletion = None
 
+        # The previous check() left _pending_snapshot set so the kernel could
+        # roll back a rejected execution after check() returned. Reaching a new
+        # check() means that execution was committed (the kernel rolls back, if
+        # at all, before the next cell runs), so the old snapshot is stale.
+        # Clear it so error paths that return before STEP 3 (e.g. truncation)
+        # don't cause rollback_last_check() to restore the PREVIOUS cell's state.
+        self._pending_snapshot = None
+
         self.seq_counter += 1
         my_position = self._get_position(cell_id)
         problems: List[Reason] = []
@@ -1205,6 +1214,8 @@ class ReproducibilityEnforcer:
             execution_seq=self.seq_counter,
             structural_reads_values=structural_read_values,
             typed_changes=typed_changes,
+            namespace=namespace,
+            stable_map=self._stable_map,
         )
 
         # Clear pre-execution reasons (NEVER_EXECUTED, CODE_CHANGED) since the cell
@@ -1319,6 +1330,7 @@ class ReproducibilityEnforcer:
                     namespace, W_i_old, W_i_current, W_i_vars, recoverable_column_changed, cell_id, my_position,
                     changed_file_paths=_changed_file_paths,
                     typed_changes=typed_changes,
+                    rebound_vars=tracking.writes,
                 )
             log(f"[Inst-Run] {cell_id}: ForwardStale marked {len(stale)} cells")
             structural_warnings.extend(staleness_warnings)
@@ -1780,6 +1792,7 @@ class ReproducibilityEnforcer:
         my_position: int,
         changed_file_paths: Optional[Set[str]] = None,
         typed_changes: Optional[List] = None,
+        rebound_vars: Optional[Set[str]] = None,
     ) -> Tuple[List[str], List[str]]:
         """
         Compute ForwardStale for all cells j > i.
@@ -1791,6 +1804,7 @@ class ReproducibilityEnforcer:
         return self._compute_forward_staleness_syntactic(
             old_writes, current_writes, changed_vars, column_changed, just_executed, my_position,
             changed_file_paths, typed_changes=typed_changes, namespace=current_namespace,
+            rebound_vars=rebound_vars,
         )
 
     def _compute_forward_staleness_syntactic(
@@ -1804,6 +1818,7 @@ class ReproducibilityEnforcer:
         changed_file_paths: Optional[Set[str]] = None,
         typed_changes: Optional[List] = None,
         namespace: Optional[dict] = None,
+        rebound_vars: Optional[Set[str]] = None,
     ) -> Tuple[List[str], List[str]]:
         """
         Syntactic ForwardStale: (Wᵢ ∪ W'ᵢ ∪ ΔV) ▷ (Rⱼ ∪ Wⱼ) ≠ ∅ for j > i.
@@ -1823,10 +1838,35 @@ class ReproducibilityEnforcer:
         W_i_union = old_writes | current_writes | changed_vars
 
         # Build WriteLocSet for ▷-based staleness checks.
-        # Base: use tracking-based column info (column_changed) for column-level precision.
-        # Augment: add Col from typed changes (diff-based) when available,
-        # because these affect structural attributes (shape, columns) that Col does not.
-        change_wlocs = _changes_to_writelocset(W_i_union, column_changed)
+        # Base: use tracking-based column info (column_changed) for column-level
+        # precision (Col for column-changed vars, Var otherwise).
+        change_wlocs_set: Set[WriteLoc] = set(_changes_to_writelocset(W_i_union, column_changed))
+
+        # Augment with typed-change locs that _changes_to_writelocset cannot
+        # represent: Var for whole-value replacement, Rows for row-count/index
+        # changes, Cols for dtype changes. Without these, e.g. a row-count
+        # change never invalidates len(df)/df.index readers, because
+        # Col ▷ Rows = false in the ▷ matrix. (Col locs are skipped here —
+        # column_changed already covers them at the same granularity.)
+        if typed_changes:
+            typed_wlocs = changes_to_write_locs(typed_changes, namespace, self._stable_map)
+            change_wlocs_set |= {
+                w for w in typed_wlocs
+                if w.type in (WriteLocType.VAR, WriteLocType.ROWS, WriteLocType.COLS)
+            }
+
+        # A rebinding writes the variable itself (Var(x) in the formal model).
+        # _changes_to_writelocset suppresses Var(x) for column-changed vars to
+        # keep column precision for IN-PLACE column writes, but that suppression
+        # is unsound for rebound variables: pure Var(x) readers below
+        # (e.g. df2 = df) must be invalidated when x is rebound. DataFrame diffs
+        # are decomposed into column/row changes and never yield ValueChanged,
+        # so restore Var(x) for rebound vars here.
+        if rebound_vars:
+            for v in rebound_vars & set(column_changed):
+                change_wlocs_set.add(WriteLoc.var(v))
+
+        change_wlocs: WriteLocSet = frozenset(change_wlocs_set)
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:

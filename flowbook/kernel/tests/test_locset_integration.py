@@ -31,6 +31,32 @@ def _has_error(result, error_type):
     return _find_error(result, error_type) is not None
 
 
+def execute_inplace(
+    helper, cell_id, namespace, mutate, continue_on_violation=False, **tracking_kwargs
+):
+    """Simulate a cell that mutates DataFrames IN PLACE (no rebinding).
+
+    Real in-place execution preserves object identity: the pre-checkpoint is
+    a deep copy of the namespace, then the SAME live objects are mutated.
+    This keeps StableIdMap loc_ids consistent between other cells' recorded
+    read locs and this cell's diff-detected write locs. (Passing a modified
+    copy as the post-namespace would break identity, so the enforcer would
+    correctly see a *different* DataFrame and report no conflict.)
+
+    Note: an in-place column write (df["c"] = ...) does NOT put "df" in
+    tracking.writes — only namespace rebindings (df = ...) do.
+    """
+    helper.save_pre_checkpoint(cell_id, namespace)
+    mutate()
+    return helper.sdc.check(
+        cell_id=cell_id,
+        pre_checkpoint=helper.get_pre_checkpoint(cell_id),
+        namespace=namespace,
+        tracking=make_tracking(**tracking_kwargs),
+        continue_on_violation=continue_on_violation,
+    )
+
+
 class TestForwardStalenessColumnPrecision:
     """Forward staleness uses the otimes operator for column-level precision."""
 
@@ -61,37 +87,35 @@ class TestForwardStalenessColumnPrecision:
         assert "b" in result.stale_cells
 
     def test_different_column_write_doesnt_stale_reader(self):
-        """Writing df["qty"] does NOT stale cell that reads only df["price"],
-        when the diff can detect column-level precision.
+        """Writing df["qty"] in place does NOT stale cell that reads only df["price"].
 
-        For column-level precision to work, the pre_namespace must already
-        contain df so the diff can compare column-by-column (producing Col
-        write locs) rather than detecting a whole-variable creation
-        (producing Var write loc which conflicts with everything).
+        Simulated with a single shared DataFrame object mutated in place, so
+        the diff sees column-level changes on the SAME object (LocRef identity
+        preserved) and "df" is NOT in tracking.writes (no rebinding).
         """
         df = pd.DataFrame({"price": [1, 2], "qty": [3, 4]})
         self.helper.execute_cell(
-            "a", {}, {"df": df.copy()},
+            "a", {}, {"df": df},
             writes={"df"}, column_writes={"df": {"price", "qty"}},
         )
         self.helper.execute_cell(
-            "b", {"df": df.copy()}, {"df": df.copy()},
+            "b", {"df": df}, {"df": df},
             reads={"df"}, column_reads={"df": {"price"}},
         )
         self.helper.execute_cell(
-            "c", {"df": df.copy()}, {"df": df.copy()},
+            "c", {"df": df}, {"df": df},
             reads={"df"}, column_reads={"df": {"qty"}},
         )
 
-        # Edit A, only qty changes.
-        # Use df as pre_namespace so the diff sees column-level changes,
-        # not a whole-variable ValueChanged.
+        # Edit A, rerun as in-place column write: only qty changes.
         self.helper.sdc._notebook_state.handle_edit("a")
-        df2 = df.copy()
-        df2["qty"] = [30, 40]
-        result = self.helper.execute_cell(
-            "a", {"df": df.copy()}, {"df": df2},
-            writes={"df"}, column_writes={"df": {"price", "qty"}},
+
+        def mutate():
+            df["qty"] = [30, 40]
+
+        result = execute_inplace(
+            self.helper, "a", {"df": df}, mutate,
+            reads={"df"}, column_writes={"df": {"price", "qty"}},
         )
         # C reads qty which changed -> stale
         assert "c" in result.stale_cells
@@ -102,30 +126,30 @@ class TestForwardStalenessColumnPrecision:
     def test_col_write_doesnt_stale_existing_column_reader(self):
         """Col(df, new) does NOT stale cell reading Col(df, price).
 
-        Adding a new column to df should not stale downstream cells that only
-        read existing, unchanged columns.  The diff must see the original df
-        in pre_namespace to detect a Col (rather than a whole-variable
-        ValueChanged).
+        Adding a new column IN PLACE (df["new"] = ...) should not stale
+        downstream cells that only read existing, unchanged columns. Uses a
+        single shared DataFrame object so LocRef identity is preserved and
+        the "not stale" outcome comes from column-name precision.
         """
         df = pd.DataFrame({"price": [1, 2]})
         self.helper.execute_cell(
-            "a", {}, {"df": df.copy()},
+            "a", {}, {"df": df},
             writes={"df"}, column_writes={"df": {"price"}},
         )
         self.helper.execute_cell(
-            "b", {"df": df.copy()}, {"df": df.copy()},
+            "b", {"df": df}, {"df": df},
             reads={"df"}, column_reads={"df": {"price"}},
         )
 
-        # Edit A to add a new column.
-        # Use df as pre_namespace so the diff detects Col(df, new) rather
-        # than ValueChanged(df).
+        # Edit A, rerun as in-place column add: df["new"] = [5, 6]
         self.helper.sdc._notebook_state.handle_edit("a")
-        df_with_new = df.copy()
-        df_with_new["new"] = [5, 6]
-        result = self.helper.execute_cell(
-            "a", {"df": df.copy()}, {"df": df_with_new},
-            writes={"df"}, column_writes={"df": {"price", "new"}},
+
+        def mutate():
+            df["new"] = [5, 6]
+
+        result = execute_inplace(
+            self.helper, "a", {"df": df}, mutate,
+            reads={"df"}, column_writes={"df": {"price", "new"}},
         )
         # The diff detects Col(df, new). B reads Col(df, price).
         # Col(df, new) does NOT conflict with Col(df, price) per the otimes table.
@@ -225,19 +249,25 @@ class TestBackwardMutationColumnPrecision:
         self.helper.set_cell_order(["a", "b"])
 
     def test_same_column_backward_violation(self):
-        """A reads df["price"], B modifies df["price"] -> violation."""
+        """A reads df["price"], B modifies df["price"] in place -> violation.
+
+        Uses the SAME DataFrame object throughout: LocRef conflict detection
+        compares stable object IDs, so the mutation must hit the very object
+        that A read (as it does in a real kernel).
+        """
         df = pd.DataFrame({"price": [1, 2], "qty": [3, 4]})
         self.helper.execute_cell(
-            "a", {"df": df.copy()}, {"df": df.copy()},
+            "a", {"df": df}, {"df": df},
             reads={"df"}, column_reads={"df": {"price"}},
         )
 
-        # B modifies price column in-place
-        df_b = df.copy()
-        df_b["price"] = [99, 99]
-        result = self.helper.execute_cell(
-            "b", {"df": df.copy()}, {"df": df_b},
-            reads={"df"}, writes={"df"},
+        # B modifies price column in-place on the same object A read
+        def mutate():
+            df["price"] = [99, 99]
+
+        result = execute_inplace(
+            self.helper, "b", {"df": df}, mutate,
+            reads={"df"},
             column_reads={"df": set()}, column_writes={"df": {"price"}},
             continue_on_violation=True,
         )
@@ -275,49 +305,56 @@ class TestIndependentColumnAdditions:
         self.helper.set_cell_order(["a", "b", "c"])
 
     def test_two_col_writes_no_write_write_overlap(self):
-        """B adds df["price"], C adds df["qty"]. Editing B does NOT stale C
-        because ColumnAdded maps to Col, giving column-level precision in
-        write-write overlap.
+        """B adds df["price"], C adds df["qty"] — both IN PLACE. Editing B does
+        NOT stale C because ColumnAdded maps to Col, giving column-level
+        precision in write-write overlap.
 
         B's changed write locs are Col(df, price). C's write locs include
         Col(df, qty). Col(df, price) does not conflict with Col(df, qty),
         so there is no write-write overlap and C stays clean.
+
+        Uses a single shared DataFrame object mutated in place ("df" NOT in
+        tracking.writes), matching real-kernel column-add semantics.
         """
         df = pd.DataFrame({"base": [1, 2]})
 
         # A creates df
         self.helper.execute_cell(
-            "a", {}, {"df": df.copy()},
+            "a", {}, {"df": df},
             writes={"df"}, column_writes={"df": {"base"}},
         )
 
-        # B adds price column
-        df_b = df.copy()
-        df_b["price"] = [10, 20]
-        self.helper.execute_cell(
-            "b", {"df": df.copy()}, {"df": df_b},
-            reads={"df"}, writes={"df"},
+        # B adds price column in place
+        def add_price():
+            df["price"] = [10, 20]
+
+        execute_inplace(
+            self.helper, "b", {"df": df}, add_price,
+            reads={"df"},
             column_reads={"df": set()}, column_writes={"df": {"price"}},
             continue_on_violation=True,
         )
 
-        # C adds qty column
-        df_c = df_b.copy()
-        df_c["qty"] = [30, 40]
-        self.helper.execute_cell(
-            "c", {"df": df_b.copy()}, {"df": df_c},
-            reads={"df"}, writes={"df"},
+        # C adds qty column in place
+        def add_qty():
+            df["qty"] = [30, 40]
+
+        execute_inplace(
+            self.helper, "c", {"df": df}, add_qty,
+            reads={"df"},
             column_reads={"df": set()}, column_writes={"df": {"qty"}},
             continue_on_violation=True,
         )
 
-        # Edit and rerun B
+        # Edit and rerun B: overwrite price in place
         self.helper.sdc._notebook_state.handle_edit("b")
-        df_b2 = df.copy()
-        df_b2["price"] = [100, 200]
-        result = self.helper.execute_cell(
-            "b", {"df": df.copy()}, {"df": df_b2},
-            reads={"df"}, writes={"df"},
+
+        def mod_price():
+            df["price"] = [100, 200]
+
+        result = execute_inplace(
+            self.helper, "b", {"df": df}, mod_price,
+            reads={"df"},
             column_reads={"df": set()}, column_writes={"df": {"price"}},
             continue_on_violation=True,
         )
@@ -334,25 +371,35 @@ class TestAttributeConflictsAlwaysEnforced:
         self.helper.set_cell_order(["a", "b"])
 
     def test_structural_read_backward_violation(self):
-        """Cell that reads df.columns, then later cell drops a column -> violation."""
+        """Cell that reads df.columns, then later cell drops a column in place
+        -> violation.
+
+        Uses the SAME DataFrame object throughout (df.drop(..., inplace=True))
+        so LocRef conflict detection sees the mutation hitting the very object
+        whose column structure A read.
+        """
         df = pd.DataFrame({"x": [1], "y": [2]})
 
         # A reads df.columns (structural read)
         self.helper.execute_cell(
-            "a", {"df": df.copy()}, {"df": df.copy()},
+            "a", {"df": df}, {"df": df},
             reads={"df"}, structural_reads={"df": {"columns"}},
         )
 
-        # B drops a column (writes df, removes column y)
-        df_dropped = df.drop("y", axis=1)
-        result = self.helper.execute_cell(
-            "b", {"df": df.copy()}, {"df": df_dropped},
-            reads={"df"}, writes={"df"},
-            column_reads={"df": set()}, column_writes={"df": {"x"}},
+        # B drops column y in place (structural mutation of the same object)
+        def drop_y():
+            df.drop("y", axis=1, inplace=True)
+
+        result = execute_inplace(
+            self.helper, "b", {"df": df}, drop_y,
+            reads={"df"},
+            column_deletions={"df": {"y"}},
             continue_on_violation=True,
         )
-        # B writes to df which A read -> backward violation
+        # B mutates the column structure of df which A read -> backward violation
         assert result.has_errors()
+        # Specifically, Col(df, y) ▷ Cols(df) fires NoWriteAfterRead against A.
+        assert _has_error(result, ErrorType.NO_WRITE_AFTER_READ)
 
     def test_no_structural_off_mode(self):
         """Verify there is no way to disable structural tracking."""
@@ -451,28 +498,30 @@ class TestEditRerunBackwardStale:
 
     def test_edit_change_column_staleness(self):
         """
-        A writes df (all columns), B modifies df["price"].
+        A writes df (all columns), B modifies df["price"] in place.
         Edit B to only write df["qty"] -> C reads df["price"].
 
         The ForwardStale check uses _changes_to_writelocset which uses the
         CURRENT diff's column_changed. Since B's new diff only shows qty
         changed, and C reads price, C is NOT stale via the read-conflict path.
 
-        However, the W_i_union includes "df" (variable level), and
-        _changes_to_writelocset maps it to Col(df, qty) since column_changed
-        has detail for df. So Col(df, qty) does not conflict with Col(df, price).
+        B is simulated as an in-place column writer (single shared object,
+        "df" NOT in tracking.writes), so no Var(df) write loc is added for
+        rebinding and Col(df, qty) does not conflict with Col(df, price).
         """
         df = pd.DataFrame({"price": [1], "qty": [2]})
         self.helper.execute_cell(
-            "a", {}, {"df": df.copy()},
+            "a", {}, {"df": df},
             writes={"df"}, column_writes={"df": {"price", "qty"}},
         )
 
-        df2 = df.copy()
-        df2["price"] = [99]
-        self.helper.execute_cell(
-            "b", {"df": df.copy()}, {"df": df2},
-            reads={"df"}, writes={"df"},
+        # B: df["price"] = [99] in place
+        def mod_price():
+            df["price"] = [99]
+
+        execute_inplace(
+            self.helper, "b", {"df": df}, mod_price,
+            reads={"df"},
             column_reads={"df": set()}, column_writes={"df": {"price"}},
             continue_on_violation=True,
         )
@@ -480,17 +529,19 @@ class TestEditRerunBackwardStale:
         # Add a cell C that reads df["price"]
         self.helper.set_cell_order(["a", "b", "c"])
         self.helper.execute_cell(
-            "c", {"df": df2.copy()}, {"df": df2.copy()},
+            "c", {"df": df}, {"df": df},
             reads={"df"}, column_reads={"df": {"price"}},
         )
 
-        # Edit B, now only writes qty (stops writing price)
+        # Edit B, now only writes qty in place (stops writing price)
         self.helper.sdc._notebook_state.handle_edit("b")
-        df3 = df.copy()
-        df3["qty"] = [99]
-        result = self.helper.execute_cell(
-            "b", {"df": df.copy()}, {"df": df3},
-            reads={"df"}, writes={"df"},
+
+        def mod_qty():
+            df["qty"] = [99]
+
+        result = execute_inplace(
+            self.helper, "b", {"df": df}, mod_qty,
+            reads={"df"},
             column_reads={"df": set()}, column_writes={"df": {"qty"}},
             continue_on_violation=True,
         )
@@ -515,6 +566,9 @@ class TestLocSetConversionIntegration:
         Var(df) is always present alongside Col reads. Rebinding is caught
         by Var(df) ▷ Var(df); column independence is preserved because
         Col/Rows/Attr ▷ Var = false in the ▷ matrix.
+
+        Stored Col locs carry LocRef qualifiers (stable object identity),
+        so we match on var_name() rather than a raw string qualifier.
         """
         df = pd.DataFrame({"x": [1], "y": [2]})
         self.helper.execute_cell(
@@ -525,7 +579,7 @@ class TestLocSetConversionIntegration:
         # Check the stored read locs in notebook state
         stored_reads = self.helper.sdc._notebook_state.reads.get("a", frozenset())
         has_col_loc = any(
-            r.type.value == "col" and r.qualifier == "df" and r.name == "x"
+            r.type.value == "col" and r.var_name() == "df" and r.name == "x"
             for r in stored_reads
         )
         has_var_loc = any(

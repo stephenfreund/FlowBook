@@ -285,23 +285,25 @@ class TestConflictLoopSkipWithDataFrames:
         """Detect conflict when writing same column as read."""
         df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
 
-        # Cell A reads column x
+        # Cell A reads column x (post namespace holds the ORIGINAL df so
+        # recorded read locs carry its object identity)
         self.helper.execute_cell(
             "a",
-            pre_namespace={"df": df.copy()},
-            post_namespace={"df": df.copy(), "result": 10},
+            pre_namespace={"df": df},
+            post_namespace={"df": df, "result": 10},
             reads={"df"},
             writes={"result"},
             column_reads={"df": {"x"}},
         )
 
-        # Cell B writes column x (same as A read)
-        df_modified = df.copy()
-        df_modified["x"] = [10, 20, 30]
+        # Cell B writes column x in place (same as A read, SAME object).
+        # Snapshot the pre state first, then mutate the original df.
+        df_before = df.copy()
+        df["x"] = [10, 20, 30]
         result_b = self.helper.execute_cell(
             "b",
-            pre_namespace={"df": df.copy(), "result": 10},
-            post_namespace={"df": df_modified, "result": 10},
+            pre_namespace={"df": df_before, "result": 10},
+            post_namespace={"df": df, "result": 10},
             reads=set(),
             writes={"df"},
             column_writes={"df": {"x"}},

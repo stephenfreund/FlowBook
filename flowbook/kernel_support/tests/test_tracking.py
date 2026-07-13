@@ -404,15 +404,26 @@ class TestTrackingEdgeCases:
         assert "x" in td.reads_before_writes
         assert "x" in td.writes
 
-    def test_delete_not_tracked(self):
-        """Deletion is not tracked as write or read."""
+    def test_delete_tracked_as_write(self):
+        """Deletion is a write to the variable (it changes what downstream
+        readers observe), but not a read."""
         td = TrackingDict({"x": 1, "y": 2})
         td.reset_tracking()
         del td["x"]
 
-        # Deletion should not appear in tracking
-        assert "x" not in td.writes
+        assert "x" in td.writes
         assert "x" not in td.reads_before_writes
+
+    def test_delete_missing_key_not_tracked(self):
+        """A failed deletion (KeyError) records no phantom write."""
+        td = TrackingDict({"x": 1})
+        td.reset_tracking()
+        try:
+            del td["missing"]
+        except KeyError:
+            pass
+
+        assert "missing" not in td.writes
 
     def test_numpy_array_in_namespace(self):
         """Tracking works with numpy arrays."""

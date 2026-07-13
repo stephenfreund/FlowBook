@@ -167,6 +167,14 @@ class TrackingDict(dict):
 
     def __delitem__(self, key):
         del self._real_ns[key]
+        if self._tracking_enabled:
+            # `del x` is a write to x in the formal model: it changes what
+            # downstream readers of x observe. Recording it puts x in the
+            # diff's keys_to_include (OPT_ACCESSED_VARS_ONLY), so the diff
+            # reports "Variable was removed" and staleness propagates to
+            # readers of x. Recorded after the delete so a KeyError does
+            # not record a phantom write.
+            self._writes.add(key)
 
     def __contains__(self, key):
         return key in self._real_ns
