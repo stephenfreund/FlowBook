@@ -124,6 +124,18 @@ class FlowbookActivationManager {
   private _toolbarExtension: FlowbookToolbarExtension;
   private _isActive = false;
   private _activeNotebookPath: string | null = null;
+  // Notebooks that have received per-notebook setup (initial state sync,
+  // cell-index overlays, kernel discovery) during the current activation,
+  // keyed by context path. Guards against re-running setup for the same
+  // notebook while letting a second flowbook notebook get its own setup.
+  private _setupNotebooks = new Map<string, NotebookPanel>();
+  private _pathChangedHandlers = new Map<
+    string,
+    {
+      panel: NotebookPanel;
+      onPathChanged: (sender: unknown, newPath: string) => void;
+    }
+  >();
   private _statusListenerNotebook: NotebookPanel | null = null;
 
   constructor(
@@ -146,6 +158,11 @@ class FlowbookActivationManager {
     this._kernelDetector.kernelChanged.connect((_, info) => {
       if (info.currentKernel === 'flowbook_kernel') {
         this._activate();
+        // If the switching notebook is the one the user is looking at,
+        // make sure it gets per-notebook setup (no-op if already done).
+        if (this._tracker.currentWidget === info.notebook) {
+          this._setupNotebook(info.notebook);
+        }
       } else if (info.previousKernel === 'flowbook_kernel') {
         this._deactivate();
       }
@@ -159,42 +176,72 @@ class FlowbookActivationManager {
 
   private _checkCurrentNotebook(): void {
     const notebook = this._tracker.currentWidget;
-    if (notebook) {
-      // Wait for session to be ready
-      notebook.sessionContext.ready.then(() => {
+
+    if (!notebook) {
+      // The last notebook was closed — tear everything down, same path
+      // as switching to a non-flowbook kernel. _deactivate() is a no-op
+      // when already inactive, so rapid open/close cannot double-dispose.
+      this._deactivate();
+      if (this._statusListenerNotebook) {
+        if (!this._statusListenerNotebook.isDisposed) {
+          this._statusListenerNotebook.sessionContext.statusChanged.disconnect(
+            this._onStatusChanged,
+            this
+          );
+        }
+        this._statusListenerNotebook = null;
+      }
+      return;
+    }
+
+    // Wait for session to be ready
+    notebook.sessionContext.ready
+      .then(() => {
+        // The notebook may have been closed (or backgrounded) while the
+        // session was starting — don't act on stale state.
+        if (notebook.isDisposed || this._tracker.currentWidget !== notebook) {
+          return;
+        }
         const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
 
         if (isFlowbook) {
           this._activate();
+          // Per-notebook setup for this notebook. The singletons (panels,
+          // hook, highlighter) are tracker-driven and shared, but each
+          // flowbook notebook needs its own state sync, cell-index
+          // overlays and kernel-discovery file. No-op if already done.
+          this._setupNotebook(notebook);
         } else {
           this._deactivate();
         }
+      })
+      .catch(() => {
+        // Session failed to initialize — nothing to activate.
       });
 
-      // Disconnect previous statusChanged listener before connecting new one
-      if (
-        this._statusListenerNotebook &&
-        this._statusListenerNotebook !== notebook
-      ) {
-        this._statusListenerNotebook.sessionContext.statusChanged.disconnect(
-          this._onStatusChanged,
-          this
-        );
-      }
+    // Disconnect previous statusChanged listener before connecting new one
+    if (
+      this._statusListenerNotebook &&
+      this._statusListenerNotebook !== notebook
+    ) {
+      this._statusListenerNotebook.sessionContext.statusChanged.disconnect(
+        this._onStatusChanged,
+        this
+      );
+    }
 
-      if (this._statusListenerNotebook !== notebook) {
-        notebook.sessionContext.statusChanged.connect(
-          this._onStatusChanged,
-          this
-        );
-        this._statusListenerNotebook = notebook;
-      }
+    if (this._statusListenerNotebook !== notebook) {
+      notebook.sessionContext.statusChanged.connect(
+        this._onStatusChanged,
+        this
+      );
+      this._statusListenerNotebook = notebook;
     }
   }
 
   private _onStatusChanged(): void {
     const notebook = this._statusListenerNotebook;
-    if (!notebook) {
+    if (!notebook || notebook.isDisposed) {
       return;
     }
     const isFlowbook = this._kernelDetector.isFlowbookKernel(notebook);
@@ -261,20 +308,107 @@ class FlowbookActivationManager {
       this._tracker
     );
 
-    // Start cell index overlays for current notebook
-    const widget = this._tracker.currentWidget;
-    if (widget) {
-      this._activeNotebookPath = widget.context.path;
-      this._cellIndexManager.startMonitoring(this._activeNotebookPath, widget);
-
-      // Sync initial staleness state from kernel
-      this._syncInitialState(widget);
-
-      // Write kernel discovery file so MCP can find this kernel
-      this._writeKernelDiscovery(widget);
-    }
-
     this._isActive = true;
+
+    // Per-notebook setup for the notebook that triggered activation
+    const widget = this._tracker.currentWidget;
+    if (widget && this._kernelDetector.isFlowbookKernel(widget)) {
+      this._setupNotebook(widget);
+    }
+  }
+
+  /**
+   * Per-notebook setup: cell index overlays, initial staleness sync and
+   * kernel-discovery file. Runs at most once per notebook (by path) while
+   * active; re-invocations for an already-set-up notebook only refresh
+   * the tracked active path. This is what lets a second concurrently-open
+   * flowbook notebook get its own setup — activation itself is a
+   * singleton, but setup is per notebook.
+   */
+  private _setupNotebook(panel: NotebookPanel): void {
+    if (!this._isActive || panel.isDisposed) {
+      return;
+    }
+    const path = panel.context.path;
+    this._activeNotebookPath = path;
+    if (this._setupNotebooks.has(path)) {
+      return;
+    }
+    this._setupNotebooks.set(path, panel);
+
+    // Migrate path-keyed state when the notebook is renamed or moved.
+    let knownPath = path;
+    const onPathChanged = (_sender: unknown, newPath: string): void => {
+      const oldPath = knownPath;
+      knownPath = newPath;
+      this._migrateNotebookPath(oldPath, newPath, panel);
+    };
+    panel.context.pathChanged.connect(onPathChanged);
+    this._pathChangedHandlers.set(path, { panel, onPathChanged });
+
+    // Clean up this notebook's entries when it is closed while others
+    // stay open (closing the LAST notebook deactivates instead).
+    panel.disposed.connect(() => {
+      this._teardownNotebook(panel);
+    });
+
+    // Start cell index overlays
+    this._cellIndexManager.startMonitoring(path, panel);
+
+    // Sync initial staleness state from kernel
+    this._syncInitialState(panel);
+
+    // Write kernel discovery file so MCP can find this kernel
+    this._writeKernelDiscovery(panel);
+  }
+
+  /**
+   * Move per-notebook plugin state to a new path key after rename/move.
+   */
+  private _migrateNotebookPath(
+    oldPath: string,
+    newPath: string,
+    panel: NotebookPanel
+  ): void {
+    if (oldPath === newPath) {
+      return;
+    }
+    const setupPanel = this._setupNotebooks.get(oldPath);
+    if (setupPanel) {
+      this._setupNotebooks.delete(oldPath);
+      this._setupNotebooks.set(newPath, setupPanel);
+    }
+    const handlers = this._pathChangedHandlers.get(oldPath);
+    if (handlers) {
+      this._pathChangedHandlers.delete(oldPath);
+      this._pathChangedHandlers.set(newPath, handlers);
+    }
+    if (this._activeNotebookPath === oldPath) {
+      this._activeNotebookPath = newPath;
+    }
+    this._cellIndexManager.migratePath(oldPath, newPath);
+
+    // Discovery files are keyed by notebook path server-side — refresh so
+    // MCP can find the kernel under the new path.
+    this._writeKernelDiscovery(panel);
+  }
+
+  /**
+   * Remove per-notebook state for a closed notebook. Idempotent — safe
+   * even if _deactivate already cleaned up.
+   */
+  private _teardownNotebook(panel: NotebookPanel): void {
+    for (const [key, p] of this._setupNotebooks) {
+      if (p === panel) {
+        this._setupNotebooks.delete(key);
+        this._pathChangedHandlers.delete(key);
+        this._cellIndexManager.stopMonitoring(key);
+        if (this._activeNotebookPath === key) {
+          this._activeNotebookPath = null;
+        }
+        break;
+      }
+    }
   }
 
   /**
@@ -331,11 +465,19 @@ class FlowbookActivationManager {
       return;
     }
 
-    // Stop cell index overlays
-    if (this._activeNotebookPath) {
-      this._cellIndexManager.stopMonitoring(this._activeNotebookPath);
-      this._activeNotebookPath = null;
+    // Disconnect rename listeners and stop cell index overlays for every
+    // notebook that received per-notebook setup.
+    for (const { panel, onPathChanged } of this._pathChangedHandlers.values()) {
+      if (!panel.isDisposed) {
+        panel.context.pathChanged.disconnect(onPathChanged);
+      }
     }
+    this._pathChangedHandlers.clear();
+    for (const path of this._setupNotebooks.keys()) {
+      this._cellIndexManager.stopMonitoring(path);
+    }
+    this._setupNotebooks.clear();
+    this._activeNotebookPath = null;
 
     // Remove panels
     if (this._panel) {
@@ -362,6 +504,9 @@ class FlowbookActivationManager {
       this._fixSuggester.dispose();
       this._fixSuggester = null;
     }
+
+    // Drop the toolbar's reference to the disposed highlighter
+    this._toolbarExtension.setHighlighter(null);
 
     // Clear bridge context
     setBridgeContext(null, null, null, null);

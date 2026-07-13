@@ -51,6 +51,7 @@ export class ReproducibilityCellHighlighter {
       panel: NotebookPanel;
       onCellsChanged: () => void;
       onStatusChanged: (sender: unknown, status: string) => void;
+      onPathChanged: (sender: unknown, newPath: string) => void;
     }
   >();
   private _stalenessNotice = new StalenessNoticeManager();
@@ -121,9 +122,23 @@ export class ReproducibilityCellHighlighter {
 
       notebook.disposed.connect(() => {
         manager?.dispose();
-        this._stalenessManagers.delete(path);
-        this._monitoredNotebooks.delete(path);
-        this._monitorHandlers.delete(path);
+        // Delete by value, not by the path captured at creation time —
+        // a rename/move migrates entries to the new path key.
+        for (const [key, m] of this._stalenessManagers) {
+          if (m === manager) {
+            this._stalenessManagers.delete(key);
+            break;
+          }
+        }
+        for (const [key, entry] of this._monitorHandlers) {
+          if (entry.panel === notebook) {
+            this._monitorHandlers.delete(key);
+            this._monitoredNotebooks.delete(key);
+            this._pendingRestartUpdate.delete(key);
+            this._executedInSession.delete(key);
+            break;
+          }
+        }
       });
     }
 
@@ -243,16 +258,19 @@ export class ReproducibilityCellHighlighter {
     this._tracker.activeCellChanged.disconnect(this._onActiveCellChanged, this);
     NotebookActions.executed.disconnect(this._onExecuted, this);
 
-    // Disconnect per-notebook monitor listeners (cells.changed and
-    // statusChanged) so a disposed highlighter stops reacting entirely.
+    // Disconnect per-notebook monitor listeners (cells.changed,
+    // statusChanged and pathChanged) so a disposed highlighter stops
+    // reacting entirely.
     for (const {
       panel,
       onCellsChanged,
-      onStatusChanged
+      onStatusChanged,
+      onPathChanged
     } of this._monitorHandlers.values()) {
       if (!panel.isDisposed) {
         panel.content.model?.cells.changed.disconnect(onCellsChanged);
         panel.sessionContext.statusChanged.disconnect(onStatusChanged);
+        panel.context.pathChanged.disconnect(onPathChanged);
       }
     }
     this._monitorHandlers.clear();
@@ -361,27 +379,77 @@ export class ReproducibilityCellHighlighter {
     };
     notebook.content.model?.cells.changed.connect(onCellsChanged);
 
-    // Listen for kernel restart
+    // Listen for kernel restart. Read the path at event time — the
+    // notebook may have been renamed/moved since monitoring started.
     const onStatusChanged = (_sender: unknown, status: string) => {
       if (this._isDisposed || notebook.isDisposed) {
         return;
       }
+      const currentPath = notebook.context.path;
       if (status === 'restarting' || status === 'autorestarting') {
-        this._pendingRestartUpdate.add(path);
-        this._executedInSession.delete(path);
+        this._pendingRestartUpdate.add(currentPath);
+        this._executedInSession.delete(currentPath);
         this._clearAllFlowbookMetadata(notebook);
-      } else if (status === 'idle' && this._pendingRestartUpdate.has(path)) {
-        this._pendingRestartUpdate.delete(path);
+      } else if (
+        status === 'idle' &&
+        this._pendingRestartUpdate.has(currentPath)
+      ) {
+        this._pendingRestartUpdate.delete(currentPath);
         this._updateAllCells(notebook);
       }
     };
     notebook.sessionContext.statusChanged.connect(onStatusChanged);
 
+    // Migrate all path-keyed state when the notebook is renamed/moved —
+    // otherwise staleness resets and the old entries leak.
+    let knownPath = path;
+    const onPathChanged = (_sender: unknown, newPath: string) => {
+      if (this._isDisposed) {
+        return;
+      }
+      const oldPath = knownPath;
+      knownPath = newPath;
+      this._migratePathKeys(oldPath, newPath);
+    };
+    notebook.context.pathChanged.connect(onPathChanged);
+
     this._monitorHandlers.set(path, {
       panel: notebook,
       onCellsChanged,
-      onStatusChanged
+      onStatusChanged,
+      onPathChanged
     });
+  }
+
+  /**
+   * Move all per-notebook state from one path key to another.
+   * Called when a monitored notebook is renamed or moved.
+   */
+  private _migratePathKeys(oldPath: string, newPath: string): void {
+    if (oldPath === newPath) {
+      return;
+    }
+    const manager = this._stalenessManagers.get(oldPath);
+    if (manager) {
+      this._stalenessManagers.delete(oldPath);
+      this._stalenessManagers.set(newPath, manager);
+    }
+    const executed = this._executedInSession.get(oldPath);
+    if (executed) {
+      this._executedInSession.delete(oldPath);
+      this._executedInSession.set(newPath, executed);
+    }
+    if (this._monitoredNotebooks.delete(oldPath)) {
+      this._monitoredNotebooks.add(newPath);
+    }
+    const handlers = this._monitorHandlers.get(oldPath);
+    if (handlers) {
+      this._monitorHandlers.delete(oldPath);
+      this._monitorHandlers.set(newPath, handlers);
+    }
+    if (this._pendingRestartUpdate.delete(oldPath)) {
+      this._pendingRestartUpdate.add(newPath);
+    }
   }
 
   private _updatePanelWithCurrentCellOrder(notebook: NotebookPanel): void {

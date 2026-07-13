@@ -340,6 +340,70 @@ export function asFlowbookOutput(out: unknown): IFlowbookOutput {
   return out as IFlowbookOutput;
 }
 
+// ============================================================================
+// Post-run metadata settling
+// ============================================================================
+
+/**
+ * Minimal structural view of a cell model — just enough to read metadata.
+ * Matches ICellModel without importing @jupyterlab/cells here.
+ */
+export interface IMetadataReader {
+  getMetadata: (key: string) => unknown;
+}
+
+/**
+ * Wait until a cell's `flowbook` metadata reflects a new execution.
+ *
+ * The metadata is written asynchronously by the comm message handler, so
+ * the shell reply awaited by `NotebookActions.run(...)` can resolve BEFORE
+ * the metadata for that run lands — reading it immediately would return
+ * the PREVIOUS run's errors. Callers capture the metadata before running
+ * and poll here until it changes (different execution_seq, first
+ * appearance, or new object identity) or the timeout elapses.
+ *
+ * Returns the freshest metadata observed — possibly still the stale one
+ * if the timeout expired, or undefined if the cell has none.
+ */
+export async function waitForFlowbookMetadata(
+  model: IMetadataReader,
+  before: IReproducibilityMetadata | undefined,
+  timeoutMs = 2000,
+  intervalMs = 50
+): Promise<IReproducibilityMetadata | undefined> {
+  const read = (): IReproducibilityMetadata | undefined =>
+    model.getMetadata('flowbook') as IReproducibilityMetadata | undefined;
+
+  const isFresh = (current: IReproducibilityMetadata | undefined): boolean => {
+    if (!current) {
+      return false;
+    }
+    if (!before) {
+      // Cell had no metadata before the run — any arrival is fresh.
+      return true;
+    }
+    if (
+      typeof current.execution_seq === 'number' &&
+      typeof before.execution_seq === 'number'
+    ) {
+      // The kernel bumps execution_seq on every run; a changed seq means
+      // this run's metadata has landed. (getMetadata may return a fresh
+      // deep copy each call, so identity alone is not reliable.)
+      return current.execution_seq !== before.execution_seq;
+    }
+    // Fallback when seq is unavailable: object identity.
+    return current !== before;
+  };
+
+  const deadline = Date.now() + timeoutMs;
+  let current = read();
+  while (!isFresh(current) && Date.now() < deadline) {
+    await new Promise<void>(resolve => setTimeout(resolve, intervalMs));
+    current = read();
+  }
+  return current;
+}
+
 /**
  * Escape a string for interpolation into text/html outputs.
  *

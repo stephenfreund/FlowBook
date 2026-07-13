@@ -10,7 +10,7 @@ import { ToolbarButton } from '@jupyterlab/apputils';
 import { stepIntoIcon } from '@jupyterlab/ui-components';
 
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
-import { IReproducibilityMetadata } from './types';
+import { IReproducibilityMetadata, waitForFlowbookMetadata } from './types';
 import { KernelDetector } from '../shared/kerneldetection';
 
 /**
@@ -28,9 +28,11 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
   }
 
   /**
-   * Set the highlighter reference (called when plugin activates)
+   * Set the highlighter reference (called when plugin activates).
+   * Pass null on deactivation so the button doesn't touch a disposed
+   * highlighter.
    */
-  setHighlighter(highlighter: ReproducibilityCellHighlighter): void {
+  setHighlighter(highlighter: ReproducibilityCellHighlighter | null): void {
     this._highlighter = highlighter;
   }
 
@@ -124,13 +126,30 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
         break;
       }
 
+      // Capture identity + metadata before the run: the widget index can
+      // go stale if cells are added/removed during execution, and the
+      // flowbook metadata is written asynchronously by the comm handler
+      // (the shell reply can beat it, leaving us reading the PREVIOUS
+      // run's errors).
+      const targetCell = widgets[targetWidgetIdx];
+      const targetModelId = targetCell.model.id;
+      const beforeMeta = targetCell.model.getMetadata('flowbook') as
+        | IReproducibilityMetadata
+        | undefined;
+
       // Run the cell
       notebook.activeCellIndex = targetWidgetIdx;
-      notebook.scrollToCell(widgets[targetWidgetIdx]);
+      notebook.scrollToCell(targetCell);
       await NotebookActions.run(notebook, panel.sessionContext);
 
-      // Check for hard error
-      const cell = widgets[targetWidgetIdx];
+      // Re-find the cell by model ID — indices may have shifted.
+      const cell = notebook.widgets.find(w => w.model.id === targetModelId);
+      if (!cell) {
+        // Cell was removed during the run — look for the next actionable.
+        continue;
+      }
+
+      // Check for hard error (outputs land with the shell reply, no race)
       const outputs = (cell.model as ICodeCellModel).outputs;
       let hasError = false;
       if (outputs) {
@@ -146,10 +165,8 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
         break;
       }
 
-      // Check for violation
-      const meta = cell.model.getMetadata('flowbook') as
-        | IReproducibilityMetadata
-        | undefined;
+      // Wait for this run's metadata to land before checking violations.
+      const meta = await waitForFlowbookMetadata(cell.model, beforeMeta);
       if (meta?.errors && meta.errors.length > 0) {
         break;
       }

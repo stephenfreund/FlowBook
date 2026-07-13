@@ -17,7 +17,11 @@ import { ICodeCellModel } from '@jupyterlab/cells';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { KernelDetector } from '../shared/kerneldetection';
-import { IReproducibilityMetadata, IReproducibilityError } from './types';
+import {
+  IReproducibilityMetadata,
+  IReproducibilityError,
+  waitForFlowbookMetadata
+} from './types';
 import { aiTransact } from './aiattribution';
 import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
 import { StalenessManager } from './stalenessmanager';
@@ -599,15 +603,21 @@ export function registerBridgeCommands(
       const widgetIdx = codeCellToWidgetIndex(panel, codeCellIndex);
       const label = indexToAlpha(codeCellIndex);
 
+      // Capture pre-run metadata: it is written asynchronously by the
+      // comm handler, so the shell reply can beat it and an immediate
+      // read would return the PREVIOUS run's errors.
+      const targetCell = panel.content.widgets[widgetIdx];
+      const beforeMeta = targetCell.model.getMetadata('flowbook') as
+        | IReproducibilityMetadata
+        | undefined;
+
       // Activate and run via JupyterLab's native mechanism
       panel.content.activeCellIndex = widgetIdx;
       await NotebookActions.run(panel.content, panel.sessionContext);
 
-      // Read results after execution completes
+      // Wait for this run's metadata to land before evaluating errors
       const cell = panel.content.widgets[widgetIdx];
-      const meta = cell.model.getMetadata('flowbook') as
-        | IReproducibilityMetadata
-        | undefined;
+      const meta = await waitForFlowbookMetadata(cell.model, beforeMeta);
       const hasError = cellHasError(panel, widgetIdx);
       const violations = cellHasViolation(panel, widgetIdx);
 
