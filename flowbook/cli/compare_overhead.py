@@ -4764,13 +4764,26 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
         print(f"  Max: {np.max(arr):.1f}ms")
         print()
 
-    if all_memory_ratios:
-        arr = np.array(all_memory_ratios)
-        print("Per-Cell Memory Overhead (checkpoint_delta / prev_base):")
-        print(f"  P50: {np.percentile(arr, 50) * 100:.1f}%")
-        print(f"  P95: {np.percentile(arr, 95) * 100:.1f}%")
-        print(f"  P99: {np.percentile(arr, 99) * 100:.1f}%")
-        print(f"  Max: {np.max(arr) * 100:.1f}%")
+    # Per-cell checkpoint size, in absolute MB (Checkpoint - Base). This uses
+    # the exact same cell population as Figure 5 panel 3 / the paper: cells
+    # whose analysis time is > 0, matched by cell_index to the per-cell time
+    # CDF, over the already-error-filtered notebooks. We recompute it here via
+    # extract_cdf_data so the text and the figure can never disagree.
+    memory_abs_mb: List[float] = []
+    if len(results) > 1:
+        cdf_data = extract_cdf_data(
+            list(results.values()),
+            [raw_data[p] for p in results.keys()],
+        )
+        if cdf_data and cdf_data.memory_abs_mb:
+            memory_abs_mb = list(cdf_data.memory_abs_mb)
+    if memory_abs_mb:
+        arr = np.array(memory_abs_mb)
+        print(f"Per-Cell Checkpoint Size (Checkpoint - Base, N={len(arr)}):")
+        print(f"  P50: {np.percentile(arr, 50):.3f}MB")
+        print(f"  P95: {np.percentile(arr, 95):.1f}MB")
+        print(f"  P99: {np.percentile(arr, 99):.1f}MB")
+        print(f"  Max: {np.max(arr):.1f}MB")
         print()
 
     if all_peak_pcts:
