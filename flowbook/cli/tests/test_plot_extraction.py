@@ -245,20 +245,25 @@ class TestExtractPlot6Data:
         # Cell 1: delta = 100 - 50 = 50, base = 100, ratio = 0.5
         assert p6.ratios[1] == 0.5
 
-    def test_excludes_small_namespace(self):
-        """Cells with prev_user_ns < MIN_BASE_MB (0.1) get ratio=0."""
+    def test_small_base_still_gets_real_ratio(self):
+        """MIN_BASE_MB is 0: only a ZERO base yields ratio=0.
+
+        A small-but-positive base produces the true ratio (the old 0.1 MB
+        threshold was removed so small notebooks keep their data points).
+        """
         flowbook = FlowBookMemoryResult(cells=[
             make_flowbook_cell("a", 0, 0.05, 10, {"_pre_a": {"df": 10}}),  # base=0 (no prior)
-            make_flowbook_cell("b", 1, 100, 50, {"_pre_b": {"df": 50}}),  # base=0.05 < 0.1 → ratio=0
+            make_flowbook_cell("b", 1, 100, 50, {"_pre_b": {"df": 50}}),  # base=0.05
         ])
         result = ComparisonResult(flowbook=flowbook)
 
         p6 = extract_plot6_data(result)
 
-        # Both cells have ratio=0 (cell 0: no prior, cell 1: prev base too small)
         assert len(p6.ratios) == 2
+        # Cell 0: no prior namespace → base=0 → ratio 0 (division guard)
         assert p6.ratios[0] == 0.0
-        assert p6.ratios[1] == 0.0
+        # Cell 1: delta = 50 - 10 = 40, base = 0.05 → 800.0
+        assert p6.ratios[1] == pytest.approx(800.0)
 
     def test_ratios_per_cell(self):
         """Ratios computed for each cell based on prev_cell_base."""

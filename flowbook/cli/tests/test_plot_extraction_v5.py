@@ -213,16 +213,18 @@ class TestExtractPlot6DataV5:
         # Cell 1: delta=3.0-1.0=2.0, base=10.0 -> ratio=0.2
         assert result.ratios[1] == pytest.approx(0.2)
 
-    def test_small_base_gives_zero_ratio(self):
-        """Ratio is 0 when prev base is below threshold."""
+    def test_small_base_still_gets_real_ratio(self):
+        """MIN_BASE_MB is 0: a small-but-positive base yields the true ratio
+        (the old 0.1 MB threshold was removed so small notebooks keep their
+        data points); only a zero base is guarded to ratio=0."""
         cells = [
-            V5CellMemory('a', 0, user_ns_mb=0.05, gpu_mb=0.0, checkpoint_mb=1.0),  # 50KB < 100KB threshold
+            V5CellMemory('a', 0, user_ns_mb=0.05, gpu_mb=0.0, checkpoint_mb=1.0),
             V5CellMemory('b', 1, user_ns_mb=10.0, gpu_mb=0.0, checkpoint_mb=3.0),
         ]
         result = extract_plot6_data_v5(cells)
 
-        # prev_base_mb = 0.05 < MIN_BASE_MB (0.1), so ratio = 0
-        assert result.ratios[1] == 0.0
+        # prev_base_mb = 0.05, delta = 3.0 - 1.0 = 2.0 → ratio = 40.0
+        assert result.ratios[1] == pytest.approx(40.0)
 
 
 class TestExtractV5MemoryResult:

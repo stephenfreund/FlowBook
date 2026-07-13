@@ -12,7 +12,8 @@ import {
   IStalenessReason,
   IFrontendStalenessReason,
   IReproducibilityMetadata,
-  asFlowbookOutput
+  asFlowbookOutput,
+  escapeHtml
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
@@ -92,8 +93,13 @@ export class StalenessNoticeManager {
         cell.model.id
       );
 
-      // Escape HTML in the message but preserve backtick-wrapped code
-      const htmlMessage = message.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Escape HTML in the message (variable/column names come from user
+      // data), then convert backtick-wrapped code to <code> — backticks
+      // are not HTML-special, so they survive the escaping.
+      const htmlMessage = escapeHtml(message).replace(
+        /`([^`]+)`/g,
+        '<code>$1</code>'
+      );
 
       // Use different label for writer_conflict (potential violation vs stale dependency)
       const isWriterConflict = reason.type === 'writer_conflict';

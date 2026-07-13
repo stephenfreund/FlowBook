@@ -339,3 +339,19 @@ export interface IFlowbookOutput {
 export function asFlowbookOutput(out: unknown): IFlowbookOutput {
   return out as IFlowbookOutput;
 }
+
+/**
+ * Escape a string for interpolation into text/html outputs.
+ *
+ * Location names flow from user data (e.g. CSV column headers become
+ * DataFrame column names), so anything interpolated into a trusted-cell
+ * display_data HTML payload must be escaped first.
+ */
+export function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
