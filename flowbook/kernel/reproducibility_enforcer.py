@@ -200,32 +200,35 @@ Staleness is determined by pure set intersection — monotonic and low memory.
 
 On cell i execution:
     1. Capture pre_checkpoint
-    2. Execute cell, get tracking (reads_before_writes, writes)
-    3. Compute W_i = { v : pre_checkpoint[v] ≠ namespace[v] }  # actual changes
-    4. R_i = tracking.reads_before_writes
+    2. Execute cell, get tracking (reads_before_writes, writes, column and
+       structural detail, file I/O)
+    3. Diff pre_checkpoint vs live namespace → typed Change objects
+    4. R_i = tracking_to_readlocset(tracking)   — typed ReadLocSet
+       W_i = compute_cell_write_locs(tracking, changes) — typed WriteLocSet
     5. Discard pre_checkpoint
 
-Stored state per cell:
-    - R[i]: Set[str] — variables read before write
-    - W[i]: Set[str] — variables that actually changed
+Stored state per cell (typed location sets, NOT plain string sets):
+    - R[i]: ReadLocSet  — Var / Col / Cols / Rows / File read locs,
+      with LocRef qualifiers (object identity via StableIdMap)
+    - W[i]: WriteLocSet — Var / Col / Cols / Rows / File write locs
 
-Predicates (pure set operations):
-    - NoReadAndWrite:    R_i ∩ W_i = ∅
+Predicates (all via the ▷ conflict relation in kernel/locations.py):
+    - NoReadAndWrite:    W_i ▷ R_i = ∅
     - WriteBeforeRead:   R_i ⊆ W_{1..i-1}
     - NoReadBeforeWrite: R_i ∩ W_{i+1..n} = ∅
-    - NoWriteAfterRead:  W_i ∩ R_j = ∅ for all clean j < i
+    - NoWriteAfterRead:  W_i ▷ R_j = ∅ for all clean j < i
 
 Forward Staleness (cells after i):
-    for j > i where j was executed:
-        if W_i ∩ R_j ≠ ∅:
+    for clean j > i:
+        if (W_i_old ∪ W_i_new) ▷ (R_j ∪ W_j) ≠ ∅:
             mark j stale
 
 Properties:
     - Monotonic: Once stale, stays stale until re-executed
     - Conservative: Over-approximates staleness
-    - Memory: O(cells × |variables|) — just string sets
+    - Memory: O(cells × |locations|)
 
-See FORMAL_DEVELOPMENT.md §10 for the full formal specification.
+See FORMAL_DEVELOPMENT.md §8 (typed locations and ▷) and §10 (staleness).
 """
 
 import logging
@@ -1931,48 +1934,6 @@ class ReproducibilityEnforcer:
         """
         return self._notebook_state.get_stale_cells()
 
-    def compute_all_stale_cells(self, current_namespace: dict) -> List[str]:
-        """
-        Recompute staleness for ALL cells from scratch.
-
-        Unlike incremental updates, this checks every executed cell against
-        the current namespace state. Use this when you need guaranteed
-        accuracy (e.g., after external namespace modifications).
-
-        Args:
-            current_namespace: The current live user namespace dict
-
-        Returns:
-            List of cell IDs that are currently stale (in document order)
-        """
-        
-        for cell_id in self._cell_order:
-            cell_tracking = self._notebook_state.get_tracking(cell_id)
-            if cell_tracking is None:
-                continue
-            ckpt_name = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
-            if not self.checkpoints.exists(ckpt_name):
-                continue  # Checkpoint may have been deleted (syntactic mode)
-            pre_checkpoint = self.checkpoints.get(ckpt_name)
-
-            diff_result = MemoryCheckpoint.diff(
-                pre_checkpoint,
-                current_namespace,
-                keys_to_include=cell_tracking.reads_before_writes,
-                use_leq=True,
-                column_rbw=cell_tracking.column_reads_before_writes,
-                structural_reads=cell_tracking.structural_reads,
-                structural_mode=_STRUCTURAL_ENFORCE,
-            )
-
-            if diff_result.differences:
-                # Track reasons: FORWARD_STALE for each changed variable
-                for var in diff_result.differences.keys():
-                    self._notebook_state.add_reason(
-                        cell_id, Reason(ReasonType.FORWARD_STALE, loc=var)
-                    )
-
-        return self._notebook_state.get_stale_cells()
 
     def mark_cell_edited(self, cell_id: str) -> List[str]:
         """[Inst-Edit] Mark edited cell stale.
@@ -2236,6 +2197,13 @@ class ReproducibilityEnforcer:
         # created checkpoint (same name) at the start of check(), causing a crash
         # when trying to restore later.
         self._pending_checkpoint_deletion = None
+        # The deep-copy container cache is normally cleared when the pending
+        # checkpoint deletion is processed at the start of the next check();
+        # cancelling the deletion above would leave the cache (plus both
+        # checkpoints) alive after a rejection. Clear it now — it is a pure
+        # performance cache, always safe to drop.
+        from flowbook.kernel_support.deepcopy import clear_container_cache
+        clear_container_cache()
 
 
 def _extract_column_changes(

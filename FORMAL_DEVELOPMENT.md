@@ -837,10 +837,14 @@ instead adds the variable to Wᵢ (conservative staleness propagation). This
 mode is unsound across rollback: a rejected cell cannot restore the
 variable's prior state.
 
-**Coverage caveat:** blocking is enforced by `TrackingDict.__getitem__`,
-so it covers exactly the reads that read-tracking covers. Reads that bypass
-the namespace mapping (e.g. `globals().get('x')`, aliases created before
-the variable became uncopyable) are not blocked.
+**Coverage caveat:** blocking is enforced by the tracked read paths
+(`TrackingDict.__getitem__` and `.get()` — `globals().get('x')` is
+tracked and blocked too; `values()`/`items()` record reads of every
+variable). Reads that bypass the namespace mapping entirely (aliases
+created before the variable became uncopyable, `keys()`/name-only
+iteration) are not blocked. Shell lines (`!cmd`) run untracked and emit
+a visible warning that their file/environment effects are outside the
+guarantees.
 
 **Code:**
 

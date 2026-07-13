@@ -147,7 +147,8 @@ class TrackingDict(dict):
     # Core dict protocol - delegate to _real_ns
     # =========================================================================
 
-    def __getitem__(self, key):
+    def _check_blocked(self, key) -> None:
+        """Raise if key is read-blocked as uncopyable (tracking enabled)."""
         if self._tracking_enabled and key in self._blocked_reads:
             # Paper semantics for non-checkpointable objects: warn once and
             # block all subsequent reads (the value cannot be restored on
@@ -159,17 +160,25 @@ class TrackingDict(dict):
                 f"on it cannot be restored or reproduced. Rebind '{key}' to "
                 f"a new value (or delete it) to use the name again."
             )
+
+    def _track_read(self, key, value) -> None:
+        """Record a read of key (in-cell masked) and lazily register pandas
+        objects for column/structural tracking."""
+        if key not in self._writes:
+            self._reads_before_writes.add(key)
+        # Lazy registration: register DataFrames/Series when accessed from
+        # namespace. This eliminates namespace walking at start/stop time.
+        if isinstance(value, pd.DataFrame):
+            self._column_tracker.register_df(value, key)
+            self._structural_tracker.register(value, key)
+        elif isinstance(value, pd.Series):
+            self._structural_tracker.register(value, key)
+
+    def __getitem__(self, key):
+        self._check_blocked(key)
         value = self._real_ns[key]
         if self._tracking_enabled:
-            if key not in self._writes:
-                self._reads_before_writes.add(key)
-            # Lazy registration: register DataFrames/Series when accessed from namespace
-            # This eliminates the need to walk the namespace at start/stop time
-            if isinstance(value, pd.DataFrame):
-                self._column_tracker.register_df(value, key)
-                self._structural_tracker.register(value, key)
-            elif isinstance(value, pd.Series):
-                self._structural_tracker.register(value, key)
+            self._track_read(key, value)
         return value
 
     def __setitem__(self, key, value):
@@ -222,17 +231,44 @@ class TrackingDict(dict):
     # =========================================================================
 
     def keys(self):
+        # Names-only access: reveals which variables exist, not their
+        # values. There is no location type for the namespace key set, so
+        # this is intentionally untracked (documented escape hatch).
         return self._real_ns.keys()
 
+    def _track_all_reads(self) -> None:
+        """Record reads of every user variable (values()/items() reveal all
+        values — the honest read set is 'everything')."""
+        from flowbook.kernel_support.checkpoint import is_valid_variable
+        for key, value in list(self._real_ns.items()):
+            if is_valid_variable(key, value):
+                self._track_read(key, value)
+
     def values(self):
+        if self._tracking_enabled:
+            # Iterating values reads every variable's value (audit:
+            # namespace iteration escaped read tracking).
+            self._track_all_reads()
         return self._real_ns.values()
 
     def items(self):
+        if self._tracking_enabled:
+            # Iterating items reads every variable's value (audit:
+            # namespace iteration escaped read tracking).
+            self._track_all_reads()
         return self._real_ns.items()
 
     def get(self, key, default=None):
-        """Get with default - does NOT track reads (used by IPython internals)."""
-        return self._real_ns.get(key, default)
+        """Get with default — tracked like __getitem__ (audit:
+        globals().get('x') escaped read tracking and the uncopyable
+        read block)."""
+        self._check_blocked(key)
+        if key not in self._real_ns:
+            return default
+        value = self._real_ns[key]
+        if self._tracking_enabled:
+            self._track_read(key, value)
+        return value
 
     def update(self, other=None, **kwargs):
         """Update the namespace. Uses __setitem__ to ensure tracking."""

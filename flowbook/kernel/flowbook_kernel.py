@@ -524,8 +524,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         if self._flowbook_comm is not None:
             try:
                 self._flowbook_comm.send(msg)
-            except Exception:
-                # Comm may be closed; clear reference
+            except Exception as e:
+                # Comm may be closed; clear the reference but say so —
+                # from here on the frontend only gets IOPub updates, and a
+                # silent drop made that impossible to diagnose (audit R1).
+                from flowbook.util.output import log
+                log(f"WARNING: flowbook comm send failed ({e}); dropping "
+                    f"comm — frontend will reconnect on next kernel idle")
                 self._flowbook_comm = None
 
     def _handle_flowbook_message(self, msg: dict) -> None:
@@ -1816,6 +1821,28 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             # Mark clean AFTER propagation (so this cell isn't self-staled)
             state.set_clean(self._cell_id)
 
+        # Shell escape hatch, made visible (audit): `!cmd` lines run
+        # subprocesses whose file/environment effects FlowBook cannot track
+        # or roll back. The cell has no Python-namespace reads/writes, but
+        # its side effects are outside the guarantees — say so instead of
+        # staying silent.
+        has_shell_lines = any(
+            line.strip().startswith("!")
+            for line in code.strip().split("\n")
+        )
+        shell_warnings = (
+            [
+                "Cell runs shell commands (!): their file and environment "
+                "effects are not tracked and are excluded from FlowBook's "
+                "reproducibility guarantees."
+            ]
+            if has_shell_lines
+            else []
+        )
+        if has_shell_lines:
+            from flowbook.util.output import log
+            log(f"[Untracked] {self._cell_id}: {shell_warnings[0]}")
+
         # Send empty metadata to clear any stale metadata from previous executions
         if not silent and self._cell_id:
             empty_metadata = ReproducibilityMetadata(
@@ -1826,11 +1853,16 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 changed_locs=[],
                 stale_cells=self._enforcer.get_stale_cells(),
                 cell_order=self._enforcer.cell_order,
+                structural_warnings=shell_warnings,
                 staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
             )
             self._send_flowbook_message(build_metadata_message(empty_metadata))
             self._send_flowbook_message(
-                build_status_message("✓", "Magic cell", cell_id=self._cell_id or "")
+                build_status_message(
+                    "⚠️" if has_shell_lines else "✓",
+                    "Shell cell (untracked side effects)" if has_shell_lines else "Magic cell",
+                    cell_id=self._cell_id or "",
+                )
             )
 
         return result

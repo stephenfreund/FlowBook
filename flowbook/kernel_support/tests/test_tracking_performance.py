@@ -28,6 +28,12 @@ def benchmark(func: Callable, iterations: int = 100) -> Tuple[float, float]:
     return statistics.mean(times), statistics.stdev(times) if len(times) > 1 else 0
 
 
+# Benchmark results, keyed by test. Pytest tests must return None (a
+# returned value triggers PytestReturnNotNoneWarning and is silently
+# ignored) — the __main__ benchmark runner reads from here instead.
+RESULTS: dict = {}
+
+
 def test_getitem_performance():
     """Benchmark __getitem__ performance."""
     n_ops = 100_000
@@ -77,13 +83,14 @@ def test_getitem_performance():
     print(f"Overhead (enabled):     {track_per_op - reg_per_op:.1f} ns/op ({track_per_op/reg_per_op:.2f}x)")
     print(f"Overhead (disabled):    {track_disabled_per_op - reg_per_op:.1f} ns/op ({track_disabled_per_op/reg_per_op:.2f}x)")
 
-    return {
+    RESULTS['getitem'] = {
         'regular': reg_per_op,
         'tracking_enabled': track_per_op,
         'tracking_disabled': track_disabled_per_op,
         'overhead_enabled': track_per_op / reg_per_op,
         'overhead_disabled': track_disabled_per_op / reg_per_op,
     }
+    assert RESULTS['getitem']['regular'] > 0
 
 
 def test_setitem_performance():
@@ -135,13 +142,14 @@ def test_setitem_performance():
     print(f"Overhead (enabled):     {track_per_op - reg_per_op:.1f} ns/op ({track_per_op/reg_per_op:.2f}x)")
     print(f"Overhead (disabled):    {track_disabled_per_op - reg_per_op:.1f} ns/op ({track_disabled_per_op/reg_per_op:.2f}x)")
 
-    return {
+    RESULTS['setitem'] = {
         'regular': reg_per_op,
         'tracking_enabled': track_per_op,
         'tracking_disabled': track_disabled_per_op,
         'overhead_enabled': track_per_op / reg_per_op,
         'overhead_disabled': track_disabled_per_op / reg_per_op,
     }
+    assert RESULTS['setitem']['regular'] > 0
 
 
 def test_mixed_workload():
@@ -196,11 +204,12 @@ def test_mixed_workload():
     print(f"TrackingDict (enabled): {track_per_op:.1f} ns/op (±{track_std/n_ops:.1f} ns)")
     print(f"Overhead:               {track_per_op - reg_per_op:.1f} ns/op ({track_per_op/reg_per_op:.2f}x)")
 
-    return {
+    RESULTS['mixed'] = {
         'regular': reg_per_op,
         'tracking_enabled': track_per_op,
         'overhead': track_per_op / reg_per_op,
     }
+    assert RESULTS['mixed']['regular'] > 0
 
 
 def test_attribute_access_overhead():
@@ -252,10 +261,13 @@ if __name__ == '__main__':
     print("TrackingDict Performance Benchmark")
     print("=" * 60)
 
-    getitem_results = test_getitem_performance()
-    setitem_results = test_setitem_performance()
-    mixed_results = test_mixed_workload()
+    test_getitem_performance()
+    test_setitem_performance()
+    test_mixed_workload()
     test_attribute_access_overhead()
+    getitem_results = RESULTS['getitem']
+    setitem_results = RESULTS['setitem']
+    mixed_results = RESULTS['mixed']
 
     print("\n" + "=" * 60)
     print("Summary")

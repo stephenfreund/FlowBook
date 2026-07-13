@@ -91,39 +91,6 @@ class TestReproducibilityEnforcerReset:
         assert helper.sdc.seq_counter == 0
 
 
-class TestReproducibilityEnforcerComputeAllStaleCells:
-    """Tests for compute_all_stale_cells method."""
-
-    def test_compute_all_stale_cells_recomputes(self, sdc_helper_with_order):
-        """compute_all_stale_cells recomputes from scratch."""
-        helper = sdc_helper_with_order
-
-        # Create state
-        helper.execute_cell("a", {}, {"x": 1}, writes={"x"})
-        helper.execute_cell("b", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
-
-        # Get current namespace checkpoint with modified x
-        helper.checkpoints.save("current", {"x": 100, "y": 2}, max_size_mb=None)
-        current = helper.checkpoints.saved["current"]
-
-        # Manually mark b as clean to simulate external modification
-        helper.sdc._notebook_state.set_clean("b")
-        # Verify b is now clean but c, d are still NEVER_EXECUTED
-        stale_before = helper.sdc.get_stale_cells()
-        assert "b" not in stale_before
-        assert "c" in stale_before  # Never executed
-        assert "d" in stale_before  # Never executed
-
-        # Recompute should find b stale again (FORWARD_STALE from x)
-        result = helper.sdc.compute_all_stale_cells(current)
-        assert "b" in result  # b is stale because x changed
-        # c and d are also stale (NEVER_EXECUTED)
-        stale_after = helper.sdc.get_stale_cells()
-        assert "b" in stale_after
-        assert "c" in stale_after
-        assert "d" in stale_after
-
-
 class TestHelperFunctions:
     """Tests for ReproducibilityTestHelper convenience methods."""
 

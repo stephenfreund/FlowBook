@@ -639,7 +639,7 @@ class TestMotivatingExample_Healthcare:
         df = self._run_initial_notebook()
 
         # Insert D after C: order becomes [a, b, c, d, e, f]
-        self.helper.sdc._notebook_state.handle_insert("d", 3)
+        # (set_cell_order initializes the new cell as never-executed)
         self.helper.set_cell_order(["a", "b", "c", "d", "e", "f"])
 
         # Run D: df["age"] = (df["age"] - df["age"].mean()) / df["age"].std()
@@ -1201,8 +1201,8 @@ class TestNotebookOperations:
         assert state.is_clean("a")
         assert state.is_clean("c")
 
-        # Insert B between A and C
-        state.handle_insert("b", 1)
+        # Insert B between A and C (via the [Inst-Insert] path)
+        self.helper.set_cell_order(["a", "b", "c"])
 
         # B should be stale (never executed)
         assert not state.is_clean("b"), "Inserted cell should be stale"
@@ -1764,7 +1764,7 @@ class TestWellFormedness:
         self.helper.execute_cell("c", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
 
         state = self.helper.sdc._notebook_state
-        state.handle_insert("b", 1)
+        self.helper.set_cell_order(["a", "b", "c"])
 
         # A and C should still be clean
         assert state.is_clean("a")
