@@ -2,8 +2,8 @@
 Jupyter server API handlers for flowbook commands.
 """
 
+import contextlib
 import json
-import pprint
 import asyncio
 import traceback
 import tornado
@@ -12,10 +12,7 @@ from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
 
 from flowbook.server.registry import CommandRegistry
-from flowbook.server.kernel_manager import (
-    FlowbookKernelClient,
-    KernelConnectionManager,
-)
+from flowbook.server.kernel_manager import KernelConnectionManager
 from flowbook.kernel_discovery import read_discovery, write_discovery
 from flowbook.server.fix_dispatcher import apply_fix
 from flowbook.server.fix_models import (
@@ -36,16 +33,17 @@ from flowbook.server.fix_suggester import (
 from flowbook.util.output import error, log
 
 
-# Global kernel manager instance
-_kernel_manager = None
-
-
 class FlowbookCommandHandler(APIHandler):
     """Handler for flowbook command execution."""
 
-    def initialize(self, registry: CommandRegistry):
-        """Initialize with command registry and kernel manager."""
+    def initialize(
+        self,
+        registry: CommandRegistry,
+        connection_manager: KernelConnectionManager = None,
+    ):
+        """Initialize with command registry and kernel connection manager."""
         self.registry = registry
+        self.connection_manager = connection_manager
 
     @tornado.web.authenticated
     async def post(self):
@@ -75,6 +73,7 @@ class FlowbookCommandHandler(APIHandler):
             command = self.registry.get_command(command_name)
 
             kernel_client = None
+            kernel_lock = None
             if command.requires_kernel:
                 if not kernel_id:
                     self.set_status(400)
@@ -82,13 +81,11 @@ class FlowbookCommandHandler(APIHandler):
                     return
 
                 try:
-                    kernel_manager = self.kernel_manager.get_kernel(kernel_id)
-                    kernel_client = FlowbookKernelClient(kernel_id=kernel_id)
-                    kernel_client.load_connection_info(
-                        kernel_manager.get_connection_info()
-                    )
-                    kernel_client.start_channels()
-                    kernel_client.wait_for_ready(timeout=30)
+                    # Reuse the cached, channel-started client for this kernel
+                    # instead of leaking a new client (and its ZMQ sockets)
+                    # per request.
+                    kernel_client = self.connection_manager.get_kernel_client(kernel_id)
+                    kernel_lock = self.connection_manager.lock_for(kernel_id)
                 except Exception as e:
                     self.set_status(400)
                     self.finish(
@@ -103,19 +100,24 @@ class FlowbookCommandHandler(APIHandler):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    result = loop.run_until_complete(command.process(
-                        notebook_content,
-                        kernel_client=kernel_client,
-                        selected_cell_ids=selected_cell_ids,
-                        **params
-                    ))
+                    # The cached client is shared across requests; serialize
+                    # kernel conversations (ZMQ sockets are not thread-safe).
+                    with kernel_lock if kernel_lock is not None else contextlib.nullcontext():
+                        result = loop.run_until_complete(command.process(
+                            notebook_content,
+                            kernel_client=kernel_client,
+                            selected_cell_ids=selected_cell_ids,
+                            **params
+                        ))
                     return result
                 finally:
                     loop.close()
 
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
-            executor.shutdown(wait=True)
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
+            finally:
+                executor.shutdown(wait=False)
 
             # Serialize ProcessingResult to JSON
             # Use model_dump() to convert Pydantic model to dict, then json.dumps
@@ -633,21 +635,17 @@ def _build_custom_fix_response(
 
 def setup_handlers(web_app):
     """Set up the extension handlers."""
-    global _kernel_manager
-
-    pprint.pprint(web_app.settings)
-
     host_pattern = ".*$"
     base_url = web_app.settings["base_url"]
 
     registry = CommandRegistry()
-    _kernel_manager = KernelConnectionManager(web_app.settings["serverapp"])
+    connection_manager = KernelConnectionManager(web_app.settings["serverapp"])
 
     handlers = [
         (
             url_path_join(base_url, "flowbook", "execute"),
             FlowbookCommandHandler,
-            {"registry": registry},
+            {"registry": registry, "connection_manager": connection_manager},
         ),
         (
             url_path_join(base_url, "flowbook", "list"),
