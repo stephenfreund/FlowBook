@@ -299,5 +299,109 @@ class TestNormalizeNotebook:
         assert result["metadata"] == notebook["metadata"]
 
 
+class TestNormalizeNotebookPreserveIds:
+    """Tests for normalize_notebook(..., preserve_ids=True).
+
+    Used by the HTTP handler in shared-kernel mode, where JupyterLab UUIDs
+    must survive because the kernel/frontend key their state by those IDs.
+    """
+
+    UUID = "3f2b8c1e-9d4a-4b6f-8e21-0a5c7d9e1f23"
+
+    def test_keeps_uuid_ids(self):
+        notebook = {
+            "cells": [
+                {"id": self.UUID, "cell_type": "code", "source": "x = 1"},
+                {"id": "abcd", "cell_type": "code", "source": "y = 2"},
+            ]
+        }
+        result = normalize_notebook(notebook, preserve_ids=True)
+        assert result["cells"][0]["id"] == self.UUID
+        assert result["cells"][1]["id"] == "abcd"
+
+    def test_no_changes_returns_same_object(self):
+        """A notebook with unique string IDs (any format) needs no copy."""
+        notebook = {
+            "cells": [
+                {"id": self.UUID, "cell_type": "code", "source": "x = 1"},
+            ]
+        }
+        result = normalize_notebook(notebook, preserve_ids=True)
+        assert result is notebook
+
+    def test_fills_missing_ids(self):
+        notebook = {
+            "cells": [
+                {"id": self.UUID, "cell_type": "code", "source": "x = 1"},
+                {"cell_type": "code", "source": "y = 2"},
+            ]
+        }
+        result = normalize_notebook(notebook, preserve_ids=True)
+        assert result["cells"][0]["id"] == self.UUID
+        new_id = result["cells"][1]["id"]
+        assert new_id and len(new_id) == 4
+        assert new_id != self.UUID
+
+    def test_fills_empty_ids(self):
+        notebook = {
+            "cells": [
+                {"id": "", "cell_type": "code", "source": "x = 1"},
+            ]
+        }
+        result = normalize_notebook(notebook, preserve_ids=True)
+        assert result["cells"][0]["id"]
+        assert len(result["cells"][0]["id"]) == 4
+
+    def test_duplicate_first_kept_second_regenerated(self):
+        notebook = {
+            "cells": [
+                {"id": self.UUID, "cell_type": "code", "source": "x = 1"},
+                {"id": self.UUID, "cell_type": "code", "source": "y = 2"},
+            ]
+        }
+        result = normalize_notebook(notebook, preserve_ids=True)
+        # First occurrence keeps the ID (kernel state stays attached to it)
+        assert result["cells"][0]["id"] == self.UUID
+        # Second occurrence is regenerated to something unique
+        assert result["cells"][1]["id"] != self.UUID
+        ids = [c["id"] for c in result["cells"]]
+        assert len(ids) == len(set(ids))
+
+    def test_source_normalization_unchanged(self):
+        notebook = {
+            "cells": [
+                {
+                    "id": self.UUID,
+                    "cell_type": "code",
+                    "source": ["line 1\n", "line 2"],
+                },
+            ]
+        }
+        result = normalize_notebook(notebook, preserve_ids=True)
+        assert result["cells"][0]["source"] == "line 1\nline 2"
+        assert result["cells"][0]["id"] == self.UUID
+
+    def test_default_mode_still_replaces_uuids(self):
+        """Without preserve_ids, legacy behavior is unchanged."""
+        notebook = {
+            "cells": [
+                {"id": self.UUID, "cell_type": "code", "source": "x = 1"},
+            ]
+        }
+        result = normalize_notebook(notebook)
+        assert result["cells"][0]["id"] != self.UUID
+        assert len(result["cells"][0]["id"]) == 4
+
+    def test_does_not_mutate_input(self):
+        notebook = {
+            "cells": [
+                {"id": self.UUID, "cell_type": "code", "source": "x = 1"},
+                {"cell_type": "code", "source": "y = 2"},
+            ]
+        }
+        normalize_notebook(notebook, preserve_ids=True)
+        assert "id" not in notebook["cells"][1]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

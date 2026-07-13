@@ -66,9 +66,13 @@ class FlowbookCommandHandler(APIHandler):
                 self.finish(json.dumps({"error": "Missing 'notebook' field"}))
                 return
 
-            # Normalize notebook (add cell IDs if missing, ensure uniqueness)
+            # Normalize notebook (fill in missing/duplicate cell IDs, join
+            # list sources). preserve_ids=True keeps existing unique IDs
+            # (e.g., JupyterLab UUIDs) untouched — in shared-kernel mode the
+            # kernel and frontend already key their state by those IDs, so
+            # rewriting them to 4-char IDs would orphan that state.
             from flowbook.util.cell_ids import normalize_notebook
-            notebook_content = normalize_notebook(notebook_content)
+            notebook_content = normalize_notebook(notebook_content, preserve_ids=True)
 
             command = self.registry.get_command(command_name)
 
@@ -115,7 +119,29 @@ class FlowbookCommandHandler(APIHandler):
 
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
+                # Enforce the command's timeout so a hung kernel cannot hold
+                # the HTTP request forever. Note: on timeout the worker thread
+                # cannot be killed — it keeps running (and keeps holding the
+                # per-kernel lock) until it finishes on its own. That is
+                # intentional: kernel conversations must stay serialized, so
+                # later requests block on the lock rather than interleaving.
+                result = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(executor, run_command),
+                    timeout=command.timeout,
+                )
+            except asyncio.TimeoutError:
+                error(
+                    f"Command '{command_name}' timed out after "
+                    f"{command.timeout}s"
+                )
+                self.set_status(504)
+                self.finish(json.dumps({
+                    "error": (
+                        f"Command '{command_name}' timed out after "
+                        f"{command.timeout} seconds"
+                    )
+                }))
+                return
             finally:
                 executor.shutdown(wait=False)
 
@@ -255,14 +281,41 @@ class KernelDiscoveryHandler(APIHandler):
         # (frontend sends pid=0 and a bare filename)
         pid, connection_file = self._get_kernel_pid(connection_file)
 
-        disc_path = write_discovery(
+        # A pid of 0 means the lookup failed. Writing a discovery file with
+        # pid=0 is worse than useless: read_discovery treats it as stale and
+        # deletes it on first read, silently breaking kernel sharing.
+        if pid <= 0:
+            log(
+                f"Kernel discovery not written for {abs_path}: could not "
+                f"determine kernel PID for connection file {connection_file}"
+            )
+            self.finish(json.dumps({
+                "written": False,
+                "reason": (
+                    f"Could not determine kernel PID for connection file "
+                    f"{connection_file}; refusing to write a discovery file "
+                    f"that would be treated as stale"
+                ),
+            }))
+            return
+
+        written = write_discovery(
             notebook_path=abs_path,
             connection_file=connection_file,
             kernel_name=data.get("kernel_name", "flowbook_kernel"),
             pid=pid,
             started_by="jupyterlab",
         )
-        self.finish(json.dumps({"discovery_file": disc_path}))
+        if written:
+            self.finish(json.dumps({"written": True, "notebook_path": abs_path}))
+        else:
+            self.finish(json.dumps({
+                "written": False,
+                "reason": (
+                    "Discovery write refused (invalid pid or an existing "
+                    "live entry points at a different kernel)"
+                ),
+            }))
 
 
 class SuggestFixHandler(APIHandler):

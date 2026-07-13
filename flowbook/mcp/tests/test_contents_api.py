@@ -230,6 +230,86 @@ class TestPutContentsApi:
         assert result is None
 
 
+class TestPushPending:
+    """A failed PUT must block 'API wins' refreshes until a push succeeds."""
+
+    def _urlopen_router(self, get_notebook, put_fails):
+        """Route urlopen by method: GET returns get_notebook, PUT may raise."""
+        calls = {"GET": 0, "PUT": 0}
+
+        def router(req, timeout=None):
+            method = req.get_method()
+            calls[method] = calls.get(method, 0) + 1
+            if method == "PUT":
+                if put_fails():
+                    raise ConnectionError("refused")
+                resp = MagicMock()
+                resp.read.return_value = b"{}"
+                return resp
+            return _mock_urlopen_response(get_notebook)
+
+        return router, calls
+
+    def test_failed_put_sets_push_pending(self):
+        session = _setup_session_with_api([_make_code_cell("A", "x = 1")])
+        with patch("urllib.request.urlopen", side_effect=ConnectionError("refused")):
+            assert session._put_contents_api() is None
+        assert session._push_pending is True
+
+    def test_successful_put_clears_push_pending(self):
+        session = _setup_session_with_api([_make_code_cell("A", "x = 1")])
+        session._push_pending = True
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"{}"
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            assert session._put_contents_api() is not None
+        assert session._push_pending is False
+
+    def test_refresh_skipped_while_push_pending(self):
+        """Local edits survive: refresh is skipped while the push keeps failing."""
+        session = _setup_session_with_api([_make_code_cell("A", "local edit")])
+        api_notebook = _make_notebook([_make_code_cell("A", "api version")])
+
+        # First PUT fails → pending
+        with patch("urllib.request.urlopen", side_effect=ConnectionError("refused")):
+            session._put_contents_api()
+        assert session._push_pending is True
+
+        # Refresh: retries PUT once (fails again) and skips the pull
+        router, calls = self._urlopen_router(api_notebook, put_fails=lambda: True)
+        session._last_contents_refresh = 0
+        with patch("urllib.request.urlopen", side_effect=router):
+            session._refresh_from_contents_api()
+
+        assert calls["PUT"] == 1  # single retry
+        assert calls["GET"] == 0  # pull skipped
+        assert get_cell_source(session.notebook["cells"][0]) == "local edit"
+        assert session._push_pending is True
+
+    def test_refresh_resumes_after_push_succeeds(self):
+        """Once the retry PUT succeeds, refresh proceeds normally."""
+        session = _setup_session_with_api([_make_code_cell("A", "local edit")])
+        session._push_pending = True
+        api_notebook = _make_notebook([_make_code_cell("A", "api version")])
+
+        router, calls = self._urlopen_router(api_notebook, put_fails=lambda: False)
+        session._last_contents_refresh = 0
+        with patch("urllib.request.urlopen", side_effect=router):
+            session._refresh_from_contents_api()
+
+        assert calls["PUT"] == 1
+        assert calls["GET"] >= 1
+        assert session._push_pending is False
+        # Pull proceeded ("API wins" again now that our push landed)
+        assert get_cell_source(session.notebook["cells"][0]) == "api version"
+
+    def test_reset_clears_push_pending(self):
+        session = _setup_session_with_api([_make_code_cell("A", "x = 1")])
+        session._push_pending = True
+        session._reset_contents_api_state()
+        assert session._push_pending is False
+
+
 class TestSetupContentsApi:
     """Tests for _setup_contents_api."""
 

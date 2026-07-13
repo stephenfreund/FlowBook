@@ -693,8 +693,9 @@ def get_notebook_path(ctx: Context) -> str:
 def checkpoint(ctx: Context) -> str:
     """Create a snapshot of the current notebook state.
 
-    Captures all cell sources so you can restore later if a fix attempt
-    makes things worse. Returns a checkpoint ID to use with restore().
+    Captures all cells (sources AND structure) so you can restore later if
+    a fix attempt makes things worse. Returns a checkpoint ID to use with
+    restore().
     """
     session = _get_session(ctx)
     ckpt_id = session.checkpoint()
@@ -706,8 +707,11 @@ def checkpoint(ctx: Context) -> str:
 def restore(checkpoint_id: str, ctx: Context) -> str:
     """Restore the notebook to a previous checkpoint.
 
-    Reverts cell sources to the snapshot without restarting the kernel.
-    Changed cells are marked stale so they can be re-run incrementally.
+    Reverts both cell sources and notebook structure to the snapshot:
+    cells deleted or merged since the checkpoint are reinserted in their
+    original positions, and cells added since are removed. The kernel is
+    NOT restarted. Changed and reinserted cells are marked stale so they
+    can be re-run incrementally.
 
     Args:
         checkpoint_id: The checkpoint ID returned by checkpoint().

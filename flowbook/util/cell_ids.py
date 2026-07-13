@@ -49,19 +49,28 @@ def is_valid_cell_id(cell_id: str) -> bool:
     return True
 
 
-def normalize_notebook(notebook: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_notebook(
+    notebook: Dict[str, Any], preserve_ids: bool = False
+) -> Dict[str, Any]:
     """
     Normalize a notebook by ensuring all cells have unique 4-character IDs.
 
     This function:
     1. Adds IDs to cells that don't have them
     2. Replaces non-4-character IDs with new 4-character IDs
+       (skipped when preserve_ids=True)
     3. Ensures all IDs are unique (regenerates duplicates)
     4. Converts source from list to string format
     5. Does NOT modify the input notebook (creates a copy if changes needed)
 
     Args:
         notebook: Notebook JSON as dict
+        preserve_ids: When True, keep any existing non-empty unique string ID
+            as-is regardless of length/charset (e.g., JupyterLab UUIDs in
+            shared-kernel mode, where kernel/frontend state is keyed by those
+            IDs). Fresh IDs are assigned only to missing/empty/duplicate ones;
+            for duplicates the first occurrence keeps its ID and later
+            occurrences are regenerated. Source normalization is unchanged.
 
     Returns:
         Normalized notebook (same object if no changes needed, or new dict)
@@ -75,13 +84,17 @@ def normalize_notebook(notebook: Dict[str, Any]) -> Dict[str, Any]:
 
     for cell in notebook.get("cells", []):
         cell_id = cell.get("id")
-        if cell_id is None:
+        if cell_id is None or str(cell_id) == "":
             needs_changes = True
-        elif not is_valid_cell_id(str(cell_id)):
+        elif not preserve_ids and not is_valid_cell_id(str(cell_id)):
             # Invalid ID format - needs replacement
             needs_changes = True
         elif cell_id in existing_ids:
-            duplicate_ids.add(cell_id)
+            if not preserve_ids:
+                # Replace ALL occurrences of a duplicated ID
+                duplicate_ids.add(cell_id)
+            # preserve_ids: first occurrence keeps its ID; later ones are
+            # regenerated via the existing_ids check in the second pass
             needs_changes = True
         else:
             existing_ids.add(cell_id)
@@ -110,13 +123,15 @@ def normalize_notebook(notebook: Dict[str, Any]) -> Dict[str, Any]:
         cell_id = cell.get("id")
 
         # Replace if:
-        # - No ID
-        # - Invalid ID format
-        # - Duplicate ID
+        # - No ID (or empty)
+        # - Invalid ID format (unless preserve_ids)
+        # - Duplicate ID (all occurrences by default; later occurrences
+        #   only when preserve_ids)
         # - Already seen in this pass
         needs_new_id = (
             cell_id is None or
-            not is_valid_cell_id(str(cell_id)) or
+            str(cell_id) == "" or
+            (not preserve_ids and not is_valid_cell_id(str(cell_id))) or
             cell_id in duplicate_ids or
             cell_id in existing_ids
         )

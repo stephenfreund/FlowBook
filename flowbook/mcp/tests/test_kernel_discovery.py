@@ -145,6 +145,140 @@ class TestStalenessValidation:
         assert result is None
 
 
+class TestWriteRefusal:
+    """write_discovery must refuse writes that would break sharing."""
+
+    def test_refuses_pid_zero(self, notebook_path, dummy_connection_file):
+        result = write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", 0, "jupyterlab"
+        )
+        assert result is False
+        assert not os.path.exists(_discovery_path(notebook_path))
+
+    def test_refuses_negative_pid(self, notebook_path, dummy_connection_file):
+        result = write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", -1, "mcp"
+        )
+        assert result is False
+        assert not os.path.exists(_discovery_path(notebook_path))
+
+    def test_returns_true_on_success(self, notebook_path, dummy_connection_file):
+        result = write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", os.getpid(), "mcp"
+        )
+        assert result is True
+        assert read_discovery(notebook_path) is not None
+
+
+class TestNoClobber:
+    """A live entry for a DIFFERENT kernel must not be overwritten."""
+
+    def _second_connection_file(self, tmp_path):
+        conn = tmp_path / "kernel-other456.json"
+        conn.write_text(json.dumps({"transport": "tcp", "ip": "127.0.0.1"}))
+        return str(conn)
+
+    def test_live_different_kernel_not_clobbered(
+        self, notebook_path, dummy_connection_file, tmp_path, monkeypatch
+    ):
+        other_conn = self._second_connection_file(tmp_path)
+        # Treat the entry's pid as alive regardless of its actual value
+        monkeypatch.setattr(
+            "flowbook.kernel_discovery._is_pid_alive", lambda pid: True
+        )
+        assert write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", 12345, "mcp"
+        ) is True
+
+        # Attempt to clobber with a different connection file → refused
+        result = write_discovery(
+            notebook_path, other_conn, "flowbook_kernel", 67890, "jupyterlab"
+        )
+        assert result is False
+
+        disc = read_discovery(notebook_path)
+        assert disc is not None
+        assert disc["connection_file"] == dummy_connection_file
+        assert disc["started_by"] == "mcp"
+
+    def test_same_connection_file_overwrites(
+        self, notebook_path, dummy_connection_file, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "flowbook.kernel_discovery._is_pid_alive", lambda pid: True
+        )
+        assert write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", 12345, "mcp"
+        ) is True
+        # Restart/refresh: same connection file, new writer → allowed
+        assert write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", 12346, "jupyterlab"
+        ) is True
+        disc = read_discovery(notebook_path)
+        assert disc["started_by"] == "jupyterlab"
+        assert disc["pid"] == 12346
+
+    def test_dead_entry_overwritten(
+        self, notebook_path, dummy_connection_file, tmp_path, monkeypatch
+    ):
+        other_conn = self._second_connection_file(tmp_path)
+        monkeypatch.setattr(
+            "flowbook.kernel_discovery._is_pid_alive", lambda pid: False
+        )
+        assert write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", 12345, "mcp"
+        ) is True
+        # Existing entry's pid is dead → overwrite allowed even with a
+        # different connection file
+        assert write_discovery(
+            notebook_path, other_conn, "flowbook_kernel", 67890, "jupyterlab"
+        ) is True
+
+        # Read back raw (read_discovery would reject the dead pid)
+        with open(_discovery_path(notebook_path)) as f:
+            disc = json.load(f)
+        assert disc["connection_file"] == other_conn
+
+    def test_corrupt_existing_file_overwritten(
+        self, notebook_path, dummy_connection_file
+    ):
+        path = _discovery_path(notebook_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("not valid json{{{")
+        assert write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", os.getpid(), "mcp"
+        ) is True
+        assert read_discovery(notebook_path)["pid"] == os.getpid()
+
+
+class TestAtomicWrite:
+    def test_no_temp_files_left_behind(self, notebook_path, dummy_connection_file):
+        path = _discovery_path(notebook_path)
+        runtime_dir = os.path.dirname(path)
+        basename = os.path.basename(path)
+        before = {
+            f for f in os.listdir(runtime_dir) if f.startswith(basename)
+        } if os.path.isdir(runtime_dir) else set()
+
+        assert write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", os.getpid(), "mcp"
+        ) is True
+
+        after = {f for f in os.listdir(runtime_dir) if f.startswith(basename)}
+        # Only the discovery file itself — no leftover tempfiles
+        assert after - before <= {basename}
+        assert basename in after
+
+    def test_written_file_is_complete_json(self, notebook_path, dummy_connection_file):
+        write_discovery(
+            notebook_path, dummy_connection_file, "flowbook_kernel", os.getpid(), "mcp"
+        )
+        with open(_discovery_path(notebook_path)) as f:
+            doc = json.load(f)  # would raise if partially written
+        assert doc["pid"] == os.getpid()
+
+
 class TestIsPidAlive:
     def test_current_pid(self):
         assert _is_pid_alive(os.getpid()) is True

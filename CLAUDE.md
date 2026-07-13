@@ -383,9 +383,9 @@ All notebooks entering the system (via CLI or server) are automatically normaliz
 
 This normalization happens transparently at entry points:
 
-- **CLI**: `load_notebook()` in `flowbook/cli/helpers.py`
-- **Server**: `FlowbookCommandHandler.post()` in `flowbook/server/handlers.py`
-- **Core function**: `normalize_notebook()` in `flowbook/util/cell_ids.py`
+- **CLI**: `load_notebook()` in `flowbook/cli/helpers.py` — full normalization (non-4-char IDs replaced)
+- **Server**: `FlowbookCommandHandler.post()` in `flowbook/server/handlers.py` — calls `normalize_notebook(..., preserve_ids=True)`: existing non-empty unique IDs (including JupyterLab UUIDs) are kept as-is, and fresh IDs are assigned only to missing/empty/duplicate ones. This keeps shared-kernel mode working, where the kernel and frontend already key state by those IDs.
+- **Core function**: `normalize_notebook()` in `flowbook/util/cell_ids.py` (accepts `preserve_ids: bool = False`)
 
 ### Why 4-character IDs?
 

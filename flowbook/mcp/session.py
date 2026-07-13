@@ -228,6 +228,7 @@ class NotebookSession:
         self._session_start: float = time.time()
         self._last_known_api_sources: Dict[str, str] = {}  # cell_id -> source from last API refresh
         self._conflict_warnings: List[str] = []  # populated by _put_contents_api
+        self._push_pending: bool = False  # a Contents API PUT failed; retry before refreshing
 
     @property
     def is_loaded(self) -> bool:
@@ -400,6 +401,7 @@ class NotebookSession:
         self._jupyter_contents_path = None
         self._last_contents_refresh = 0
         self._last_known_api_sources = {}
+        self._push_pending = False
 
     def _setup_contents_api(self, notebook_abs_path: str) -> str:
         """Configure Contents API for reading live notebook state from JupyterLab.
@@ -520,6 +522,19 @@ class NotebookSession:
         if now - self._last_contents_refresh < 0.2:
             return
         self._last_contents_refresh = now
+
+        # If a previous PUT failed, our local edits never reached the API.
+        # Refreshing now would be "API wins" and silently revert them. Retry
+        # the push once; if it still fails, skip the refresh so local edits
+        # survive until a push succeeds.
+        if self._push_pending:
+            self._put_contents_api()
+            if self._push_pending:
+                logger.debug(
+                    "Skipping Contents API refresh: a pending local push "
+                    "has not yet succeeded"
+                )
+                return
 
         api_notebook = self._fetch_contents_api()
         if not api_notebook:
@@ -1162,8 +1177,13 @@ class NotebookSession:
                 headers["Authorization"] = f"token {self._jupyter_token}"
             req = urllib.request.Request(url, data=body, headers=headers, method="PUT")
             urllib.request.urlopen(req, timeout=10)
+            self._push_pending = False
             return self.notebook_path
         except Exception as e:
+            # Remember the failure: _refresh_from_contents_api must not pull
+            # ("API wins") until a push succeeds, or the unsent local edits
+            # would be silently reverted.
+            self._push_pending = True
             logger.debug(f"Contents API PUT failed: {e}")
             return None
 
@@ -1255,52 +1275,95 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def checkpoint(self) -> str:
-        """Snapshot current notebook cell sources. Returns checkpoint_id."""
+        """Snapshot the full notebook cell list. Returns checkpoint_id.
+
+        Deep-copies notebook["cells"] so restore() can undo structural
+        changes (deleted/merged/inserted/reordered cells), not just source
+        edits.
+        """
         self._require_loaded()
         ckpt_id = f"ckpt_{uuid.uuid4().hex[:8]}"
-        cell_sources = {}
-        for cell in self.notebook["cells"]:
-            cell_sources[cell.get("id", "")] = get_cell_source(cell)
-
         self._checkpoints[ckpt_id] = {
             "timestamp": time.time(),
-            "cell_sources": cell_sources,
-            "cell_order": [c.get("id", "") for c in self.notebook["cells"]],
+            "cells": copy.deepcopy(self.notebook["cells"]),
         }
         return ckpt_id
 
     def restore(self, checkpoint_id: str) -> Dict[str, Any]:
-        """Restore notebook cell sources to a checkpoint.
+        """Restore the notebook (sources AND structure) to a checkpoint.
 
-        Does NOT restart the kernel. Changed cells are marked stale so
-        they can be re-run incrementally via run_until_clean() or manually.
+        Replaces notebook["cells"] wholesale with a deep copy of the
+        snapshot, so cells deleted or merged since the checkpoint come back
+        and cells added since are removed.
+
+        Does NOT restart the kernel. Changed and reinserted cells are marked
+        stale so they can be re-run incrementally via run_until_clean() or
+        manually.
         """
         self._require_loaded()
         if checkpoint_id not in self._checkpoints:
             raise ValueError(f"Unknown checkpoint: {checkpoint_id}")
 
         ckpt = self._checkpoints[checkpoint_id]
-        cell_sources = ckpt["cell_sources"]
+        snapshot_cells = copy.deepcopy(ckpt["cells"])
 
-        # Restore cell sources and mark changed cells as stale
-        changed_cells = []
-        for cell in self.notebook["cells"]:
-            cid = cell.get("id", "")
-            if cid in cell_sources:
-                old = get_cell_source(cell)
-                if old != cell_sources[cid]:
-                    set_cell_source(cell, cell_sources[cid])
+        # Diff snapshot against the current notebook.
+        current_by_id = {
+            c.get("id", ""): c for c in self.notebook["cells"]
+        }
+        snapshot_ids = {c.get("id", "") for c in snapshot_cells}
+        changed_cells = []      # present in both, source differs
+        reinserted_cells = []   # in snapshot but deleted since the checkpoint
+        for snap_cell in snapshot_cells:
+            cid = snap_cell.get("id", "")
+            if cid in current_by_id:
+                if get_cell_source(current_by_id[cid]) != get_cell_source(snap_cell):
                     changed_cells.append(cid)
-                    # Mark as stale and notify kernel
-                    self._mark_cell_edited(cid)
-                    # Clear old violation metadata for changed cells
-                    self.cell_flowbook_meta.pop(cid, None)
-                    self.cell_status.pop(cid, None)
+            else:
+                reinserted_cells.append(cid)
+        # Cells added since the checkpoint disappear on restore.
+        removed_cells = [
+            cid for cid in current_by_id if cid not in snapshot_ids
+        ]
 
+        # Replace structure wholesale.
+        self.notebook["cells"] = snapshot_cells
+
+        # Best-effort: tell the kernel the restored cell order.
+        if self.kernel_client:
+            try:
+                self._notify_structure()
+            except Exception as e:
+                logger.debug(f"restore: notify_structure failed: {e}")
+
+        # Changed and reinserted cells go through the same edited-cell path:
+        # mark stale (kernel [Inst-Edit] if previously executed) and drop
+        # stale flowbook bookkeeping.
+        for cid in changed_cells + reinserted_cells:
+            self._mark_cell_edited(cid)
+            self.cell_flowbook_meta.pop(cid, None)
+            self.cell_status.pop(cid, None)
+
+        # Cells removed by the restore: clean up their bookkeeping entirely.
+        for cid in removed_cells:
+            self.executed_cells.discard(cid)
+            self.cell_flowbook_meta.pop(cid, None)
+            self.cell_status.pop(cid, None)
+            self._stale_cells.discard(cid)
+
+        # Best-effort: push the restored notebook to JupyterLab.
+        try:
+            self._put_contents_api()
+        except Exception as e:
+            logger.debug(f"restore: Contents API push failed: {e}")
+
+        restored = changed_cells + reinserted_cells
         return {
             "checkpoint_id": checkpoint_id,
-            "cells_restored": len(changed_cells),
-            "changed_cells": changed_cells,
+            "cells_restored": len(restored),
+            "changed_cells": restored,
+            "cells_reinserted": reinserted_cells,
+            "cells_removed": removed_cells,
         }
 
     def list_checkpoints(self) -> List[Dict[str, Any]]:
@@ -1310,7 +1373,7 @@ class NotebookSession:
             result.append({
                 "checkpoint_id": ckpt_id,
                 "timestamp": ckpt["timestamp"],
-                "cell_count": len(ckpt["cell_sources"]),
+                "cell_count": len(ckpt["cells"]),
             })
         return result
 
