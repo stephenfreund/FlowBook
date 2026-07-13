@@ -65,9 +65,16 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
     };
 
     // Initial visibility update when session is ready
-    panel.sessionContext.ready.then(() => {
-      updateButtonVisibility();
-    });
+    panel.sessionContext.ready
+      .then(() => {
+        updateButtonVisibility();
+      })
+      .catch(err => {
+        console.warn(
+          'FlowBook toolbar: session failed to initialize; leaving button hidden',
+          err
+        );
+      });
 
     // Listen for kernel changes
     panel.sessionContext.kernelChanged.connect(() => {

@@ -7,6 +7,8 @@ import {
   JupyterFrontEndPlugin
 } from '@jupyterlab/application';
 import { INotebookTracker, NotebookPanel } from '@jupyterlab/notebook';
+import { ICodeCellModel } from '@jupyterlab/cells';
+import { IOutput } from '@jupyterlab/nbformat';
 
 import { KernelDetector } from '../shared/kerneldetection';
 import { ReproducibilityMetadataPanel } from './metadatapanel';
@@ -15,98 +17,11 @@ import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { FixSuggester } from './fixsuggester';
 import { CellIndexManager } from '../cellindex';
-import { IReproducibilityMetadata } from './types';
+import { asFlowbookOutput } from './types';
 import { FlowbookToolbarExtension } from './toolbar';
 import { getCodeCellOrder } from '../cellindexutils';
 import { requestAPI } from '../handler';
 import { registerBridgeCommands, setBridgeContext } from './nbibridge';
-
-/**
- * Register the flowbook:exec-restore command at plugin startup.
- *
- * The command is registered once, but its isEnabled check gates on:
- * 1. Current kernel is flowbook_kernel
- * 2. Active cell has a no_read_before_write error in flowbook.errors
- *
- * The context menu item is defined declaratively in schema/plugin.json.
- */
-function registerExecRestoreCommand(
-  app: JupyterFrontEnd,
-  tracker: INotebookTracker,
-  kernelDetector: KernelDetector
-): void {
-  const commandId = 'flowbook:exec-restore';
-
-  app.commands.addCommand(commandId, {
-    label: 'Run with upstream state',
-    isEnabled: () => {
-      try {
-        const panel = tracker.currentWidget;
-        if (!panel) {
-          return false;
-        }
-        // Gate on flowbook_kernel
-        if (!kernelDetector.isFlowbookKernel(panel)) {
-          return false;
-        }
-        const activeCell = panel.content.activeCell;
-        if (!activeCell || activeCell.model.type !== 'code') {
-          return false;
-        }
-        const flowbookMeta = activeCell.model.getMetadata('flowbook') as
-          | IReproducibilityMetadata
-          | undefined;
-        const errors = flowbookMeta?.errors;
-        return (
-          errors !== undefined &&
-          errors.some(e => e.error_type === 'no_read_before_write')
-        );
-      } catch (e) {
-        console.error('FlowBook exec-restore isEnabled error:', e);
-        return false;
-      }
-    },
-    isVisible: () => {
-      try {
-        const panel = tracker.currentWidget;
-        if (!panel) {
-          return false;
-        }
-        return kernelDetector.isFlowbookKernel(panel);
-      } catch {
-        return false;
-      }
-    },
-    execute: async () => {
-      const panel = tracker.currentWidget;
-      if (!panel) {
-        return;
-      }
-      const activeCell = panel.content.activeCell;
-      if (!activeCell || activeCell.model.type !== 'code') {
-        return;
-      }
-      const cellId = activeCell.model.id;
-      const session = panel.sessionContext.session;
-      if (!session || !session.kernel) {
-        return;
-      }
-
-      // Send exec_restore via protocol (deprecated — kernel shows error message).
-      const future = session.kernel.requestExecute({
-        code: `%exec_restore ${cellId}`,
-        silent: true,
-        store_history: false
-      });
-      await future.done;
-
-      // Now trigger cell execution via the standard notebook command.
-      // The right-click context menu already makes the cell active,
-      // so notebook:run-cell targets the correct cell.
-      await app.commands.execute('notebook:run-cell');
-    }
-  });
-}
 
 /**
  * Track activation state per notebook
@@ -352,6 +267,11 @@ class FlowbookActivationManager {
       this._teardownNotebook(panel);
     });
 
+    // Remove FlowBook notice outputs persisted by a previous session
+    // (saved while stale/violating). Live notices are regenerated from
+    // kernel state, so stale ones from disk would be wrong anyway.
+    this._stripPersistedNotices(panel);
+
     // Start cell index overlays
     this._cellIndexManager.startMonitoring(path, panel);
 
@@ -360,6 +280,47 @@ class FlowbookActivationManager {
 
     // Write kernel discovery file so MCP can find this kernel
     this._writeKernelDiscovery(panel);
+  }
+
+  /**
+   * Strip persisted FlowBook notice outputs (staleness, violation and
+   * AI-fix notices) from all code cells. These display_data outputs are
+   * meant to be transient UI, but they end up in the .ipynb when the user
+   * saves while a notice is showing — polluting the file when opened
+   * elsewhere. Cleaning on setup means live notices (regenerated from
+   * kernel state) are the only ones ever shown.
+   */
+  private _stripPersistedNotices(panel: NotebookPanel): void {
+    const noticeKeys = [
+      'flowbook_staleness_notice',
+      'flowbook_violation_notice',
+      'flowbook_ai_fix_notice'
+    ];
+    const model = panel.model;
+    if (!model) {
+      return;
+    }
+    for (let i = 0; i < model.cells.length; i++) {
+      const cellModel = model.cells.get(i);
+      if (cellModel.type !== 'code') {
+        continue;
+      }
+      const outputs = (cellModel as ICodeCellModel).outputs;
+      const surviving: IOutput[] = [];
+      let removed = false;
+      for (let j = 0; j < outputs.length; j++) {
+        const out = outputs.get(j).toJSON() as IOutput;
+        const meta = asFlowbookOutput(out).metadata;
+        if (meta && noticeKeys.some(key => meta[key] === true)) {
+          removed = true;
+        } else {
+          surviving.push(out);
+        }
+      }
+      if (removed) {
+        outputs.fromJSON(surviving);
+      }
+    }
   }
 
   /**
@@ -528,13 +489,7 @@ export const flowbookPlugin: JupyterFrontEndPlugin<void> = {
   autoStart: true,
   requires: [INotebookTracker],
   activate: (app: JupyterFrontEnd, tracker: INotebookTracker) => {
-    // Expose app for console testing (e.g., app.commands.execute('flowbook:get-status'))
-    (window as any).app = app;
-
     const kernelDetector = new KernelDetector(tracker);
-
-    // Register exec-restore command at startup (context menu item in schema)
-    registerExecRestoreCommand(app, tracker, kernelDetector);
 
     // Register NBI bridge commands (callable via run_ui_command from NBI extension)
     registerBridgeCommands(app, tracker, kernelDetector);

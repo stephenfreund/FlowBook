@@ -88,11 +88,6 @@ export interface ISyncMessage {
   type: 'sync';
 }
 
-export interface IExecRestoreMessage {
-  type: 'exec_restore';
-  cell_id: string;
-}
-
 /**
  * Discriminated union of all client -> kernel messages.
  */
@@ -100,5 +95,4 @@ export type FlowbookClientMessage =
   | INotebookStructureMessage
   | ICellEditedMessage
   | IContinueAfterViolationMessage
-  | ISyncMessage
-  | IExecRestoreMessage;
+  | ISyncMessage;

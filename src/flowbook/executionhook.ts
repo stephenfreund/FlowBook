@@ -27,6 +27,7 @@ import {
   formatReadLoc,
   writeConflictsRead
 } from './types';
+import { backendReasonToFrontend } from './reasonformat';
 import {
   COMM_TARGET,
   FlowbookKernelMessage,
@@ -77,6 +78,14 @@ export class ReproducibilityExecutionHookManager {
   // Pending violations received via comm before _onCellExecuted fires.
   // _onCellExecuted picks these up and stores them on the cell.
   private _pendingViolations: IPredicateViolation[] = [];
+
+  // Commands issued while no comm channel exists (e.g. between a kernel
+  // 'restarting' status and the idle reconnect). Flushed in order as soon
+  // as the comm is (re)opened. Bounded: on overflow the oldest entry is
+  // dropped so a dead kernel can't grow the queue without limit.
+  private _pendingCommands: FlowbookClientMessage[] = [];
+  private _pendingOverflowWarned = false;
+  private static readonly _MAX_PENDING_COMMANDS = 100;
 
   constructor(
     tracker: INotebookTracker,
@@ -137,9 +146,10 @@ export class ReproducibilityExecutionHookManager {
     }
     this._cellEditHandlers.clear();
 
-    // Flush (not drop) pending edit notifications: an edit made just before
-    // deactivation must still reach the kernel, or it will keep treating the
-    // old source as CLEAN.
+    // Flush (not drop) buffered commands and pending edit notifications if
+    // a comm still exists: an edit made just before deactivation must still
+    // reach the kernel, or it will keep treating the old source as CLEAN.
+    this._flushPendingCommands();
     for (const [cellId, pending] of this._editTimers) {
       clearTimeout(pending.timer);
       if (this._comm) {
@@ -155,16 +165,46 @@ export class ReproducibilityExecutionHookManager {
 
   /**
    * Send a FlowBook protocol command to the kernel via the comm channel.
-   * Used by plugin.ts for sync, exec-restore, etc.
+   * Used by plugin.ts for initial sync, structure updates, etc.
+   *
+   * When no comm exists (e.g. during a kernel restart window) the message
+   * is buffered and flushed in order once the comm is re-opened.
    */
   sendCommand(msg: FlowbookClientMessage): void {
     if (this._comm) {
       this._comm.send(msg as any);
-    } else {
-      console.warn(
-        'ReproducibilityExecutionHook: No comm channel, cannot send command:',
-        msg
-      );
+      return;
+    }
+    if (
+      this._pendingCommands.length >=
+      ReproducibilityExecutionHookManager._MAX_PENDING_COMMANDS
+    ) {
+      this._pendingCommands.shift();
+      if (!this._pendingOverflowWarned) {
+        this._pendingOverflowWarned = true;
+        console.warn(
+          'ReproducibilityExecutionHook: pending command queue overflow — dropping oldest commands until the comm reconnects'
+        );
+      }
+    }
+    this._pendingCommands.push(msg);
+  }
+
+  /**
+   * Flush any commands buffered while the comm was down. Called right
+   * after the comm is (re)opened.
+   */
+  private _flushPendingCommands(): void {
+    if (!this._comm || this._pendingCommands.length === 0) {
+      this._pendingCommands = [];
+      this._pendingOverflowWarned = false;
+      return;
+    }
+    const queued = this._pendingCommands;
+    this._pendingCommands = [];
+    this._pendingOverflowWarned = false;
+    for (const msg of queued) {
+      this._comm.send(msg as any);
     }
   }
 
@@ -421,6 +461,10 @@ export class ReproducibilityExecutionHookManager {
     };
     this._comm = comm;
     comm.open();
+
+    // Deliver, in order, any commands issued while the comm was down
+    // (e.g. during a kernel restart window).
+    this._flushPendingCommands();
   }
 
   /**
@@ -464,8 +508,9 @@ export class ReproducibilityExecutionHookManager {
 
     switch (data.type) {
       case 'metadata': {
-        // Strip the "type" field to get IReproducibilityMetadata
-        const { type: _type, ...metadata } = data;
+        // Strip the "type" discriminator to get IReproducibilityMetadata
+        const metadata: Record<string, unknown> = { ...data };
+        delete metadata.type;
         const reproMeta = metadata as unknown as IReproducibilityMetadata;
 
         // Store metadata on the relevant cell
@@ -532,7 +577,9 @@ export class ReproducibilityExecutionHookManager {
       }
 
       case 'violation': {
-        const { type: _type, ...violation } = data;
+        // Strip the "type" discriminator to get IPredicateViolation
+        const violation: Record<string, unknown> = { ...data };
+        delete violation.type;
         const pv = violation as unknown as IPredicateViolation;
         // Buffer violation — the metadata message (which follows) carries
         // the canonical errors in flowbook.errors and triggers updateCell.
@@ -695,7 +742,11 @@ export class ReproducibilityExecutionHookManager {
 
         if (backendReasons && backendReasons.length > 0) {
           // Use backend reason - convert to frontend format for cell metadata
-          reason = this._backendReasonToFrontend(backendReasons[0], cellOrder);
+          reason = backendReasonToFrontend(
+            backendReasons[0],
+            cellOrder,
+            staleCellId
+          );
         } else {
           // Fall back to local computation
           reason = this._computeStalenessReason(
@@ -731,133 +782,6 @@ export class ReproducibilityExecutionHookManager {
 
     // Update staleness manager (triggers signal → CellHighlighter)
     stalenessManager.updateFromMetadata(metadata);
-  }
-
-  /**
-   * Convert a backend staleness reason to frontend format.
-   * Maps backend reason types to frontend types with human-readable messages.
-   */
-  private _backendReasonToFrontend(
-    backendReason: {
-      type: string;
-      loc?: string;
-      cell_id?: string;
-    },
-    cellOrder: string[]
-  ): IFrontendStalenessReason {
-    const cellId = backendReason.cell_id;
-    const loc = backendReason.loc;
-
-    let causingRef = '';
-    if (cellId) {
-      const causingIdx = cellOrder.indexOf(cellId);
-      causingRef = causingIdx >= 0 ? indexToAlpha(causingIdx) : cellId;
-    }
-
-    switch (backendReason.type) {
-      case 'never_executed':
-        return {
-          type: 'unknown', // Use 'unknown' for non-variable-specific reasons
-          message: 'Cell has never been executed'
-        };
-      case 'code_changed':
-        return {
-          type: 'source_edited',
-          message: 'Source code was edited'
-        };
-      case 'forward_stale':
-        // ForwardStale: show "x modified by @F"
-        if (loc && causingRef) {
-          return {
-            type: 'variable_modified',
-            causing_cell: cellId,
-            variables: [loc],
-            message: `\`${loc}\` was modified by ${causingRef}`
-          };
-        }
-        return {
-          type: 'variable_modified',
-          causing_cell: cellId,
-          message: causingRef
-            ? `Input modified by ${causingRef}`
-            : 'Input was modified'
-        };
-      case 'write_overlap':
-        // Write overlap: cell writes to location that earlier cell also writes
-        if (loc && causingRef) {
-          return {
-            type: 'writer_conflict',
-            causing_cell: cellId,
-            variables: [loc],
-            message: `Write overlap: \`${loc}\` also written by ${causingRef}`
-          };
-        }
-        return {
-          type: 'writer_conflict',
-          causing_cell: cellId,
-          message: causingRef
-            ? `Write overlap with ${causingRef}`
-            : 'Write overlap detected'
-        };
-      case 'backward_stale':
-        if (loc && causingRef) {
-          return {
-            type: 'writer_conflict',
-            causing_cell: cellId,
-            variables: [loc],
-            message: `Write conflict on \`${loc}\` with ${causingRef}`
-          };
-        }
-        return {
-          type: 'writer_conflict',
-          causing_cell: cellId,
-          message: 'Write conflict detected'
-        };
-      case 'no_read_before_write':
-        // NoReadBeforeWrite failed - reads from later cell (forward contamination)
-        if (loc && causingRef) {
-          return {
-            type: 'unknown',
-            causing_cell: cellId,
-            message: `Reads \`${loc}\` from later cell ${causingRef} (forward contamination)`
-          };
-        }
-        return {
-          type: 'unknown',
-          causing_cell: cellId,
-          message: 'Reads from a later cell'
-        };
-      case 'order_changed':
-        return {
-          type: 'unknown',
-          message: 'Cell order changed'
-        };
-      case 'no_write_after_read':
-        // NoWriteAfterRead failed - wrote to location read by earlier cell (backward mutation)
-        if (loc && causingRef) {
-          return {
-            type: 'variable_modified',
-            causing_cell: cellId,
-            variables: [loc],
-            message: `Wrote \`${loc}\` read by earlier cell ${causingRef} (backward mutation)`
-          };
-        }
-        return {
-          type: 'unknown',
-          causing_cell: cellId,
-          message: causingRef
-            ? `Wrote to variable read by ${causingRef}`
-            : 'Backward mutation detected'
-        };
-      default:
-        return {
-          type: 'unknown',
-          causing_cell: cellId,
-          message: causingRef
-            ? `Dependencies changed by ${causingRef}`
-            : 'Cell is stale'
-        };
-    }
   }
 
   /**
