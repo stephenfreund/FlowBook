@@ -17,6 +17,7 @@ export class StalenessManager {
   private _stalenessReasons = new Map<string, IStalenessReason[]>();
   private _stalenessChanged = new Signal<this, IStalenessChange>(this);
   private _notebook: NotebookPanel;
+  private _isDisposed = false;
 
   constructor(notebook: NotebookPanel) {
     this._notebook = notebook;
@@ -164,15 +165,34 @@ export class StalenessManager {
    * Listen for kernel restart to clear staleness
    */
   private _setupKernelRestartListener(): void {
-    this._notebook.sessionContext.statusChanged.connect((_, status) => {
-      if (status === 'restarting' || status === 'autorestarting') {
-        this.clear();
-      }
-    });
+    this._notebook.sessionContext.statusChanged.connect(
+      this._onStatusChanged,
+      this
+    );
+  }
+
+  private _onStatusChanged(_sender: unknown, status: string): void {
+    if (this._isDisposed) {
+      return;
+    }
+    if (status === 'restarting' || status === 'autorestarting') {
+      this.clear();
+    }
   }
 
   dispose(): void {
+    if (this._isDisposed) {
+      return;
+    }
+    this._isDisposed = true;
+    if (!this._notebook.isDisposed) {
+      this._notebook.sessionContext.statusChanged.disconnect(
+        this._onStatusChanged,
+        this
+      );
+    }
     this._staleCells.clear();
     this._stalenessReasons.clear();
+    Signal.clearData(this);
   }
 }

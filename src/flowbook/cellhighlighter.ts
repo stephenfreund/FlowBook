@@ -42,6 +42,17 @@ export class ReproducibilityCellHighlighter {
   private _pendingRestartUpdate = new Set<string>();
   private _executedInSession = new Map<string, Set<string>>();
   private _monitoredNotebooks = new Set<string>();
+  // Monitor listeners per notebook path, kept so dispose() can disconnect
+  // them — previously anonymous closures were connected and leaked, firing
+  // on non-flowbook notebooks after every kernel switch away and back.
+  private _monitorHandlers = new Map<
+    string,
+    {
+      panel: NotebookPanel;
+      onCellsChanged: () => void;
+      onStatusChanged: (sender: unknown, status: string) => void;
+    }
+  >();
   private _stalenessNotice = new StalenessNoticeManager();
   private _violationNotice = new ViolationNoticeManager();
   private _fixSuggester: IFixSuggesterProbe | null = null;
@@ -102,6 +113,9 @@ export class ReproducibilityCellHighlighter {
       this._stalenessManagers.set(path, manager);
 
       manager.stalenessChanged.connect(() => {
+        if (this._isDisposed || notebook.isDisposed) {
+          return;
+        }
         this._updateAllCells(notebook);
       });
 
@@ -109,6 +123,7 @@ export class ReproducibilityCellHighlighter {
         manager?.dispose();
         this._stalenessManagers.delete(path);
         this._monitoredNotebooks.delete(path);
+        this._monitorHandlers.delete(path);
       });
     }
 
@@ -228,6 +243,20 @@ export class ReproducibilityCellHighlighter {
     this._tracker.activeCellChanged.disconnect(this._onActiveCellChanged, this);
     NotebookActions.executed.disconnect(this._onExecuted, this);
 
+    // Disconnect per-notebook monitor listeners (cells.changed and
+    // statusChanged) so a disposed highlighter stops reacting entirely.
+    for (const {
+      panel,
+      onCellsChanged,
+      onStatusChanged
+    } of this._monitorHandlers.values()) {
+      if (!panel.isDisposed) {
+        panel.content.model?.cells.changed.disconnect(onCellsChanged);
+        panel.sessionContext.statusChanged.disconnect(onStatusChanged);
+      }
+    }
+    this._monitorHandlers.clear();
+
     if (this._depPanelFrameId !== null) {
       cancelAnimationFrame(this._depPanelFrameId);
     }
@@ -323,13 +352,20 @@ export class ReproducibilityCellHighlighter {
     this._monitoredNotebooks.add(path);
     this._updateAllCells(notebook);
 
-    notebook.content.model?.cells.changed.connect(() => {
+    const onCellsChanged = () => {
+      if (this._isDisposed || notebook.isDisposed) {
+        return;
+      }
       this._updateAllCells(notebook);
       this._updatePanelWithCurrentCellOrder(notebook);
-    });
+    };
+    notebook.content.model?.cells.changed.connect(onCellsChanged);
 
     // Listen for kernel restart
-    notebook.sessionContext.statusChanged.connect((_, status) => {
+    const onStatusChanged = (_sender: unknown, status: string) => {
+      if (this._isDisposed || notebook.isDisposed) {
+        return;
+      }
       if (status === 'restarting' || status === 'autorestarting') {
         this._pendingRestartUpdate.add(path);
         this._executedInSession.delete(path);
@@ -338,6 +374,13 @@ export class ReproducibilityCellHighlighter {
         this._pendingRestartUpdate.delete(path);
         this._updateAllCells(notebook);
       }
+    };
+    notebook.sessionContext.statusChanged.connect(onStatusChanged);
+
+    this._monitorHandlers.set(path, {
+      panel: notebook,
+      onCellsChanged,
+      onStatusChanged
     });
   }
 
@@ -363,6 +406,9 @@ export class ReproducibilityCellHighlighter {
   }
 
   private _updateAllCells(notebook: NotebookPanel): void {
+    if (this._isDisposed || notebook.isDisposed) {
+      return;
+    }
     const stalenessManager = this.getStalenessManager(notebook);
     const cellOrder = getCodeCellOrder(notebook);
     const cells = notebook.content.widgets;
