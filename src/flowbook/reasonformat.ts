@@ -144,6 +144,34 @@ function buildReasonView(
     case 'order_changed':
       return { type: 'unknown', message: 'Cell order changed' };
 
+    case 'no_read_and_write':
+      // Violation-derived: the cell reads and writes the same location.
+      return {
+        type: 'writer_conflict',
+        ...(loc ? { variables: [loc] } : {}),
+        message: loc
+          ? `Reads and writes \`${loc}\``
+          : 'Reads and writes the same location'
+      };
+
+    case 'write_before_read':
+      // Violation-derived: the cell reads a location no cell above writes.
+      return {
+        type: 'unknown',
+        message: loc
+          ? `\`${loc}\` is not defined by any cell above`
+          : 'Reads a value not defined by any cell above'
+      };
+
+    case 'unrecoverable_mutation':
+      // Violation-derived: in-place mutation without rebinding.
+      return {
+        type: 'unknown',
+        message: loc
+          ? `\`${loc}\` was modified in place, which violates rerun consistency`
+          : 'State was modified in place, which violates rerun consistency'
+      };
+
     case 'no_write_after_read':
       // NoWriteAfterRead failed — wrote a location read by an earlier cell
       // (backward mutation).

@@ -85,7 +85,10 @@ export type BackendReasonType =
   | 'backward_stale' // Another cell wrote to a variable this cell also writes (was write_conflict)
   | 'no_read_before_write' // Cell reads a value written by a later cell (was reads_from_later)
   | 'order_changed' // Cell order changed affecting data flow
-  | 'no_write_after_read'; // Cell wrote to location read by earlier cell (was backward_mutation)
+  | 'no_write_after_read' // Cell wrote to location read by earlier cell (was backward_mutation)
+  | 'no_read_and_write' // Cell reads and writes the same location (violation-derived)
+  | 'write_before_read' // Cell reads a location no cell above writes (violation-derived)
+  | 'unrecoverable_mutation'; // Cell mutated state in place without rebinding (violation-derived)
 
 /**
  * Frontend-computed reason types with human-readable formatting.

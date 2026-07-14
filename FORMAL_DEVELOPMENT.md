@@ -310,7 +310,7 @@ delete-side ForwardStale/BackwardStale propagation runs unconditionally.
 
 **The implementation refines this rule** (`_handle_moves()`): the moved
 cell keeps its recorded R/W, and staleness is applied only where a real
-conflict exists between the moved cell and the cells it *crossed* (cells
+conflict exists between the moved cell and the cells it _crossed_ (cells
 whose order relative to the moved cell changed):
 
 - Moved cell past cells that read/write what it writes (Wₘ ▷ Rⱼ ∪ Wⱼ for
@@ -413,22 +413,22 @@ This section maps formal concepts across three representations:
 
 Validity predicates are implemented inline within `check()`, following the [Inst-Run] structure:
 
-| main.tex                   | FORMAL_DEVELOPMENT.md | Code                                                              |
-| -------------------------- | --------------------- | ----------------------------------------------------------------- |
-| NoReadAndWrite(R, W, i)    | §3.2                  | `_check_no_read_and_write()` using typed `wlocs_conflict_rlocs()` |
+| main.tex                   | FORMAL_DEVELOPMENT.md | Code                                                                                                                                                                |
+| -------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| NoReadAndWrite(R, W, i)    | §3.2                  | `_check_no_read_and_write()` using typed `wlocs_conflict_rlocs()`                                                                                                   |
 | WriteBeforeRead(R, W, i)   | §3.2                  | `_check_write_before_read()` in `check()` — enforced, though in practice a read of an undefined variable usually raises NameError before the predicate is evaluated |
-| NoReadBeforeWrite(R, W, i) | §3.2                  | `_check_forward_contamination()` in `check()`                     |
-| NoWriteAfterRead(R, W, i)  | §3.2                  | `_check_backward_mutation_new()` in `check()`                     |
-| RecoverableMutation(W, i)  | §3.2                  | `_check_unrecoverable_mutation()` in `check()`                    |
+| NoReadBeforeWrite(R, W, i) | §3.2                  | `_check_forward_contamination()` in `check()`                                                                                                                       |
+| NoWriteAfterRead(R, W, i)  | §3.2                  | `_check_backward_mutation_new()` in `check()`                                                                                                                       |
+| RecoverableMutation(W, i)  | §3.2                  | `_check_unrecoverable_mutation()` in `check()`                                                                                                                      |
 
 ### 7.3 Staleness Predicates
 
-| main.tex                   | FORMAL_DEVELOPMENT.md | Code                                                                                                                               |
-| -------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| ForwardStale(R, W, i, j)   | §3.3                  | `_compute_forward_staleness()` in `check()`, `_handle_deletions()` in `kernel/reproducibility_enforcer.py`                         |
+| main.tex                   | FORMAL_DEVELOPMENT.md | Code                                                                                                                                                                                                                                                                                                       |
+| -------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ForwardStale(R, W, i, j)   | §3.3                  | `_compute_forward_staleness()` in `check()`, `_handle_deletions()` in `kernel/reproducibility_enforcer.py`                                                                                                                                                                                                 |
 | BackwardStale(W, W', i, j) | §3.3                  | Loc-granular removed-write scan in `_compute_backward_staleness_syntactic()`; delete-time propagation in `_handle_deletions()` (`NotebookState.handle_delete()` is a standalone API — the enforcer path syncs structure with `set_cell_order(..., propagate_staleness=False)` to avoid double propagation) |
-| LastWriter(W, i, y)        | §1.4.2                | `NotebookState.last_writer_for(loc, cell_id)` in `kernel/notebook_state.py` — pure computation over W                              |
-| Overwritten(W, i)          | §1.4.1                | Computed on-demand in staleness checks                                                                                             |
+| LastWriter(W, i, y)        | §1.4.2                | `NotebookState.last_writer_for(loc, cell_id)` in `kernel/notebook_state.py` — pure computation over W                                                                                                                                                                                                      |
+| Overwritten(W, i)          | §1.4.1                | Computed on-demand in staleness checks                                                                                                                                                                                                                                                                     |
 
 ### 7.4 Transition Rules
 
@@ -546,14 +546,14 @@ yields only a `Var(d)` read, which a later column write does not invalidate.
 and `pd.concat`):
 
 - Aggregations and whole-frame readers: `sum mean std var min max median
-  describe corr cov quantile nunique apply to_numpy to_dict to_records agg
-  aggregate transform round rank diff shift cumsum cumprod cummax cummin
-  isna isnull notna notnull count mode all any prod astype clip`
+describe corr cov quantile nunique apply to_numpy to_dict to_records agg
+aggregate transform round rank diff shift cumsum cumprod cummax cummin
+isna isnull notna notnull count mode all any prod astype clip`
 - Expression/iteration readers: `query`, `eval`, `iterrows`, `itertuples`
 - NumPy conversion: `__array__` (covers `np.asarray(df)`, matplotlib, sklearn)
 - Binary arithmetic and comparisons: `__add__ __sub__ __mul__ __truediv__
-  __floordiv__ __mod__ __pow__` (+ reflected forms), `__eq__ __ne__ __lt__
-  __le__ __gt__ __ge__`
+__floordiv__ __mod__ __pow__` (+ reflected forms), `__eq__ __ne__ __lt__
+__le__ __gt__ __ge__`
 - Unary: `__neg__ __pos__ __abs__ __invert__`
 - Structural attribute reads (`columns`, `shape`, `head`, ... ) are covered
   separately by structural tracking (§12) and map to `Cols`/`Rows` reads.
@@ -829,8 +829,8 @@ variable, FlowBook
 3. **blocks all subsequent tracked reads** of the variable: a read raises
    `UncopyableReadError` (a `NameError` subclass) until the name is rebound
    or deleted. The object itself stays alive in the namespace — open files
-   keep working, displayed figures stay displayed — only *reads through the
-   variable name in user cells* are refused.
+   keep working, displayed figures stay displayed — only _reads through the
+   variable name in user cells_ are refused.
 
 **Escape hatch:** `FLOWBOOK_UNCOPYABLE_AS_WRITE=1` keeps reads allowed and
 instead adds the variable to Wᵢ (conservative staleness propagation). This
@@ -1097,22 +1097,22 @@ These are the same predicates from §10 — no additional `Σ` parameter is need
 
 ### 12.6 Implementation Map
 
-| Concept                        | Code Location                                                                                                                      |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Provenance class               | `DataFrameProvenance` in `kernel_support/column_provenance.py`                                                                     |
-| Provenance tracker             | `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py`                                                              |
-| Provenance key                 | `PROVENANCE_KEY = '_flowbook_provenance'` in `kernel_support/column_provenance.py`                                                 |
-| Column write hook              | `__setitem__` patch in `kernel_support/column_tracking.py`                                                                         |
-| Column insert hook             | `insert` patch in `kernel_support/column_tracking.py`                                                                              |
-| Column delete hook             | `__delitem__` patch in `kernel_support/column_tracking.py`                                                                         |
-| Row mutation hook              | `.loc.__setitem__`, `drop`, inplace wrappers in `kernel_support/column_tracking.py`                                                |
-| Index mutation hook            | `_set_axis` patch in `kernel_support/column_tracking.py`                                                                           |
-| Dtype change hook              | `__setitem__` dtype detection in `kernel_support/column_tracking.py`                                                               |
-| Inplace wrapper                | `_wrap_inplace_for_provenance()` in `kernel_support/column_tracking.py`                                                            |
-| Var write hook                 | `TrackingDict.__setitem__` in `kernel_support/tracking.py`                                                                         |
-| Var delete hook (`del x` is a Var write) | `TrackingDict.__delitem__` in `kernel_support/tracking.py`                                                               |
-| cell_id threading              | `track_execution(cell_id=...)` in `kernel_support/tracking.py`                                                                     |
-| Tracking → WriteLoc conversion | `tracking_to_writelocset()` in `kernel/locations.py`                                                                               |
-| Write set storage              | `record_execution()` in `kernel/notebook_state.py`                                                                                 |
-| Unit tests                     | `kernel_support/tests/test_column_provenance.py`                                                                                   |
-| Integration tests              | `TestForwardContaminationStructuralRead`, `TestStructuralProvenanceIntegration` in `kernel/tests/test_reproducibility_enforcer.py` |
+| Concept                                  | Code Location                                                                                                                      |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Provenance class                         | `DataFrameProvenance` in `kernel_support/column_provenance.py`                                                                     |
+| Provenance tracker                       | `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py`                                                              |
+| Provenance key                           | `PROVENANCE_KEY = '_flowbook_provenance'` in `kernel_support/column_provenance.py`                                                 |
+| Column write hook                        | `__setitem__` patch in `kernel_support/column_tracking.py`                                                                         |
+| Column insert hook                       | `insert` patch in `kernel_support/column_tracking.py`                                                                              |
+| Column delete hook                       | `__delitem__` patch in `kernel_support/column_tracking.py`                                                                         |
+| Row mutation hook                        | `.loc.__setitem__`, `drop`, inplace wrappers in `kernel_support/column_tracking.py`                                                |
+| Index mutation hook                      | `_set_axis` patch in `kernel_support/column_tracking.py`                                                                           |
+| Dtype change hook                        | `__setitem__` dtype detection in `kernel_support/column_tracking.py`                                                               |
+| Inplace wrapper                          | `_wrap_inplace_for_provenance()` in `kernel_support/column_tracking.py`                                                            |
+| Var write hook                           | `TrackingDict.__setitem__` in `kernel_support/tracking.py`                                                                         |
+| Var delete hook (`del x` is a Var write) | `TrackingDict.__delitem__` in `kernel_support/tracking.py`                                                                         |
+| cell_id threading                        | `track_execution(cell_id=...)` in `kernel_support/tracking.py`                                                                     |
+| Tracking → WriteLoc conversion           | `tracking_to_writelocset()` in `kernel/locations.py`                                                                               |
+| Write set storage                        | `record_execution()` in `kernel/notebook_state.py`                                                                                 |
+| Unit tests                               | `kernel_support/tests/test_column_provenance.py`                                                                                   |
+| Integration tests                        | `TestForwardContaminationStructuralRead`, `TestStructuralProvenanceIntegration` in `kernel/tests/test_reproducibility_enforcer.py` |

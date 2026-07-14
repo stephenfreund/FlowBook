@@ -22,5 +22,5 @@
     "skipLibCheck": true
   },
   "include": ["src/**/*"],
-  "exclude": ["src/_archived/**/*"]
+  "exclude": ["src/_archived/**/*", "src/**/tests/**/*"]
 }

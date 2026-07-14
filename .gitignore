@@ -140,3 +140,6 @@ dmypy.json
 .claude/settings.local.json
 .claude/agent-memory/
 .mcp.json
+
+# jest artifacts
+junit.xml

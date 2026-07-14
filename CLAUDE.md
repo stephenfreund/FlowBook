@@ -69,9 +69,20 @@ pytest flowbook/
 
 # Run specific test file
 pytest flowbook/kernel/tests/test_reproducibility_enforcer.py
+
+# Run frontend (TypeScript) tests
+jlpm test
+
+# Run a single frontend spec / with coverage
+jlpm test src/flowbook/tests/executionhook.comm.spec.ts
+jlpm test:cov
 ```
 
 Test files (`test_*.py`) must be placed in a `tests/` subdirectory of the package they test. For example, tests for `flowbook/kernel/` go in `flowbook/kernel/tests/`. Each `tests/` directory must contain an `__init__.py` file.
+
+Frontend specs mirror the same convention: `*.spec.ts` files live in a `tests/` subdirectory next to the module (`src/flowbook/tests/`, `src/shared/tests/`, `src/tests/`), excluded from the production build. Lifecycle specs use the counting fakes in `src/flowbook/tests/testutils.ts` — see `FRONTEND_TESTING.md`.
+
+**Cross-language parity fixtures**: the ▷ conflict relation and the staleness-reason vocabulary are implemented in BOTH Python and TypeScript. The shared fixtures in `src/flowbook/tests/fixtures/` are consumed by jest AND by `flowbook/kernel/tests/test_frontend_parity.py`. Adding a `ReasonType` or changing the ▷ matrix requires updating the fixture plus both implementations, or a test fails on the lagging side.
 
 ### Verification
 
@@ -304,22 +315,22 @@ Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Cla
 
 **Key MCP Tools:**
 
-| Tool                                                  | Purpose                                                     |
-| ----------------------------------------------------- | ----------------------------------------------------------- |
-| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync  |
+| Tool                                                  | Purpose                                                        |
+| ----------------------------------------------------- | -------------------------------------------------------------- |
+| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync     |
 | `run_cell` / `run_all_cells` / `run_from`             | Execute cell(s), return outputs (head+tail preview) + metadata |
-| `run_actionable_cell` / `run_actionable_cells`        | Execute the next cell(s) needing attention                  |
-| `get_cell_output`                                     | Page a cell's full untruncated output (offset/limit)        |
-| `edit_cell_source`                                    | Edit source, sync to Y.js, notify kernel                    |
-| `list_cells` / `read_cell` / `get_all_cell_sources`   | Read cell state (polls IOPub for external updates)          |
-| `get_status` / `get_flowbook_metadata`                | Reproducibility status (violations, staleness)              |
-| `get_next_actionable_cell`                            | First cell needing attention                                |
-| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                     |
-| `mark_diagnostic` / `merge_cells` / `move_cell`       | Structural refactoring                                      |
-| `insert_cell` / `delete_cell`                         | Add a code/markdown cell after another; remove a cell       |
-| `checkpoint` / `restore` / `list_checkpoints`         | Save/restore notebook state                                 |
-| `save_notebook` / `get_notebook_path`                 | Write to disk; report the loaded path                       |
-| `get_log` / `save_log` / `print_log`                  | Tool-invocation event log                                   |
+| `run_actionable_cell` / `run_actionable_cells`        | Execute the next cell(s) needing attention                     |
+| `get_cell_output`                                     | Page a cell's full untruncated output (offset/limit)           |
+| `edit_cell_source`                                    | Edit source, sync to Y.js, notify kernel                       |
+| `list_cells` / `read_cell` / `get_all_cell_sources`   | Read cell state (polls IOPub for external updates)             |
+| `get_status` / `get_flowbook_metadata`                | Reproducibility status (violations, staleness)                 |
+| `get_next_actionable_cell`                            | First cell needing attention                                   |
+| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                        |
+| `mark_diagnostic` / `merge_cells` / `move_cell`       | Structural refactoring                                         |
+| `insert_cell` / `delete_cell`                         | Add a code/markdown cell after another; remove a cell          |
+| `checkpoint` / `restore` / `list_checkpoints`         | Save/restore notebook state                                    |
+| `save_notebook` / `get_notebook_path`                 | Write to disk; report the loaded path                          |
+| `get_log` / `save_log` / `print_log`                  | Tool-invocation event log                                      |
 
 ### MCP ↔ JupyterLab Collaboration
 

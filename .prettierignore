@@ -16,3 +16,6 @@ agent-logs
 slurm_logs
 gpmoo-logs
 formal-development
+
+# Byte-exact generated files (sync tests compare verbatim)
+flowbook/docs/_generated/

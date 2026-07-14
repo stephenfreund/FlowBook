@@ -74,7 +74,10 @@
         "stylelint:check": "stylelint --cache \"style/**/*.css\"",
         "watch": "run-p watch:src watch:labextension",
         "watch:src": "tsc -w --sourceMap",
-        "watch:labextension": "jupyter labextension watch ."
+        "watch:labextension": "jupyter labextension watch .",
+        "test": "jest",
+        "test:cov": "jest --coverage",
+        "watch:test": "jest --watch"
     },
     "dependencies": {
         "@jupyterlab/application": "^4.0.0",
@@ -92,6 +95,8 @@
     },
     "devDependencies": {
         "@jupyterlab/builder": "^4.0.0",
+        "@jupyterlab/testing": "^4",
+        "@types/jest": "^29",
         "@types/json-schema": "^7.0.11",
         "@types/react": "^18.0.26",
         "@types/react-addons-linked-state-mixin": "^0.14.22",
@@ -102,6 +107,7 @@
         "eslint": "^8.36.0",
         "eslint-config-prettier": "^8.8.0",
         "eslint-plugin-prettier": "^5.0.0",
+        "jest": "^29",
         "mkdirp": "^1.0.3",
         "npm-run-all2": "^7.0.1",
         "prettier": "^3.0.0",
@@ -155,7 +161,7 @@
         ],
         "parser": "@typescript-eslint/parser",
         "parserOptions": {
-            "project": "tsconfig.json",
+            "project": "tsconfig.eslint.json",
             "sourceType": "module"
         },
         "plugins": [
@@ -198,7 +204,18 @@
             ],
             "eqeqeq": "error",
             "prefer-arrow-callback": "error"
-        }
+        },
+        "overrides": [
+            {
+                "files": [
+                    "src/**/tests/**/*.spec.ts",
+                    "src/**/tests/**/*.ts"
+                ],
+                "env": {
+                    "jest": true
+                }
+            }
+        ]
     },
     "prettier": {
         "singleQuote": true,

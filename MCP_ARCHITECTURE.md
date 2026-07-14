@@ -137,7 +137,7 @@ _poll_iopub()  →  drain pending flowbook_update messages
 Called automatically at the start of: `get_cell`, `list_cells`, `get_status`,
 `get_next_actionable`.
 
-Messages that arrive *while* an MCP kernel round-trip is in flight are handled
+Messages that arrive _while_ an MCP kernel round-trip is in flight are handled
 too: `KernelHelper.execute_code` passes IOPub messages from other executions
 (non-matching parent `msg_id`) to the session's `_process_iopub_msg` via its
 `on_foreign_msg` callback, instead of discarding them off the shared socket.

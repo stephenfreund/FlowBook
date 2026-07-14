@@ -15,7 +15,10 @@ import {
 import { Cell, ICodeCellModel } from '@jupyterlab/cells';
 import { CellChange } from '@jupyter/ydoc';
 import { Kernel, KernelMessage } from '@jupyterlab/services';
-import { ReproducibilityCellHighlighter } from './cellhighlighter';
+import {
+  IExecutionSignals,
+  ReproducibilityCellHighlighter
+} from './cellhighlighter';
 import { FixSuggester } from './fixsuggester';
 import {
   IReproducibilityMetadata,
@@ -39,6 +42,7 @@ import { emitAiActivity } from './aiattribution';
 export class ReproducibilityExecutionHookManager {
   private _tracker: INotebookTracker;
   private _highlighter: ReproducibilityCellHighlighter;
+  private _executionSignals: IExecutionSignals;
   private _fixSuggester: FixSuggester | null = null;
   private _editTimers: Map<
     string,
@@ -89,10 +93,12 @@ export class ReproducibilityExecutionHookManager {
 
   constructor(
     tracker: INotebookTracker,
-    highlighter: ReproducibilityCellHighlighter
+    highlighter: ReproducibilityCellHighlighter,
+    executionSignals: IExecutionSignals = NotebookActions
   ) {
     this._tracker = tracker;
     this._highlighter = highlighter;
+    this._executionSignals = executionSignals;
     this._setupHooks();
   }
 
@@ -113,8 +119,8 @@ export class ReproducibilityExecutionHookManager {
     }
     this._isDisposed = true;
 
-    NotebookActions.executed.disconnect(this._onCellExecuted, this);
-    NotebookActions.executionScheduled.disconnect(
+    this._executionSignals.executed.disconnect(this._onCellExecuted, this);
+    this._executionSignals.executionScheduled.disconnect(
       this._onExecutionScheduled,
       this
     );
@@ -210,10 +216,10 @@ export class ReproducibilityExecutionHookManager {
 
   private _setupHooks(): void {
     // Listen for cell execution completion
-    NotebookActions.executed.connect(this._onCellExecuted, this);
+    this._executionSignals.executed.connect(this._onCellExecuted, this);
 
     // Listen for cell execution start to send cell order via comm
-    NotebookActions.executionScheduled.connect(
+    this._executionSignals.executionScheduled.connect(
       this._onExecutionScheduled,
       this
     );

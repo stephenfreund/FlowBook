@@ -33,6 +33,17 @@ export interface IFixSuggesterProbe {
   isFixApplied(cellId: string): boolean;
 }
 
+/**
+ * The execution signals the managers subscribe to. In production this is
+ * always `NotebookActions` (the default); tests inject emittable fakes so
+ * the real connect/disconnect wiring is exercised (see FRONTEND_TESTING.md
+ * §5 — this is the harness's single production seam).
+ */
+export interface IExecutionSignals {
+  readonly executed: typeof NotebookActions.executed;
+  readonly executionScheduled: typeof NotebookActions.executionScheduled;
+}
+
 export class ReproducibilityCellHighlighter {
   private _tracker: INotebookTracker;
   private _panel: ReproducibilityMetadataPanel;
@@ -57,11 +68,17 @@ export class ReproducibilityCellHighlighter {
   private _stalenessNotice = new StalenessNoticeManager();
   private _violationNotice = new ViolationNoticeManager();
   private _fixSuggester: IFixSuggesterProbe | null = null;
+  private _executionSignals: IExecutionSignals;
   private _isDisposed = false;
 
-  constructor(tracker: INotebookTracker, panel: ReproducibilityMetadataPanel) {
+  constructor(
+    tracker: INotebookTracker,
+    panel: ReproducibilityMetadataPanel,
+    executionSignals: IExecutionSignals = NotebookActions
+  ) {
     this._tracker = tracker;
     this._panel = panel;
+    this._executionSignals = executionSignals;
     this._initialize();
   }
 
@@ -256,7 +273,7 @@ export class ReproducibilityCellHighlighter {
 
     this._tracker.currentChanged.disconnect(this._onNotebookChanged, this);
     this._tracker.activeCellChanged.disconnect(this._onActiveCellChanged, this);
-    NotebookActions.executed.disconnect(this._onExecuted, this);
+    this._executionSignals.executed.disconnect(this._onExecuted, this);
 
     // Disconnect per-notebook monitor listeners (cells.changed,
     // statusChanged and pathChanged) so a disposed highlighter stops
@@ -290,7 +307,7 @@ export class ReproducibilityCellHighlighter {
   private _initialize(): void {
     this._tracker.currentChanged.connect(this._onNotebookChanged, this);
     this._tracker.activeCellChanged.connect(this._onActiveCellChanged, this);
-    NotebookActions.executed.connect(this._onExecuted, this);
+    this._executionSignals.executed.connect(this._onExecuted, this);
 
     if (this._tracker.currentWidget) {
       this._monitorNotebook(this._tracker.currentWidget);
