@@ -1268,12 +1268,39 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             # Patch run_code to use TrackingDict for both globals and locals
             self._patch_run_code(tracking_dict)
 
+            # Patch transform_cell so IPython's prefilter lookups are not
+            # recorded as user reads
+            self._patch_transform_cell(tracking_dict)
+
             # Save initial state checkpoint (σ_0) for EXEC-RESTORE on the first cell
             # Uncopyable vars in the initial namespace are read-blocked, same
             # as during normal execution (paper semantics: warn + block reads).
             _, initial_uncopyable = self._take_checkpoint("_initial_state")
             for k in initial_uncopyable:
                 tracking_dict.block_variable(k)
+
+    def _patch_transform_cell(self, tracking_dict: TrackingDict) -> None:
+        """
+        Patch shell.transform_cell to run with tracking suspended.
+
+        IPython's cell transformation runs its prefilter machinery, whose
+        autocall check looks up the first token of the cell's first line
+        in user_ns (e.g. ``y`` for the cell ``y = x * 2``). With tracking
+        enabled, that infrastructure lookup is recorded as a user read.
+        On a rerun the write target already exists in the namespace, so
+        the lookup hits and the cell is falsely reported as reading and
+        writing the same location (NoReadAndWrite) — rejecting every
+        rerun of a plain assignment cell. Transformation never executes
+        user code, so suspending tracking around it is safe.
+        """
+        shell = self.shell
+        original_transform_cell = shell.transform_cell
+
+        def transform_cell_untracked(raw_cell):
+            with tracking_dict.suspended():
+                return original_transform_cell(raw_cell)
+
+        shell.transform_cell = transform_cell_untracked
 
     def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
         """

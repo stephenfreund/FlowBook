@@ -29,6 +29,7 @@ from flowbook.mcp.session import (
     format_outputs_text,
 )
 from flowbook.util.cell_index import index_to_alpha
+from flowbook.util.footprint import RunToCleanGuard, format_footprint_change
 
 
 def _get_session(ctx: Context) -> NotebookSession:
@@ -551,10 +552,20 @@ def run_actionable_cell(ctx: Context) -> str:
 def run_actionable_cells(ctx: Context) -> str:
     """Run all actionable cells in sequence until the notebook is clean.
 
-    Loops: find next actionable cell, run it, check for errors/violations,
-    repeat. Stops on:
+    Implements the RunToClean algorithm from the formal development:
+    repeatedly execute the first cell that needs execution in notebook
+    order, recording the set of cells already executed this call. If a
+    cell is executed a second time and its read or write sets changed,
+    the loop may never terminate (reruns keep marking earlier cells
+    stale), so it stops and reports potential non-termination at that
+    cell. Also stops on:
     - Hard errors (execution exceptions): always stops
     - Violations: stops only if continue_after_violation is False
+
+    Deterministic cells never trigger the non-termination report, and
+    neither do cells that write varying values (e.g. random numbers) to
+    a fixed set of variables — only the read/write location sets are
+    compared, never values.
 
     Returns a summary with the number of cells run and the final status.
     """
@@ -564,9 +575,15 @@ def run_actionable_cells(ctx: Context) -> str:
     cells_ran = []
     violations_seen = []
     error_cell = None
+    guard = RunToCleanGuard()
+    nontermination = None
+    # Report-free executions finish within n(n+2) runs (Progress theorem);
+    # the cap is a backstop for cells with no tracking metadata.
+    n_cells = len(session.get_cell_order())
+    max_runs = max(25, n_cells * (n_cells + 3))
 
-    while True:
-        next_id = session.get_next_actionable_cell_id()
+    while len(cells_ran) < max_runs:
+        next_id = session.get_next_run_target()
         if next_id is None:
             break
 
@@ -580,13 +597,24 @@ def run_actionable_cells(ctx: Context) -> str:
             break
 
         # Check for violations — stop if continue_after_violation is False
+        # (a rejected run is rolled back, so its footprint is not recorded)
         fb_meta = session.cell_flowbook_meta.get(next_id, {})
         errors = fb_meta.get("errors", [])
+        if errors and not session._continue_after_violation:
+            for e in errors:
+                violations_seen.append({"cell_id": next_id, **e})
+            break
+
+        # RunToClean check: a re-executed cell must reproduce its
+        # read/write sets, else the loop may never terminate.
+        change = guard.note_run(next_id, fb_meta)
+        if change is not None:
+            nontermination = {"cell_id": next_id, "label": label, **change}
+            break
+
         if errors:
             for e in errors:
                 violations_seen.append({"cell_id": next_id, **e})
-            if not session._continue_after_violation:
-                break
 
     # Build summary
     n = len(cells_ran)
@@ -601,9 +629,25 @@ def run_actionable_cells(ctx: Context) -> str:
     stale_count = len(status["stale_cells"])
     line += f" | {stale_count} stale"
 
-    if error_cell is None and not violations_seen and stale_count == 0:
+    if nontermination:
+        cid = nontermination["cell_id"]
+        line += (
+            f"\nPOTENTIAL NON-TERMINATION at {nontermination['label']} [{cid}]: "
+            f"re-running this cell changed its read/write sets "
+            f"({format_footprint_change(nontermination)}). "
+            "The notebook may never reach a clean state. Make the cell's "
+            "reads and writes deterministic (varying values are fine; "
+            "varying variables are not), or rerun to retry."
+        )
+    elif error_cell is None and not violations_seen and stale_count == 0:
         line += "\nAll clean!"
-    elif violations_seen:
+    elif len(cells_ran) >= max_runs and stale_count > 0:
+        line += (
+            f"\nStopped after {max_runs} runs without reaching a clean state "
+            "(possible untracked nondeterminism)."
+        )
+
+    if violations_seen:
         for e in violations_seen:
             cid = e.get("cell_id", "?")
             vlabel = _cell_label(session, cid)

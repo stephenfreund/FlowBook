@@ -812,6 +812,43 @@ class NotebookSession:
             return None
         return result["cell_id"]
 
+    def get_next_run_target(self) -> Optional[str]:
+        """Return the next cell the run-until-clean loop should execute.
+
+        Like get_next_actionable, cells with errors or violations take
+        priority (the loop retries them once and stops if they persist).
+        Stale and unexecuted cells, however, are merged in *document
+        order*: the RunToClean algorithm from the paper runs the first
+        cell that needs execution, counting never-executed cells as
+        stale, so that every cell sees its final inputs before it first
+        runs. (Rerunning a later stale cell before an earlier unexecuted
+        one can legitimately change the later cell's behavior twice,
+        which would trip the rerun footprint check on a perfectly
+        deterministic notebook.)
+        """
+        self._require_loaded()
+        self._refresh_from_contents_api()
+        self._poll_iopub()
+        code_cell_ids = self.get_cell_order()
+
+        for cid in code_cell_ids:
+            if self.cell_status.get(cid) == "error":
+                return cid
+
+        for cid in code_cell_ids:
+            if self.cell_flowbook_meta.get(cid, {}).get("errors"):
+                return cid
+
+        for cid in code_cell_ids:
+            if cid in self._stale_cells:
+                return cid
+            if cid not in self.executed_cells:
+                source = get_cell_source(self._find_cell(cid)[1])
+                if source.strip():  # skip empty cells
+                    return cid
+
+        return None  # all clean
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------

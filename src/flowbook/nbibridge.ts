@@ -25,6 +25,7 @@ import {
 import { aiTransact } from './aiattribution';
 import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
 import { StalenessManager } from './stalenessmanager';
+import { RunToCleanGuard, formatFootprintChange } from './rerunguard';
 
 // ---------------------------------------------------------------------------
 // Command result types (returned by the commands defined below)
@@ -287,9 +288,17 @@ export function registerBridgeCommands(
 
   // ------------------------------------------------------------------
   // flowbook:get-next-actionable — error > stale > unexecuted
+  //
+  // With { documentOrder: true }, stale and unexecuted cells are merged
+  // in document order (errors still first). The RunToClean loop uses
+  // this so every cell sees its final inputs before it first runs;
+  // rerunning a later stale cell before an earlier unexecuted one can
+  // legitimately change the later cell's behavior twice, which would
+  // trip the rerun footprint check on a deterministic notebook.
   // ------------------------------------------------------------------
   app.commands.addCommand('flowbook:get-next-actionable', {
-    execute: () => {
+    execute: args => {
+      const documentOrder = (args?.documentOrder as boolean) ?? false;
       const panel = getPanel();
       const widgets = panel.content.widgets;
       const staleCells = _highlighter
@@ -299,9 +308,11 @@ export function registerBridgeCommands(
       // Priority 1: cells with errors
       // Priority 2: stale cells
       // Priority 3: unexecuted cells
+      // (2 and 3 merge into document order when documentOrder is set)
       let codeIdx = 0;
       let firstStale: any = null;
       let firstUnexecuted: any = null;
+      let firstStaleOrUnexecuted: any = null;
 
       for (let i = 0; i < widgets.length; i++) {
         const cell = widgets[i];
@@ -344,7 +355,8 @@ export function registerBridgeCommands(
         }
 
         // Track first stale
-        if (!firstStale && staleCells.has(cellId)) {
+        const isStale = staleCells.has(cellId);
+        if (!firstStale && isStale) {
           firstStale = {
             index: currentCodeIdx,
             label: indexToAlpha(currentCodeIdx),
@@ -354,7 +366,8 @@ export function registerBridgeCommands(
         }
 
         // Track first unexecuted
-        if (!firstUnexecuted && codeModel.executionCount === null) {
+        const isUnexecuted = codeModel.executionCount === null;
+        if (!firstUnexecuted && isUnexecuted) {
           firstUnexecuted = {
             index: currentCodeIdx,
             label: indexToAlpha(currentCodeIdx),
@@ -362,8 +375,21 @@ export function registerBridgeCommands(
             reason: 'unexecuted'
           };
         }
+
+        // Track first stale-or-unexecuted (document order)
+        if (!firstStaleOrUnexecuted && (isStale || isUnexecuted)) {
+          firstStaleOrUnexecuted = {
+            index: currentCodeIdx,
+            label: indexToAlpha(currentCodeIdx),
+            cell_id: cellId,
+            reason: isStale ? 'stale' : 'unexecuted'
+          };
+        }
       }
 
+      if (documentOrder) {
+        return firstStaleOrUnexecuted ?? { done: true };
+      }
       if (firstStale) {
         return firstStale;
       }
@@ -633,20 +659,32 @@ export function registerBridgeCommands(
   });
 
   // ------------------------------------------------------------------
-  // flowbook:run-actionable-cells — loop until clean or error
+  // flowbook:run-actionable-cells — the RunToClean loop
+  //
+  // Repeatedly executes the first stale-or-unexecuted cell in document
+  // order. If a cell is executed a second time and its read or write
+  // sets changed, the loop may never terminate (reruns keep marking
+  // earlier cells stale), so it stops and reports potential
+  // non-termination at that cell. Report-free executions finish within
+  // n(n+2) runs (Progress theorem); the iteration cap is a backstop for
+  // cells with no tracking metadata.
   // ------------------------------------------------------------------
   app.commands.addCommand('flowbook:run-actionable-cells', {
     execute: async () => {
-      getPanel(); // Verify a notebook is open
+      const panel = getPanel(); // Verify a notebook is open
       const results: any[] = [];
       let totalRun = 0;
-      const maxIterations = 500; // safety limit
+      let potentialNonTermination: any = null;
+      const guard = new RunToCleanGuard();
+      const nCodeCells = getCodeCellOrder(panel).length;
+      const maxIterations = Math.max(25, nCodeCells * (nCodeCells + 3));
 
       while (totalRun < maxIterations) {
         try {
-          // Find next actionable
+          // Find next cell to run (stale/unexecuted merged, document order)
           const actionable = (await app.commands.execute(
-            'flowbook:get-next-actionable'
+            'flowbook:get-next-actionable',
+            { documentOrder: true }
           )) as IActionableResult;
           if (actionable.done) {
             break;
@@ -677,6 +715,28 @@ export function registerBridgeCommands(
           if (runResult.status === 'violation') {
             break;
           }
+
+          // RunToClean check: a re-executed cell must reproduce its
+          // read/write sets, else the loop may never terminate.
+          const change = runResult.cell_id
+            ? guard.noteRun(runResult.cell_id, runResult.flowbook_meta)
+            : null;
+          if (change) {
+            potentialNonTermination = {
+              label,
+              cell_id: runResult.cell_id,
+              change,
+              message:
+                `Potential non-termination at ${label}: re-running this ` +
+                'cell changed its read/write sets ' +
+                `(${formatFootprintChange(change)}). The notebook may ` +
+                "never reach a clean state. Make the cell's reads and " +
+                'writes deterministic (varying values are fine; varying ' +
+                'variables are not).'
+            };
+            results[results.length - 1].status = 'potential-non-termination';
+            break;
+          }
         } catch (error) {
           console.error('Error in run-actionable-cells:', error);
           break;
@@ -689,6 +749,7 @@ export function registerBridgeCommands(
       return {
         results,
         cells_run: totalRun,
+        potential_non_termination: potentialNonTermination,
         summary: status
       };
     }
