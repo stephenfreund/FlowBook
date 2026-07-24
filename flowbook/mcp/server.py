@@ -555,17 +555,17 @@ def run_actionable_cells(ctx: Context) -> str:
     Implements the RunToClean algorithm from the formal development:
     repeatedly execute the first cell that needs execution in notebook
     order, recording the set of cells already executed this call. If a
-    cell is executed a second time and its read or write sets changed,
-    the loop may never terminate (reruns keep marking earlier cells
-    stale), so it stops and reports potential non-termination at that
-    cell. Also stops on:
+    cell is executed a second time and marks an earlier cell stale
+    (it dropped a write that the earlier cell must now restore), the
+    loop may never terminate, so it stops and reports potential
+    non-termination at that cell. Also stops on:
     - Hard errors (execution exceptions): always stops
     - Violations: stops only if continue_after_violation is False
 
     Deterministic cells never trigger the non-termination report, and
     neither do cells that write varying values (e.g. random numbers) to
-    a fixed set of variables — only the read/write location sets are
-    compared, never values.
+    a fixed set of variables — a rerun marks backward only when the set
+    of variables it writes shrinks, never because values changed.
 
     Returns a summary with the number of cells run and the final status.
     """
@@ -605,11 +605,11 @@ def run_actionable_cells(ctx: Context) -> str:
                 violations_seen.append({"cell_id": next_id, **e})
             break
 
-        # RunToClean check: a re-executed cell must reproduce its
-        # read/write sets, else the loop may never terminate.
-        change = guard.note_run(next_id, fb_meta)
-        if change is not None:
-            nontermination = {"cell_id": next_id, "label": label, **change}
+        # RunToClean check: a re-executed cell must not mark an earlier
+        # cell stale, else the loop may never terminate.
+        report = guard.note_run(next_id, fb_meta, session.get_cell_order())
+        if report is not None:
+            nontermination = {"cell_id": next_id, "label": label, **report}
             break
 
         if errors:
@@ -631,13 +631,23 @@ def run_actionable_cells(ctx: Context) -> str:
 
     if nontermination:
         cid = nontermination["cell_id"]
+        marked = ", ".join(
+            f"{_cell_label(session, m)} [{m}]"
+            for m in nontermination["backward_stale"]
+        )
         line += (
             f"\nPOTENTIAL NON-TERMINATION at {nontermination['label']} [{cid}]: "
-            f"re-running this cell changed its read/write sets "
-            f"({format_footprint_change(nontermination)}). "
-            "The notebook may never reach a clean state. Make the cell's "
-            "reads and writes deterministic (varying values are fine; "
-            "varying variables are not), or rerun to retry."
+            f"re-running this cell marked earlier cell(s) {marked} stale "
+            "again, so repeatedly running stale cells may never make the "
+            "notebook clean."
+        )
+        if "prev_writes" in nontermination:
+            line += (
+                f" {format_footprint_change(nontermination).capitalize()}."
+            )
+        line += (
+            " Varying values are fine, but the set of variables a cell "
+            "reads and writes must be the same on every run. Rerun to retry."
         )
     elif error_cell is None and not violations_seen and stale_count == 0:
         line += "\nAll clean!"

@@ -1,9 +1,12 @@
 /**
- * Tests for the RunToClean rerun footprint guard.
+ * Tests for the RunToClean rerun check.
  *
- * Good programs must not be flagged (deterministic reruns, random values
- * written to fixed variables, DataFrame recreation churning loc_ids);
- * write/read set changes on re-execution must be flagged.
+ * The trigger: a re-executed cell (already run this sweep) that leaves
+ * a cell before itself stale. Footprints are remembered only to explain
+ * reports. Good programs must not be flagged (deterministic reruns,
+ * random values written to fixed variables, DataFrame recreation,
+ * footprint drift that marks nothing backward); reruns that re-mark
+ * earlier cells must be.
  */
 
 import {
@@ -14,6 +17,8 @@ import {
 } from '../rerunguard';
 import { IReadLoc, IReproducibilityMetadata } from '../types';
 
+const ORDER = ['A', 'B', 'C'];
+
 function varLoc(name: string): IReadLoc {
   return { type: 'var', name };
 }
@@ -22,14 +27,18 @@ function colLoc(df: string, col: string, locId: number): IReadLoc {
   return { type: 'col', name: col, qualifier: locId, var_name: df };
 }
 
-function meta(reads: IReadLoc[], writes: IReadLoc[]): IReproducibilityMetadata {
+function meta(
+  reads: IReadLoc[],
+  writes: IReadLoc[],
+  staleCells: string[] = []
+): IReproducibilityMetadata {
   return {
     cell_id: 'test',
     execution_seq: 0,
     read_locs: reads,
     write_locs: writes,
     changed_locs: [],
-    stale_cells: []
+    stale_cells: staleCells
   } as unknown as IReproducibilityMetadata;
 }
 
@@ -67,83 +76,94 @@ describe('canonicalFootprint', () => {
 });
 
 describe('RunToCleanGuard', () => {
-  it('never flags a first run', () => {
+  it('never reports a first execution, even with backward marks', () => {
     const guard = new RunToCleanGuard();
-    expect(guard.noteRun('A', meta([varLoc('x')], [varLoc('y')]))).toBeNull();
+    expect(
+      guard.noteRun('C', meta([], [varLoc('y')], ['A']), ORDER)
+    ).toBeNull();
   });
 
-  it('does not flag an identical rerun', () => {
+  it('does not report a rerun with forward marks only', () => {
     const guard = new RunToCleanGuard();
-    guard.noteRun('A', meta([varLoc('x')], [varLoc('y')]));
-    expect(guard.noteRun('A', meta([varLoc('x')], [varLoc('y')]))).toBeNull();
+    guard.noteRun('B', meta([], [varLoc('y')], ['C']), ORDER);
+    expect(
+      guard.noteRun('B', meta([], [varLoc('y')], ['C']), ORDER)
+    ).toBeNull();
   });
 
-  it('does not flag random values written to fixed variables', () => {
+  it('reports a rerun that marks an earlier cell stale', () => {
     const guard = new RunToCleanGuard();
-    guard.noteRun('A', meta([], [varLoc('x')]));
-    expect(guard.noteRun('A', meta([], [varLoc('x')]))).toBeNull();
+    guard.noteRun('C', meta([], [varLoc('b')]), ORDER);
+    const report = guard.noteRun('C', meta([], [varLoc('a')], ['B']), ORDER);
+    expect(report).not.toBeNull();
+    expect(report!.backwardStale).toEqual(['B']);
+    expect(report!.change).not.toBeNull();
+    expect(report!.change!.prevWrites).toEqual(['b']);
+    expect(report!.change!.newWrites).toEqual(['a']);
+  });
+
+  it('does not report footprint drift without backward marks', () => {
+    const guard = new RunToCleanGuard();
+    guard.noteRun('B', meta([varLoc('x')], [varLoc('y')]), ORDER);
+    expect(
+      guard.noteRun('B', meta([varLoc('x')], [varLoc('z')], ['C']), ORDER)
+    ).toBeNull();
+  });
+
+  it('reports even without read/write tracking metadata', () => {
+    const guard = new RunToCleanGuard();
+    const bare = { stale_cells: [] } as unknown as IReproducibilityMetadata;
+    const bareMarked = {
+      stale_cells: ['A', 'B']
+    } as unknown as IReproducibilityMetadata;
+    guard.noteRun('C', bare, ORDER);
+    const report = guard.noteRun('C', bareMarked, ORDER);
+    expect(report).not.toBeNull();
+    expect(report!.backwardStale).toEqual(['A', 'B']);
+    expect(report!.change).toBeNull();
   });
 
   it('does not flag DataFrame recreation (loc_id churn)', () => {
     const guard = new RunToCleanGuard();
     guard.noteRun(
-      'A',
-      meta([colLoc('df', 'a', 101)], [colLoc('df', 'b', 101)])
+      'C',
+      meta([colLoc('df', 'a', 101)], [colLoc('df', 'b', 101)]),
+      ORDER
     );
-    expect(
-      guard.noteRun(
-        'A',
-        meta([colLoc('df', 'a', 202)], [colLoc('df', 'b', 202)])
-      )
-    ).toBeNull();
+    const report = guard.noteRun(
+      'C',
+      meta([colLoc('df', 'a', 202)], [colLoc('df', 'b', 202)], ['B']),
+      ORDER
+    );
+    // The backward mark still reports, but the loc_id churn must not
+    // show up as a phantom footprint change.
+    expect(report).not.toBeNull();
+    expect(report!.change).toBeNull();
   });
 
-  it('flags a write set flip', () => {
+  it('never reports when metadata is missing entirely', () => {
     const guard = new RunToCleanGuard();
-    guard.noteRun('A', meta([], [varLoc('a')]));
-    const change = guard.noteRun('A', meta([], [varLoc('b')]));
-    expect(change).not.toBeNull();
-    expect(change!.writesAdded).toEqual(['b']);
-    expect(change!.writesRemoved).toEqual(['a']);
-    expect(change!.readsAdded).toEqual([]);
-  });
-
-  it('flags a read set change', () => {
-    const guard = new RunToCleanGuard();
-    guard.noteRun('A', meta([varLoc('x')], [varLoc('y')]));
-    const change = guard.noteRun('A', meta([varLoc('z')], [varLoc('y')]));
-    expect(change).not.toBeNull();
-    expect(change!.readsAdded).toEqual(['z']);
-    expect(change!.readsRemoved).toEqual(['x']);
-  });
-
-  it('skips and forgets when metadata is missing', () => {
-    const guard = new RunToCleanGuard();
-    guard.noteRun('A', meta([], [varLoc('a')]));
-    expect(guard.noteRun('A', null)).toBeNull();
-    // Record dropped: a differing run now counts as a first run...
-    expect(guard.noteRun('A', meta([], [varLoc('b')]))).toBeNull();
-    // ...but comparisons resume afterwards.
-    expect(guard.noteRun('A', meta([], [varLoc('c')]))).not.toBeNull();
+    guard.noteRun('C', meta([], [varLoc('a')]), ORDER);
+    expect(guard.noteRun('C', null, ORDER)).toBeNull();
   });
 
   it('tracks cells independently', () => {
     const guard = new RunToCleanGuard();
-    guard.noteRun('A', meta([], [varLoc('a')]));
-    expect(guard.noteRun('B', meta([], [varLoc('b')]))).toBeNull();
-    expect(guard.noteRun('A', meta([], [varLoc('a')]))).toBeNull();
+    guard.noteRun('B', meta([], [varLoc('y')]), ORDER);
+    expect(
+      guard.noteRun('C', meta([], [varLoc('z')], ['A']), ORDER)
+    ).toBeNull(); // first execution of C
   });
 });
 
 describe('formatFootprintChange', () => {
-  it('renders the changed sets', () => {
-    const text = formatFootprintChange({
-      readsAdded: [],
-      readsRemoved: [],
-      writesAdded: ['b'],
-      writesRemoved: ['a']
-    });
-    expect(text).toContain('writes +{b}');
-    expect(text).toContain('writes -{a}');
+  it('spells out both runs read and write sets in full', () => {
+    const guard = new RunToCleanGuard();
+    guard.noteRun('C', meta([varLoc('x')], [varLoc('a')]), ORDER);
+    const report = guard.noteRun('C', meta([], [varLoc('b')], ['B']), ORDER);
+    expect(formatFootprintChange(report!.change!)).toBe(
+      'the previous run read x and wrote a, ' +
+        'but this run read nothing and wrote b'
+    );
   });
 });

@@ -840,12 +840,16 @@ class NotebookSession:
                 return cid
 
         for cid in code_cell_ids:
+            source = get_cell_source(self._find_cell(cid)[1])
+            if not source.strip():
+                # Skip empty cells whether stale or unexecuted: running
+                # them is a no-op that never clears their staleness, so
+                # returning one would loop forever.
+                continue
             if cid in self._stale_cells:
                 return cid
             if cid not in self.executed_cells:
-                source = get_cell_source(self._find_cell(cid)[1])
-                if source.strip():  # skip empty cells
-                    return cid
+                return cid
 
         return None  # all clean
 

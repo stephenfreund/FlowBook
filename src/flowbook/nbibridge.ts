@@ -716,23 +716,38 @@ export function registerBridgeCommands(
             break;
           }
 
-          // RunToClean check: a re-executed cell must reproduce its
-          // read/write sets, else the loop may never terminate.
-          const change = runResult.cell_id
-            ? guard.noteRun(runResult.cell_id, runResult.flowbook_meta)
+          // RunToClean check: a re-executed cell must not mark an
+          // earlier cell stale, else the loop may never terminate.
+          const cellOrder = getCodeCellOrder(getPanel());
+          const report = runResult.cell_id
+            ? guard.noteRun(
+                runResult.cell_id,
+                runResult.flowbook_meta,
+                cellOrder
+              )
             : null;
-          if (change) {
+          if (report) {
+            const markedLabels = report.backwardStale
+              .map(cid => indexToAlpha(cellOrder.indexOf(cid)))
+              .join(', ');
+            let message =
+              `Potential non-termination at ${label}: re-running this ` +
+              `cell marked earlier cell(s) ${markedLabels} stale again, ` +
+              'so repeatedly running stale cells may never make the ' +
+              'notebook clean.';
+            if (report.change) {
+              const detail = formatFootprintChange(report.change);
+              message += ` ${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
+            }
+            message +=
+              ' Varying values are fine, but the set of variables a ' +
+              'cell reads and writes must be the same on every run.';
             potentialNonTermination = {
               label,
               cell_id: runResult.cell_id,
-              change,
-              message:
-                `Potential non-termination at ${label}: re-running this ` +
-                'cell changed its read/write sets ' +
-                `(${formatFootprintChange(change)}). The notebook may ` +
-                "never reach a clean state. Make the cell's reads and " +
-                'writes deterministic (varying values are fine; varying ' +
-                'variables are not).'
+              backward_stale: report.backwardStale,
+              change: report.change,
+              message
             };
             results[results.length - 1].status = 'potential-non-termination';
             break;

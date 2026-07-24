@@ -6,12 +6,14 @@ import { NotebookPanel, NotebookActions } from '@jupyterlab/notebook';
 import { ICodeCellModel } from '@jupyterlab/cells';
 import { DocumentRegistry } from '@jupyterlab/docregistry';
 import { IDisposable } from '@lumino/disposable';
-import { ToolbarButton } from '@jupyterlab/apputils';
+import { showErrorMessage, ToolbarButton } from '@jupyterlab/apputils';
 import { stepIntoIcon } from '@jupyterlab/ui-components';
 
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { IReproducibilityMetadata, waitForFlowbookMetadata } from './types';
 import { KernelDetector } from '../shared/kerneldetection';
+import { RunToCleanGuard, formatFootprintChange } from './rerunguard';
+import { indexToAlpha } from '../cellindexutils';
 
 /**
  * Extension that adds "Run Next Stale" button to the notebook toolbar
@@ -92,13 +94,26 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
   }
 
   /**
-   * Run all stale and unrun code cells in document order.
-   * Stops on hard error always. Stops on violation if continue_after_violation is false.
+   * Run all stale and unrun code cells in document order — the
+   * RunToClean loop. Stops on hard error always. Stops on violation if
+   * continue_after_violation is false. If a cell is executed a second
+   * time and its read or write sets changed, the loop may never
+   * terminate (reruns keep marking earlier cells stale), so it stops
+   * and reports potential non-termination at that cell. Report-free
+   * sweeps finish within n(n+2) runs (Progress theorem); the iteration
+   * cap is a backstop for cells with no tracking metadata.
    * User can cancel mid-loop via kernel interrupt.
    */
   private async _runAllActionable(panel: NotebookPanel): Promise<void> {
     const notebook = panel.content;
-    const maxIterations = 500;
+    const guard = new RunToCleanGuard();
+    let nCodeCells = 0;
+    for (const w of notebook.widgets) {
+      if (w.model.type === 'code') {
+        nCodeCells++;
+      }
+    }
+    const maxIterations = Math.max(25, nCodeCells * (nCodeCells + 3));
 
     for (let iter = 0; iter < maxIterations; iter++) {
       // Find next actionable cell
@@ -109,12 +124,16 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
       }
 
       let targetWidgetIdx = -1;
+      let targetCodeIdx = -1;
+      let codeIdx = 0;
       const widgets = notebook.widgets;
       for (let i = 0; i < widgets.length; i++) {
         const cell = widgets[i];
         if (cell.model.type !== 'code') {
           continue;
         }
+        const currentCodeIdx = codeIdx;
+        codeIdx++;
         const codeModel = cell.model as ICodeCellModel;
         const source = codeModel.sharedModel.getSource();
         if (!source || source.trim() === '') {
@@ -125,6 +144,7 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
           staleCells.has(cellId) || codeModel.executionCount === null;
         if (needsRun) {
           targetWidgetIdx = i;
+          targetCodeIdx = currentCodeIdx;
           break;
         }
       }
@@ -175,6 +195,32 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
       // Wait for this run's metadata to land before checking violations.
       const meta = await waitForFlowbookMetadata(cell.model, beforeMeta);
       if (meta?.errors && meta.errors.length > 0) {
+        break;
+      }
+
+      // RunToClean check: a re-executed cell must not mark an earlier
+      // cell stale, else the loop may never terminate.
+      const cellOrder = notebook.widgets
+        .filter(w => w.model.type === 'code')
+        .map(w => w.model.id);
+      const report = guard.noteRun(targetModelId, meta ?? null, cellOrder);
+      if (report) {
+        const label = indexToAlpha(targetCodeIdx);
+        const markedLabels = report.backwardStale
+          .map(cid => indexToAlpha(cellOrder.indexOf(cid)))
+          .join(', ');
+        let message =
+          `Re-running cell ${label} marked earlier cell(s) ` +
+          `${markedLabels} stale again, so repeatedly running stale ` +
+          'cells may never make the notebook clean.';
+        if (report.change) {
+          const detail = formatFootprintChange(report.change);
+          message += ` ${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
+        }
+        message +=
+          ' Varying values are fine, but the set of variables a cell ' +
+          'reads and writes must be the same on every run.';
+        await showErrorMessage('FlowBook: Potential Non-Termination', message);
         break;
       }
     }

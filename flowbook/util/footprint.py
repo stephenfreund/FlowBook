@@ -69,27 +69,34 @@ def format_footprint_key(key: FootprintKey) -> str:
 
 
 class RunToCleanGuard:
-    """Tracks per-cell footprints across one run-until-clean sweep.
+    """Implements the RunToClean rerun check for one sweep.
 
     Call :meth:`note_run` after every committed cell execution. The
-    first execution of a cell records its footprint and returns None;
-    a re-execution whose read and write sets match returns None; a
-    re-execution whose sets changed returns a change summary, which the
-    loop reports as potential non-termination.
+    check triggers — returning a report — exactly when a *re-executed*
+    cell (one already run this sweep) leaves a cell before itself
+    stale: the only way staleness moves backward is a run dropping a
+    write owned by an earlier cell, and when a rerun does that, the
+    sweep may never terminate.
+
+    The guard also remembers each cell's name-level read/write
+    footprint, purely to *explain* a report (the trigger never compares
+    footprints, so the report works even without tracking metadata for
+    earlier runs).
     """
 
     def __init__(self) -> None:
+        self._executed: set = set()
         self._recorded: Dict[str, Tuple[FrozenSet, FrozenSet]] = {}
 
-    def note_run(
+    def _note_footprint(
         self, cell_id: str, fb_meta: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, List[str]]]:
-        """Record this run's footprint; report a change on re-execution.
+        """Record this run's footprint; describe the change if any.
 
-        Returns None when this is the cell's first execution this sweep,
+        Returns None when this is the cell's first recorded footprint,
         when the footprint matches the previous run, or when no tracking
-        metadata is available (nothing to compare — the cell's record is
-        dropped so a later run is not compared against stale data).
+        metadata is available (the record is dropped so a later run is
+        not compared against stale data).
         """
         if not fb_meta or (
             "read_locs" not in fb_meta and "write_locs" not in fb_meta
@@ -105,31 +112,75 @@ class RunToCleanGuard:
         prev_reads, prev_writes = previous
         if prev_reads == reads and prev_writes == writes:
             return None
+
+        def _fmt_all(keys):
+            return sorted(format_footprint_key(k) for k in keys)
+
         return {
-            "reads_added": sorted(
-                format_footprint_key(k) for k in reads - prev_reads
-            ),
-            "reads_removed": sorted(
-                format_footprint_key(k) for k in prev_reads - reads
-            ),
-            "writes_added": sorted(
-                format_footprint_key(k) for k in writes - prev_writes
-            ),
-            "writes_removed": sorted(
-                format_footprint_key(k) for k in prev_writes - writes
-            ),
+            "prev_reads": _fmt_all(prev_reads),
+            "prev_writes": _fmt_all(prev_writes),
+            "new_reads": _fmt_all(reads),
+            "new_writes": _fmt_all(writes),
+            "reads_added": _fmt_all(reads - prev_reads),
+            "reads_removed": _fmt_all(prev_reads - reads),
+            "writes_added": _fmt_all(writes - prev_writes),
+            "writes_removed": _fmt_all(prev_writes - writes),
         }
+
+    def note_run(
+        self,
+        cell_id: str,
+        fb_meta: Optional[Dict[str, Any]],
+        cell_order: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Note a committed run of ``cell_id``; report if it must stop.
+
+        Returns None for first executions, and for re-executions that
+        leave every cell before ``cell_id`` clean. Returns a report dict
+        when a re-execution marked an earlier cell stale: key
+        ``backward_stale`` lists those cells (document order), and the
+        footprint-change keys (``prev_reads`` etc.) are included when
+        tracking metadata allows the change to be spelled out.
+
+        The caller must run cells first-stale-first: ``cell_id`` must
+        have been the first stale (or unexecuted) cell when selected, so
+        that any stale cell before it afterwards was marked by this run.
+        """
+        rerun = cell_id in self._executed
+        self._executed.add(cell_id)
+        change = self._note_footprint(cell_id, fb_meta)
+        if not rerun or not fb_meta:
+            return None
+        if cell_id not in cell_order:
+            return None
+        position = cell_order.index(cell_id)
+        positions = {cid: idx for idx, cid in enumerate(cell_order)}
+        backward = sorted(
+            (
+                cid
+                for cid in fb_meta.get("stale_cells", [])
+                if cid in positions and positions[cid] < position
+            ),
+            key=lambda cid: positions[cid],
+        )
+        if not backward:
+            return None
+        report: Dict[str, Any] = {"backward_stale": backward}
+        if change is not None:
+            report.update(change)
+        return report
+
+
+def _format_set(items: List[str]) -> str:
+    return ", ".join(items) if items else "nothing"
 
 
 def format_footprint_change(change: Dict[str, List[str]]) -> str:
-    """One-line description of a footprint change for reports."""
-    parts = []
-    for label, key in (
-        ("reads +", "reads_added"),
-        ("reads -", "reads_removed"),
-        ("writes +", "writes_added"),
-        ("writes -", "writes_removed"),
-    ):
-        if change.get(key):
-            parts.append(f"{label}{{{', '.join(change[key])}}}")
-    return "; ".join(parts) if parts else "footprint changed"
+    """Describe a footprint change by spelling out both runs' read and
+    write sets in full."""
+    return (
+        f"the previous run read {_format_set(change.get('prev_reads', []))} "
+        f"and wrote {_format_set(change.get('prev_writes', []))}, "
+        f"but this run read {_format_set(change.get('new_reads', []))} "
+        f"and wrote {_format_set(change.get('new_writes', []))}"
+    )

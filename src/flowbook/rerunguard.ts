@@ -61,10 +61,20 @@ export function formatFootprintKey(key: string): string {
 }
 
 export interface IFootprintChange {
+  /** Full name-level footprints of the two runs, formatted and sorted. */
+  prevReads: string[];
+  prevWrites: string[];
+  newReads: string[];
+  newWrites: string[];
+  /** The differences, formatted and sorted. */
   readsAdded: string[];
   readsRemoved: string[];
   writesAdded: string[];
   writesRemoved: string[];
+}
+
+function fmtAll(keys: Set<string>): string[] {
+  return Array.from(keys, formatFootprintKey).sort();
 }
 
 function diff(prev: Set<string>, next: Set<string>): [string[], string[]] {
@@ -83,40 +93,53 @@ function diff(prev: Set<string>, next: Set<string>): [string[], string[]] {
   return [added.sort(), removed.sort()];
 }
 
-/** One-line description of a footprint change for reports. */
-export function formatFootprintChange(change: IFootprintChange): string {
-  const parts: string[] = [];
-  if (change.readsAdded.length) {
-    parts.push(`reads +{${change.readsAdded.join(', ')}}`);
-  }
-  if (change.readsRemoved.length) {
-    parts.push(`reads -{${change.readsRemoved.join(', ')}}`);
-  }
-  if (change.writesAdded.length) {
-    parts.push(`writes +{${change.writesAdded.join(', ')}}`);
-  }
-  if (change.writesRemoved.length) {
-    parts.push(`writes -{${change.writesRemoved.join(', ')}}`);
-  }
-  return parts.length ? parts.join('; ') : 'footprint changed';
+function fmtSet(items: string[]): string {
+  return items.length ? items.join(', ') : 'nothing';
 }
 
 /**
- * Tracks per-cell footprints across one run-until-clean sweep.
+ * Describe a footprint change by spelling out both runs' read and
+ * write sets in full.
+ */
+export function formatFootprintChange(change: IFootprintChange): string {
+  return (
+    `the previous run read ${fmtSet(change.prevReads)} and wrote ` +
+    `${fmtSet(change.prevWrites)}, but this run read ` +
+    `${fmtSet(change.newReads)} and wrote ${fmtSet(change.newWrites)}`
+  );
+}
+
+/** A potential non-termination report from the rerun check. */
+export interface IRerunReport {
+  /** Cells before the rerun cell that it marked stale, document order. */
+  backwardStale: string[];
+  /** The footprint change, when tracking metadata allows spelling it out. */
+  change: IFootprintChange | null;
+}
+
+/**
+ * Implements the RunToClean rerun check for one sweep.
  *
- * Call `noteRun` after every committed cell execution. The first
- * execution of a cell records its footprint and returns null; a
- * re-execution whose read and write sets match returns null; a
- * re-execution whose sets changed returns a change summary, which the
- * loop reports as potential non-termination.
+ * Call `noteRun` after every committed cell execution. The check
+ * triggers — returning a report — exactly when a *re-executed* cell
+ * (one already run this sweep) leaves a cell before itself stale: the
+ * only way staleness moves backward is a run dropping a write owned by
+ * an earlier cell, and when a rerun does that, the sweep may never
+ * terminate.
+ *
+ * Footprints are remembered purely to explain a report; the trigger
+ * never compares them. The caller must run cells first-stale-first, so
+ * that any stale cell before the rerun cell afterwards was marked by
+ * that run.
  */
 export class RunToCleanGuard {
+  private _executed = new Set<string>();
   private _recorded = new Map<
     string,
     { reads: Set<string>; writes: Set<string> }
   >();
 
-  noteRun(
+  private _noteFootprint(
     cellId: string,
     meta: IReproducibilityMetadata | null | undefined
   ): IFootprintChange | null {
@@ -146,6 +169,42 @@ export class RunToCleanGuard {
     ) {
       return null;
     }
-    return { readsAdded, readsRemoved, writesAdded, writesRemoved };
+    return {
+      prevReads: fmtAll(previous.reads),
+      prevWrites: fmtAll(previous.writes),
+      newReads: fmtAll(reads),
+      newWrites: fmtAll(writes),
+      readsAdded,
+      readsRemoved,
+      writesAdded,
+      writesRemoved
+    };
+  }
+
+  noteRun(
+    cellId: string,
+    meta: IReproducibilityMetadata | null | undefined,
+    cellOrder: string[]
+  ): IRerunReport | null {
+    const rerun = this._executed.has(cellId);
+    this._executed.add(cellId);
+    const change = this._noteFootprint(cellId, meta);
+    if (!rerun || !meta) {
+      return null;
+    }
+    const position = cellOrder.indexOf(cellId);
+    if (position < 0) {
+      return null;
+    }
+    const backwardStale = (meta.stale_cells ?? [])
+      .filter(cid => {
+        const p = cellOrder.indexOf(cid);
+        return p >= 0 && p < position;
+      })
+      .sort((a, b) => cellOrder.indexOf(a) - cellOrder.indexOf(b));
+    if (!backwardStale.length) {
+      return null;
+    }
+    return { backwardStale, change };
   }
 }

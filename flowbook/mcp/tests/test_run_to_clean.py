@@ -2,18 +2,21 @@
 
 The run-until-clean loop (run_actionable_cells) implements the RunToClean
 algorithm from the formal development: it executes the first stale cell in
-notebook order, and if it executes a cell a second time, the run's read
-and write sets must match those recorded by the previous run; otherwise
-the loop may never terminate, so it reports potential non-termination.
+notebook order, and if it executes a cell a second time and that run marks
+an earlier cell stale (the only way staleness moves backward — a dropped
+write that the earlier cell must restore), the loop may never terminate,
+so it reports potential non-termination. Footprints are remembered only to
+explain the report; the trigger never compares them.
 
 These tests validate both directions:
 - good programs are NOT rejected: deterministic chains, backward-mark
   repairs, cells writing varying values (random numbers) to fixed
   variables, DataFrame cells whose object identity (loc_id qualifier)
-  changes across reruns;
-- bad programs ARE caught: cells whose write sets flip across reruns
-  (the nonterminating counterexample), with the loop stopping in a
-  bounded number of runs and naming the culprit cell.
+  changes across reruns, and even footprint drift that marks nothing
+  backward;
+- bad programs ARE caught: reruns that re-mark earlier cells (the
+  nonterminating counterexample), with the loop stopping in a bounded
+  number of runs and naming both the culprit and the re-marked cells.
 """
 
 from unittest.mock import MagicMock, patch
@@ -31,6 +34,8 @@ from flowbook.util.footprint import (
 # ------------------------------------------------------------------
 # Helpers (mirroring test_new_tools.py)
 # ------------------------------------------------------------------
+
+ORDER = ["A", "B", "C"]
 
 
 def _make_mock_session(cell_order=None, continue_after_violation=False):
@@ -61,8 +66,13 @@ def _col(df, col, loc_id):
     return {"type": "col", "name": col, "qualifier": loc_id, "var_name": df}
 
 
-def _meta(reads, writes, errors=None):
-    return {"read_locs": reads, "write_locs": writes, "errors": errors or []}
+def _meta(reads, writes, stale_cells=None, errors=None):
+    return {
+        "read_locs": reads,
+        "write_locs": writes,
+        "stale_cells": stale_cells or [],
+        "errors": errors or [],
+    }
 
 
 def _scripted_session(script, cell_order):
@@ -100,7 +110,7 @@ def _scripted_session(script, cell_order):
 
 
 # ==================================================================
-# Guard unit tests
+# Canonicalization unit tests (used for report messages)
 # ==================================================================
 
 
@@ -129,68 +139,103 @@ class TestCanonicalFootprint:
         assert fp == {("var", None, "x"), ("col", "df", "a")}
 
 
+# ==================================================================
+# Guard unit tests
+# ==================================================================
+
+
 class TestRunToCleanGuard:
-    def test_first_run_never_flags(self):
+    def test_first_run_never_reports(self):
+        """A first execution may mark backward freely (repairs after an
+        edit legitimately do)."""
         guard = RunToCleanGuard()
-        assert guard.note_run("A", _meta([_var("x")], [_var("y")])) is None
+        meta = _meta([], [_var("y")], stale_cells=["A"])
+        assert guard.note_run("C", meta, ORDER) is None
 
-    def test_identical_rerun_not_flagged(self):
+    def test_rerun_forward_marks_only_not_reported(self):
         guard = RunToCleanGuard()
-        guard.note_run("A", _meta([_var("x")], [_var("y")]))
-        assert guard.note_run("A", _meta([_var("x")], [_var("y")])) is None
+        guard.note_run("B", _meta([], [_var("y")], stale_cells=["C"]), ORDER)
+        assert (
+            guard.note_run("B", _meta([], [_var("y")], stale_cells=["C"]), ORDER)
+            is None
+        )
 
-    def test_random_values_fixed_variables_not_flagged(self):
-        """x = random() writes the same variable set on every run."""
+    def test_rerun_backward_mark_reported(self):
         guard = RunToCleanGuard()
-        guard.note_run("A", _meta([], [_var("x")]))
-        assert guard.note_run("A", _meta([], [_var("x")])) is None
+        guard.note_run("C", _meta([], [_var("b")]), ORDER)
+        report = guard.note_run(
+            "C", _meta([], [_var("a")], stale_cells=["B"]), ORDER
+        )
+        assert report is not None
+        assert report["backward_stale"] == ["B"]
+        # Footprint change is included to explain the report.
+        assert report["prev_writes"] == ["b"]
+        assert report["new_writes"] == ["a"]
 
-    def test_loc_id_churn_not_flagged(self):
-        """df = pd.read_csv(...) allocates a new object every run."""
+    def test_footprint_drift_without_backward_mark_not_reported(self):
+        """Set changes that mark nothing backward re-record silently:
+        staleness still only moves forward, so termination holds."""
         guard = RunToCleanGuard()
-        guard.note_run("A", _meta([_col("df", "a", 101)], [_col("df", "b", 101)]))
+        guard.note_run("B", _meta([_var("x")], [_var("y")]), ORDER)
         assert (
             guard.note_run(
-                "A", _meta([_col("df", "a", 202)], [_col("df", "b", 202)])
+                "B", _meta([_var("x")], [_var("z")], stale_cells=["C"]), ORDER
             )
             is None
         )
 
-    def test_write_set_flip_flagged(self):
+    def test_report_without_footprint_metadata(self):
+        """The trigger needs only staleness marks — it works even when
+        read/write tracking is unavailable."""
         guard = RunToCleanGuard()
-        guard.note_run("A", _meta([], [_var("a")]))
-        change = guard.note_run("A", _meta([], [_var("b")]))
-        assert change is not None
-        assert change["writes_added"] == ["b"]
-        assert change["writes_removed"] == ["a"]
-        assert change["reads_added"] == []
+        guard.note_run("C", {"stale_cells": []}, ORDER)
+        report = guard.note_run("C", {"stale_cells": ["A", "B"]}, ORDER)
+        assert report is not None
+        assert report["backward_stale"] == ["A", "B"]
+        assert "prev_writes" not in report
 
-    def test_read_set_change_flagged(self):
+    def test_missing_metadata_never_reports(self):
         guard = RunToCleanGuard()
-        guard.note_run("A", _meta([_var("x")], [_var("y")]))
-        change = guard.note_run("A", _meta([_var("z")], [_var("y")]))
-        assert change is not None
-        assert change["reads_added"] == ["z"]
-        assert change["reads_removed"] == ["x"]
+        guard.note_run("C", _meta([], [_var("a")]), ORDER)
+        assert guard.note_run("C", None, ORDER) is None
 
-    def test_missing_metadata_skips_and_forgets(self):
-        """No tracking info: nothing to compare, and the stale record is
-        dropped so a later run is not compared against outdated data."""
+    def test_loc_id_churn_does_not_pollute_report(self):
+        """df recreation changes loc_ids; the explanation must not show
+        a phantom footprint change."""
         guard = RunToCleanGuard()
-        guard.note_run("A", _meta([], [_var("a")]))
-        assert guard.note_run("A", None) is None
-        assert guard.note_run("A", {"errors": []}) is None
-        # Record was dropped: this differing run counts as a first run.
-        assert guard.note_run("A", _meta([], [_var("b")])) is None
-        # But from here on, comparisons resume.
-        assert guard.note_run("A", _meta([], [_var("c")])) is not None
-
-    def test_format_change(self):
-        text = format_footprint_change(
-            {"writes_added": ["b"], "writes_removed": ["a"],
-             "reads_added": [], "reads_removed": []}
+        guard.note_run(
+            "C", _meta([_col("df", "a", 101)], [_col("df", "b", 101)]), ORDER
         )
-        assert "writes +{b}" in text and "writes -{a}" in text
+        report = guard.note_run(
+            "C",
+            _meta(
+                [_col("df", "a", 202)], [_col("df", "b", 202)],
+                stale_cells=["B"],
+            ),
+            ORDER,
+        )
+        assert report is not None  # the backward mark still reports
+        assert "prev_writes" not in report  # but no footprint change shown
+
+    def test_cells_tracked_independently(self):
+        guard = RunToCleanGuard()
+        guard.note_run("B", _meta([], [_var("y")]), ORDER)
+        assert (
+            guard.note_run("C", _meta([], [_var("z")], stale_cells=["A"]), ORDER)
+            is None  # first execution of C
+        )
+
+    def test_format_change_spells_out_sets(self):
+        guard = RunToCleanGuard()
+        guard.note_run("C", _meta([_var("x")], [_var("a")]), ORDER)
+        report = guard.note_run(
+            "C", _meta([], [_var("b")], stale_cells=["B"]), ORDER
+        )
+        text = format_footprint_change(report)
+        assert text == (
+            "the previous run read x and wrote a, "
+            "but this run read nothing and wrote b"
+        )
 
 
 # ==================================================================
@@ -202,8 +247,8 @@ class TestRunToCleanLoopAccepts:
     def test_deterministic_chain_runs_clean(self):
         """Edit at the top, staleness flows forward, each cell runs once."""
         script = [
-            ("A", _meta([], [_var("x")])),
-            ("B", _meta([_var("x")], [_var("y")])),
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
+            ("B", _meta([_var("x")], [_var("y")], stale_cells=["C"])),
             ("C", _meta([_var("y")], [_var("z")])),
         ]
         session = _scripted_session(script, ["A", "B", "C"])
@@ -213,14 +258,15 @@ class TestRunToCleanLoopAccepts:
         assert "All clean!" in result
 
     def test_backward_mark_repair_not_flagged(self):
-        """A dropped write marks an earlier cell stale; its rerun
-        reproduces its recorded sets (a repair) and is not flagged."""
+        """A first-in-sweep run may drop a write and mark an earlier
+        cell stale (the repair path after an edit); the repair rerun
+        marks nothing backward and is not flagged."""
         script = [
-            # C's run drops a write, backward-marking A...
+            # C's first run drops a write, backward-marking A...
+            ("C", _meta([], [_var("b")], stale_cells=["A"])),
+            # ...A's repair reproduces its behavior, marks nothing back.
+            ("A", _meta([], [_var("a"), _var("x")], stale_cells=["C"])),
             ("C", _meta([], [_var("b")])),
-            # ...A reruns with its recorded footprint (same sets)...
-            ("A", _meta([], [_var("a"), _var("x")])),
-            ("A", _meta([], [_var("a"), _var("x")])),
         ]
         session = _scripted_session(script, ["A", "B", "C"])
         result = run_actionable_cells(_make_ctx(session))
@@ -230,9 +276,9 @@ class TestRunToCleanLoopAccepts:
     def test_random_cell_rerun_not_flagged(self):
         """x = random() reruns write different values, same variables."""
         script = [
-            ("A", _meta([], [_var("x")])),
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
             ("B", _meta([_var("x")], [_var("y")])),
-            ("A", _meta([], [_var("x")])),
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
             ("B", _meta([_var("x")], [_var("y")])),
         ]
         session = _scripted_session(script, ["A", "B"])
@@ -240,13 +286,26 @@ class TestRunToCleanLoopAccepts:
         assert "POTENTIAL NON-TERMINATION" not in result
         assert "Ran 4 cells" in result
 
+    def test_footprint_drift_without_backward_marks_accepted(self):
+        """A rerun whose sets changed but marked nothing backward is
+        re-recorded silently — staleness still flows only forward."""
+        script = [
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
+            ("B", _meta([_var("x")], [_var("y")])),
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
+            ("B", _meta([_var("x")], [_var("z")])),  # drift, no back-mark
+        ]
+        session = _scripted_session(script, ["A", "B"])
+        result = run_actionable_cells(_make_ctx(session))
+        assert "POTENTIAL NON-TERMINATION" not in result
+
     def test_dataframe_recreation_not_flagged(self):
         """Rerunning df = pd.read_csv(...) changes the loc_id qualifier
-        of every column location; name-level identity is unchanged."""
+        of every column location; nothing is marked backward."""
         script = [
-            ("A", _meta([], [_col("df", "price", 101)])),
+            ("A", _meta([], [_col("df", "price", 101)], stale_cells=["B"])),
             ("B", _meta([_col("df", "price", 101)], [_var("m")])),
-            ("A", _meta([], [_col("df", "price", 202)])),
+            ("A", _meta([], [_col("df", "price", 202)], stale_cells=["B"])),
             ("B", _meta([_col("df", "price", 202)], [_var("m")])),
         ]
         session = _scripted_session(script, ["A", "B"])
@@ -255,11 +314,10 @@ class TestRunToCleanLoopAccepts:
 
     def test_edited_cell_new_footprint_not_flagged(self):
         """An edited cell runs once per sweep; its first run this sweep
-        records new sets freely (E is per-invocation)."""
+        may change behavior freely (E is per-invocation)."""
         session = _scripted_session(
             [("A", _meta([], [_var("q")]))], ["A"]
         )
-        # Simulate a previous sweep having recorded a different footprint.
         session.cell_flowbook_meta["A"] = _meta([], [_var("old")])
         result = run_actionable_cells(_make_ctx(session))
         assert "POTENTIAL NON-TERMINATION" not in result
@@ -275,31 +333,31 @@ class TestRunToCleanLoopRejects:
     def test_flip_flop_flagged_and_terminates(self):
         """The paper's nonterminating counterexample: a cell whose write
         set alternates keeps backward-marking an earlier cell. The loop
-        must stop with a report at the flipping cell."""
+        must stop with a report at the flipping cell, naming the cell it
+        re-marked."""
         script = [
-            ("C", _meta([], [_var("b")])),   # first run: writes {b}
-            ("B", _meta([], [_var("a"), _var("b")])),
-            ("C", _meta([], [_var("a")])),   # rerun: writes {a} — flip!
+            ("C", _meta([], [_var("b")], stale_cells=["B"])),
+            ("B", _meta([], [_var("a"), _var("b")], stale_cells=["C"])),
+            ("C", _meta([], [_var("a")], stale_cells=["B"])),  # re-marks B
         ]
         session = _scripted_session(script, ["A", "B", "C"])
-        # get_next_run_target would keep returning cells forever if the
-        # loop did not stop itself; simulate that with a long script tail.
         session.get_next_run_target.side_effect = ["C", "B", "C", "B", "C"]
         result = run_actionable_cells(_make_ctx(session))
         assert "POTENTIAL NON-TERMINATION" in result
-        assert "[C]" in result or "@C" in result
+        tail = result.split("POTENTIAL NON-TERMINATION", 1)[1]
+        assert "@C" in tail  # the culprit
+        assert "@B" in tail  # the re-marked cell
         # Stopped at the flip: exactly 3 runs, not the whole tail.
         assert session.run_cell.call_count == 3
 
     def test_input_dependent_footprint_downstream_of_random_flagged(self):
         """Random values feeding a cell whose write set depends on its
-        input: each individual step looks justified, but the rerun check
-        catches the second footprint."""
+        input: the rerun that drops a write re-marks its owner."""
         script = [
-            ("A", _meta([], [_var("x")])),                 # x = random()
-            ("B", _meta([_var("x")], [_var("a")])),        # if x>0: a=1
-            ("A", _meta([], [_var("x")])),                 # rerun, new x
-            ("B", _meta([_var("x")], [_var("b")])),        # now writes b!
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
+            ("B", _meta([_var("x")], [_var("a")], stale_cells=["A"])),
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
+            ("B", _meta([_var("x")], [_var("b")], stale_cells=["A"])),
         ]
         session = _scripted_session(script, ["A", "B"])
         result = run_actionable_cells(_make_ctx(session))
@@ -307,8 +365,8 @@ class TestRunToCleanLoopRejects:
         assert session.run_cell.call_count == 4
 
     def test_untracked_cells_hit_backstop_cap(self):
-        """Cells with no tracking metadata cannot be checked; the loop
-        still terminates via the n(n+2) backstop."""
+        """Cells with no metadata at all cannot trigger the check; the
+        loop still terminates via the n(n+2) backstop."""
         session = _make_mock_session(cell_order=["A"])
         session.get_next_run_target.return_value = "A"  # forever stale
         session.run_cell.return_value = {
@@ -404,4 +462,16 @@ class TestGetNextRunTarget:
     def test_all_clean_returns_none(self):
         session = _bare_session([_make_code_cell("A", "x = 1")])
         session.executed_cells = {"A"}
+        assert self._target(session) is None
+
+    def test_empty_stale_cell_skipped(self):
+        """An empty cell marked stale must not be a run target: running
+        it is a no-op that never clears its staleness, so returning it
+        would loop forever. (Seen in practice: JupyterLab appends an
+        empty cell when the last cell is run with shift+enter.)"""
+        session = _bare_session(
+            [_make_code_cell("A", "x = 1"), _make_code_cell("B", "   ")]
+        )
+        session.executed_cells = {"A"}
+        session._stale_cells = {"B"}
         assert self._target(session) is None
