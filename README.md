@@ -25,13 +25,7 @@ from an empty store yields exactly the outputs currently recorded.
 
 ## Quick Start
 
-1. Install from Pypi:
-
-   ```bash
-   python3 -m pip install flowbook-python
-   ```
-
-   or from this repository:
+1. Install from this repository:
 
    ```bash
    python3 -m pip install -e .
