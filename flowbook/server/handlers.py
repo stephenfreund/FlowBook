@@ -2,8 +2,8 @@
 Jupyter server API handlers for flowbook commands.
 """
 
+import contextlib
 import json
-import pprint
 import asyncio
 import traceback
 import tornado
@@ -12,10 +12,7 @@ from jupyter_server.base.handlers import APIHandler
 from jupyter_server.utils import url_path_join
 
 from flowbook.server.registry import CommandRegistry
-from flowbook.server.kernel_manager import (
-    FlowbookKernelClient,
-    KernelConnectionManager,
-)
+from flowbook.server.kernel_manager import KernelConnectionManager
 from flowbook.kernel_discovery import read_discovery, write_discovery
 from flowbook.server.fix_dispatcher import apply_fix
 from flowbook.server.fix_models import (
@@ -36,16 +33,17 @@ from flowbook.server.fix_suggester import (
 from flowbook.util.output import error, log
 
 
-# Global kernel manager instance
-_kernel_manager = None
-
-
 class FlowbookCommandHandler(APIHandler):
     """Handler for flowbook command execution."""
 
-    def initialize(self, registry: CommandRegistry):
-        """Initialize with command registry and kernel manager."""
+    def initialize(
+        self,
+        registry: CommandRegistry,
+        connection_manager: KernelConnectionManager = None,
+    ):
+        """Initialize with command registry and kernel connection manager."""
         self.registry = registry
+        self.connection_manager = connection_manager
 
     @tornado.web.authenticated
     async def post(self):
@@ -68,13 +66,18 @@ class FlowbookCommandHandler(APIHandler):
                 self.finish(json.dumps({"error": "Missing 'notebook' field"}))
                 return
 
-            # Normalize notebook (add cell IDs if missing, ensure uniqueness)
+            # Normalize notebook (fill in missing/duplicate cell IDs, join
+            # list sources). preserve_ids=True keeps existing unique IDs
+            # (e.g., JupyterLab UUIDs) untouched — in shared-kernel mode the
+            # kernel and frontend already key their state by those IDs, so
+            # rewriting them to 4-char IDs would orphan that state.
             from flowbook.util.cell_ids import normalize_notebook
-            notebook_content = normalize_notebook(notebook_content)
+            notebook_content = normalize_notebook(notebook_content, preserve_ids=True)
 
             command = self.registry.get_command(command_name)
 
             kernel_client = None
+            kernel_lock = None
             if command.requires_kernel:
                 if not kernel_id:
                     self.set_status(400)
@@ -82,13 +85,11 @@ class FlowbookCommandHandler(APIHandler):
                     return
 
                 try:
-                    kernel_manager = self.kernel_manager.get_kernel(kernel_id)
-                    kernel_client = FlowbookKernelClient(kernel_id=kernel_id)
-                    kernel_client.load_connection_info(
-                        kernel_manager.get_connection_info()
-                    )
-                    kernel_client.start_channels()
-                    kernel_client.wait_for_ready(timeout=30)
+                    # Reuse the cached, channel-started client for this kernel
+                    # instead of leaking a new client (and its ZMQ sockets)
+                    # per request.
+                    kernel_client = self.connection_manager.get_kernel_client(kernel_id)
+                    kernel_lock = self.connection_manager.lock_for(kernel_id)
                 except Exception as e:
                     self.set_status(400)
                     self.finish(
@@ -103,19 +104,46 @@ class FlowbookCommandHandler(APIHandler):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
-                    result = loop.run_until_complete(command.process(
-                        notebook_content,
-                        kernel_client=kernel_client,
-                        selected_cell_ids=selected_cell_ids,
-                        **params
-                    ))
+                    # The cached client is shared across requests; serialize
+                    # kernel conversations (ZMQ sockets are not thread-safe).
+                    with kernel_lock if kernel_lock is not None else contextlib.nullcontext():
+                        result = loop.run_until_complete(command.process(
+                            notebook_content,
+                            kernel_client=kernel_client,
+                            selected_cell_ids=selected_cell_ids,
+                            **params
+                        ))
                     return result
                 finally:
                     loop.close()
 
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            result = await asyncio.get_event_loop().run_in_executor(executor, run_command)
-            executor.shutdown(wait=True)
+            try:
+                # Enforce the command's timeout so a hung kernel cannot hold
+                # the HTTP request forever. Note: on timeout the worker thread
+                # cannot be killed — it keeps running (and keeps holding the
+                # per-kernel lock) until it finishes on its own. That is
+                # intentional: kernel conversations must stay serialized, so
+                # later requests block on the lock rather than interleaving.
+                result = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(executor, run_command),
+                    timeout=command.timeout,
+                )
+            except asyncio.TimeoutError:
+                error(
+                    f"Command '{command_name}' timed out after "
+                    f"{command.timeout}s"
+                )
+                self.set_status(504)
+                self.finish(json.dumps({
+                    "error": (
+                        f"Command '{command_name}' timed out after "
+                        f"{command.timeout} seconds"
+                    )
+                }))
+                return
+            finally:
+                executor.shutdown(wait=False)
 
             # Serialize ProcessingResult to JSON
             # Use model_dump() to convert Pydantic model to dict, then json.dumps
@@ -146,24 +174,6 @@ class CommandListHandler(APIHandler):
         """List available commands with UI information."""
         command_info = self.registry.get_command_info()
         self.finish(json.dumps({"commands": command_info}))
-
-
-class KernelConnectionFileHandler(APIHandler):
-    """Handler for getting kernel connection file path."""
-
-    @tornado.web.authenticated
-    async def get(self, kernel_id):
-        """Get the connection file path for a kernel."""
-        try:
-            kernel_manager = self.kernel_manager.get_kernel(kernel_id)
-            connection_file = kernel_manager.connection_file
-
-            self.finish(json.dumps({
-                "connection_file": connection_file
-            }))
-        except Exception as e:
-            self.set_status(404)
-            self.finish(json.dumps({"error": f"Kernel not found: {str(e)}"}))
 
 
 class KernelDiscoveryHandler(APIHandler):
@@ -253,14 +263,41 @@ class KernelDiscoveryHandler(APIHandler):
         # (frontend sends pid=0 and a bare filename)
         pid, connection_file = self._get_kernel_pid(connection_file)
 
-        disc_path = write_discovery(
+        # A pid of 0 means the lookup failed. Writing a discovery file with
+        # pid=0 is worse than useless: read_discovery treats it as stale and
+        # deletes it on first read, silently breaking kernel sharing.
+        if pid <= 0:
+            log(
+                f"Kernel discovery not written for {abs_path}: could not "
+                f"determine kernel PID for connection file {connection_file}"
+            )
+            self.finish(json.dumps({
+                "written": False,
+                "reason": (
+                    f"Could not determine kernel PID for connection file "
+                    f"{connection_file}; refusing to write a discovery file "
+                    f"that would be treated as stale"
+                ),
+            }))
+            return
+
+        written = write_discovery(
             notebook_path=abs_path,
             connection_file=connection_file,
             kernel_name=data.get("kernel_name", "flowbook_kernel"),
             pid=pid,
             started_by="jupyterlab",
         )
-        self.finish(json.dumps({"discovery_file": disc_path}))
+        if written:
+            self.finish(json.dumps({"written": True, "notebook_path": abs_path}))
+        else:
+            self.finish(json.dumps({
+                "written": False,
+                "reason": (
+                    "Discovery write refused (invalid pid or an existing "
+                    "live entry points at a different kernel)"
+                ),
+            }))
 
 
 class SuggestFixHandler(APIHandler):
@@ -633,31 +670,22 @@ def _build_custom_fix_response(
 
 def setup_handlers(web_app):
     """Set up the extension handlers."""
-    global _kernel_manager
-
-    pprint.pprint(web_app.settings)
-
     host_pattern = ".*$"
     base_url = web_app.settings["base_url"]
 
     registry = CommandRegistry()
-    _kernel_manager = KernelConnectionManager(web_app.settings["serverapp"])
+    connection_manager = KernelConnectionManager(web_app.settings["serverapp"])
 
     handlers = [
         (
             url_path_join(base_url, "flowbook", "execute"),
             FlowbookCommandHandler,
-            {"registry": registry},
+            {"registry": registry, "connection_manager": connection_manager},
         ),
         (
             url_path_join(base_url, "flowbook", "list"),
             CommandListHandler,
             {"registry": registry},
-        ),
-        (
-            url_path_join(base_url, "flowbook", "kernel", "(.+)", "connection"),
-            KernelConnectionFileHandler,
-            {},
         ),
         (
             url_path_join(base_url, "flowbook", "kernel-discovery", "(.+)"),

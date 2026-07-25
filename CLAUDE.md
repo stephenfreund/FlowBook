@@ -69,9 +69,20 @@ pytest flowbook/
 
 # Run specific test file
 pytest flowbook/kernel/tests/test_reproducibility_enforcer.py
+
+# Run frontend (TypeScript) tests
+jlpm test
+
+# Run a single frontend spec / with coverage
+jlpm test src/flowbook/tests/executionhook.comm.spec.ts
+jlpm test:cov
 ```
 
 Test files (`test_*.py`) must be placed in a `tests/` subdirectory of the package they test. For example, tests for `flowbook/kernel/` go in `flowbook/kernel/tests/`. Each `tests/` directory must contain an `__init__.py` file.
+
+Frontend specs mirror the same convention: `*.spec.ts` files live in a `tests/` subdirectory next to the module (`src/flowbook/tests/`, `src/shared/tests/`, `src/tests/`), excluded from the production build. Lifecycle specs use the counting fakes in `src/flowbook/tests/testutils.ts` — see `FRONTEND_TESTING.md`.
+
+**Cross-language parity fixtures**: the ▷ conflict relation and the staleness-reason vocabulary are implemented in BOTH Python and TypeScript. The shared fixtures in `src/flowbook/tests/fixtures/` are consumed by jest AND by `flowbook/kernel/tests/test_frontend_parity.py`. Adding a `ReasonType` or changing the ▷ matrix requires updating the fixture plus both implementations, or a test fails on the lagging side.
 
 ### Verification
 
@@ -101,8 +112,6 @@ The frontend exports a single JupyterLab plugin that activates for `flowbook_ker
 ```
 src/
 ├── index.ts                 # Exports [flowbookPlugin]
-├── api.ts                   # FlowbookAPI for HTTP communication
-├── kernel.ts                # KernelUtils (startup, info)
 ├── handler.ts               # Request handler (ServerConnection wrapper)
 ├── cellindex.ts             # Cell index DOM overlay manager (@A notation)
 ├── cellindexutils.ts        # indexToAlpha/alphaToIndex + getCodeCellOrder utility
@@ -119,6 +128,9 @@ src/
 │   ├── cellhighlighter.ts   # CSS highlighting + coordination (delegates to notice managers)
 │   ├── executionhook.ts     # Comm-based kernel communication + cell edit detection
 │   ├── toolbar.ts           # "Run Next Stale/Unrun" button
+│   ├── fixsuggester.ts      # AI fix suggestion UI (streams from /flowbook/suggest-fix)
+│   ├── aiattribution.ts     # Emits 'ai-notebook-activity' CustomEvents for observers
+│   ├── nbibridge.ts         # Notebook Intelligence bridge (NBI tool integration)
 │   ├── metadatapanel.tsx    # Reproducibility metadata panel (reads, writes, stale cells)
 │   └── dependenciespanel.tsx # ReactFlow dependency DAG visualization
 └── _archived/               # Mothballed experimental plugin (excluded from build)
@@ -133,20 +145,24 @@ src/
 ### Server Extension (`flowbook/server/`)
 
 The server uses the modern **ExtensionApp** pattern (not legacy extension points).
+(The `FlowBookExtension(ExtensionApp)` class itself lives in the package root
+`flowbook/__init__.py`; `flowbook/server/__init__.py` re-exports the handlers.)
 
-- `__init__.py` - `FlowBookExtension(ExtensionApp)` class with `initialize_handlers()` method
 - `handlers.py` - HTTP request handlers:
-  - `POST /flowbook/execute` - Execute a command (FlowbookCommandHandler)
+  - `POST /flowbook/execute` - Execute a command (FlowbookCommandHandler; uses the shared `KernelConnectionManager`)
   - `GET /flowbook/list` - List available commands (CommandListHandler)
   - `GET/PUT /flowbook/kernel-discovery/{path}` - Kernel discovery for MCP↔JupyterLab sharing (KernelDiscoveryHandler)
+  - `POST /flowbook/suggest-fix`, `/flowbook/apply-fix`, `/flowbook/custom-fix`, `GET /flowbook/fix-status` - AI fix suggestion endpoints (see `fix_suggester.py`, `fix_dispatcher.py`, `fix_models.py`, `fix_tools_*.py`). Sends the full notebook, including cell outputs, to the configured LLM provider.
 - `base.py` - `NotebookCommand` abstract base class
 - `registry.py` - `CommandRegistry` singleton managing available commands
 - `commands/` - Built-in command implementations:
   - `CompareBaselineCommand` - Compare baseline vs FlowBook execution with timing/memory metrics
   - `ExecuteCommand` - Execute cells with reproducibility enforcement
   - `ExecuteBaseCommand` - Run all cells (requires kernel)
-- `kernel_manager.py` - `KernelConnectionManager` and `FlowbookKernelClient` for kernel communication
-- `cli.py` - Command-line interface entry point
+- `kernel_manager.py` - `KernelConnectionManager` (cached per-kernel clients + per-kernel locks) and `FlowbookKernelClient`
+- `kernel_helper.py` - `KernelHelper.execute_code` (shared-kernel aware; `on_foreign_msg` callback)
+
+The command-line interface lives in `flowbook/cli/` (not under `server/`).
 
 ### FlowBook Kernel (`flowbook/kernel/`)
 
@@ -291,7 +307,7 @@ Commands are auto-discovered by the registry from `flowbook/server/commands/`.
 
 ### MCP Server (`flowbook/mcp/`)
 
-Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Claude Code). 26 tools organized into core, algorithmic refactoring, and logging categories.
+Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Claude Code). 32 tools organized into core, algorithmic refactoring, and logging categories (count `@mcp.tool()` in `flowbook/mcp/server.py` when updating this number).
 
 - `server.py` - FastMCP server with `@_logged_tool` decorator for automatic event logging
 - `session.py` - `NotebookSession` manages a single (notebook, kernel) pair with reproducibility metadata
@@ -299,19 +315,22 @@ Exposes notebook reproducibility analysis as MCP tools for AI clients (e.g., Cla
 
 **Key MCP Tools:**
 
-| Tool                                                  | Purpose                                                     |
-| ----------------------------------------------------- | ----------------------------------------------------------- |
-| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync  |
-| `run_cell`                                            | Execute cell, return outputs (head+tail preview) + metadata |
-| `get_cell_output`                                     | Page a cell's full untruncated output (offset/limit)        |
-| `edit_cell`                                           | Edit source, sync to Y.js, notify kernel                    |
-| `list_cells` / `get_cell`                             | Read cell state (polls IOPub for external updates)          |
-| `get_status`                                          | Reproducibility status (violations, staleness)              |
-| `get_next_actionable_cell`                            | First cell needing attention                                |
-| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                     |
-| `insert_cell` / `delete_cell`                         | Add a code/markdown cell after another; remove a cell       |
-| `checkpoint` / `restore`                              | Save/restore notebook state                                 |
-| `save_notebook`                                       | Write to disk                                               |
+| Tool                                                  | Purpose                                                        |
+| ----------------------------------------------------- | -------------------------------------------------------------- |
+| `load_notebook`                                       | Load notebook, start/join kernel, set up Contents API sync     |
+| `run_cell` / `run_all_cells` / `run_from`             | Execute cell(s), return outputs (head+tail preview) + metadata |
+| `run_actionable_cell` / `run_actionable_cells`        | Execute the next cell(s) needing attention                     |
+| `get_cell_output`                                     | Page a cell's full untruncated output (offset/limit)           |
+| `edit_cell_source`                                    | Edit source, sync to Y.js, notify kernel                       |
+| `list_cells` / `read_cell` / `get_all_cell_sources`   | Read cell state (polls IOPub for external updates)             |
+| `get_status` / `get_flowbook_metadata`                | Reproducibility status (violations, staleness)                 |
+| `get_next_actionable_cell`                            | First cell needing attention                                   |
+| `alpha_rename` / `remove_inplace` / `insert_deepcopy` | Algorithmic refactoring                                        |
+| `mark_diagnostic` / `merge_cells` / `move_cell`       | Structural refactoring                                         |
+| `insert_cell` / `delete_cell`                         | Add a code/markdown cell after another; remove a cell          |
+| `checkpoint` / `restore` / `list_checkpoints`         | Save/restore notebook state                                    |
+| `save_notebook` / `get_notebook_path`                 | Write to disk; report the loaded path                          |
+| `get_log` / `save_log` / `print_log`                  | Tool-invocation event log                                      |
 
 ### MCP ↔ JupyterLab Collaboration
 
@@ -361,7 +380,7 @@ MCP syncs notebook state with JupyterLab via the Jupyter Contents API. With `jup
 
 **Dependencies:** `jupyter-collaboration` (required for live Contents API state; without it, API returns disk state only)
 
-**Tests:** `flowbook/mcp/tests/` — 45 tests covering kernel discovery, Jupyter config, shared-kernel integration, and Contents API sync
+**Tests:** `flowbook/mcp/tests/` — 6 files (~115 tests) covering kernel discovery, Jupyter config, shared-kernel integration, Contents API sync, cell validation, and the newer tools
 
 ## Cell ID Normalization
 
@@ -375,9 +394,9 @@ All notebooks entering the system (via CLI or server) are automatically normaliz
 
 This normalization happens transparently at entry points:
 
-- **CLI**: `load_notebook()` in `flowbook/cli/helpers.py`
-- **Server**: `FlowbookCommandHandler.post()` in `flowbook/server/handlers.py`
-- **Core function**: `normalize_notebook()` in `flowbook/util/cell_ids.py`
+- **CLI**: `load_notebook()` in `flowbook/cli/helpers.py` — full normalization (non-4-char IDs replaced)
+- **Server**: `FlowbookCommandHandler.post()` in `flowbook/server/handlers.py` — calls `normalize_notebook(..., preserve_ids=True)`: existing non-empty unique IDs (including JupyterLab UUIDs) are kept as-is, and fresh IDs are assigned only to missing/empty/duplicate ones. This keeps shared-kernel mode working, where the kernel and frontend already key state by those IDs.
+- **Core function**: `normalize_notebook()` in `flowbook/util/cell_ids.py` (accepts `preserve_ids: bool = False`)
 
 ### Why 4-character IDs?
 
@@ -422,7 +441,7 @@ This normalization happens transparently at entry points:
 
 ### Adding a New Command
 
-1. Create class in `flowbook/server/commands.py` inheriting `NotebookCommand`
+1. Create a module in the `flowbook/server/commands/` package with a class inheriting `NotebookCommand`
 2. Implement required properties: `command_name`, `display_name`, `icon_name`, `requires_kernel`
 3. Implement `process()` method
 4. Register in `CommandRegistry` (typically auto-registered via import)

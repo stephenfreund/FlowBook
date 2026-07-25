@@ -85,7 +85,10 @@ export type BackendReasonType =
   | 'backward_stale' // Another cell wrote to a variable this cell also writes (was write_conflict)
   | 'no_read_before_write' // Cell reads a value written by a later cell (was reads_from_later)
   | 'order_changed' // Cell order changed affecting data flow
-  | 'no_write_after_read'; // Cell wrote to location read by earlier cell (was backward_mutation)
+  | 'no_write_after_read' // Cell wrote to location read by earlier cell (was backward_mutation)
+  | 'no_read_and_write' // Cell reads and writes the same location (violation-derived)
+  | 'write_before_read' // Cell reads a location no cell above writes (violation-derived)
+  | 'unrecoverable_mutation'; // Cell mutated state in place without rebinding (violation-derived)
 
 /**
  * Frontend-computed reason types with human-readable formatting.
@@ -338,4 +341,84 @@ export interface IFlowbookOutput {
  */
 export function asFlowbookOutput(out: unknown): IFlowbookOutput {
   return out as IFlowbookOutput;
+}
+
+// ============================================================================
+// Post-run metadata settling
+// ============================================================================
+
+/**
+ * Minimal structural view of a cell model — just enough to read metadata.
+ * Matches ICellModel without importing @jupyterlab/cells here.
+ */
+export interface IMetadataReader {
+  getMetadata: (key: string) => unknown;
+}
+
+/**
+ * Wait until a cell's `flowbook` metadata reflects a new execution.
+ *
+ * The metadata is written asynchronously by the comm message handler, so
+ * the shell reply awaited by `NotebookActions.run(...)` can resolve BEFORE
+ * the metadata for that run lands — reading it immediately would return
+ * the PREVIOUS run's errors. Callers capture the metadata before running
+ * and poll here until it changes (different execution_seq, first
+ * appearance, or new object identity) or the timeout elapses.
+ *
+ * Returns the freshest metadata observed — possibly still the stale one
+ * if the timeout expired, or undefined if the cell has none.
+ */
+export async function waitForFlowbookMetadata(
+  model: IMetadataReader,
+  before: IReproducibilityMetadata | undefined,
+  timeoutMs = 2000,
+  intervalMs = 50
+): Promise<IReproducibilityMetadata | undefined> {
+  const read = (): IReproducibilityMetadata | undefined =>
+    model.getMetadata('flowbook') as IReproducibilityMetadata | undefined;
+
+  const isFresh = (current: IReproducibilityMetadata | undefined): boolean => {
+    if (!current) {
+      return false;
+    }
+    if (!before) {
+      // Cell had no metadata before the run — any arrival is fresh.
+      return true;
+    }
+    if (
+      typeof current.execution_seq === 'number' &&
+      typeof before.execution_seq === 'number'
+    ) {
+      // The kernel bumps execution_seq on every run; a changed seq means
+      // this run's metadata has landed. (getMetadata may return a fresh
+      // deep copy each call, so identity alone is not reliable.)
+      return current.execution_seq !== before.execution_seq;
+    }
+    // Fallback when seq is unavailable: object identity.
+    return current !== before;
+  };
+
+  const deadline = Date.now() + timeoutMs;
+  let current = read();
+  while (!isFresh(current) && Date.now() < deadline) {
+    await new Promise<void>(resolve => setTimeout(resolve, intervalMs));
+    current = read();
+  }
+  return current;
+}
+
+/**
+ * Escape a string for interpolation into text/html outputs.
+ *
+ * Location names flow from user data (e.g. CSV column headers become
+ * DataFrame column names), so anything interpolated into a trusted-cell
+ * display_data HTML payload must be escaped first.
+ */
+export function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }

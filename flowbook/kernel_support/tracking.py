@@ -51,6 +51,17 @@ from flowbook.kernel_support.column_tracking import ColumnAccessTracker, walk_da
 from flowbook.kernel_support.structural_tracking import StructuralAccessTracker, StructuralTrackingMode
 
 
+class UncopyableReadError(NameError):
+    """Raised when user code reads a variable whose value could not be
+    checkpointed.
+
+    FlowBook cannot restore such a value on rollback, so allowing reads
+    would let unreproducible state flow into downstream cells. The variable
+    stays alive in the namespace; rebinding it (or deleting it) lifts the
+    block. See FORMAL_DEVELOPMENT.md (Uncopyable Variables).
+    """
+
+
 def _is_ipython_result_var(key: str) -> bool:
     """Check if key is an IPython auto-result variable.
 
@@ -124,6 +135,10 @@ class TrackingDict(dict):
         object.__setattr__(self, '_reads_before_writes', set())
         object.__setattr__(self, '_writes', set())
         object.__setattr__(self, '_tracking_enabled', True)  # Track by default
+        # Variables whose values could not be checkpointed (name -> type
+        # description). Tracked reads of these raise UncopyableReadError;
+        # rebinding or deleting the name lifts the block.
+        object.__setattr__(self, '_blocked_reads', {})
         # Pass namespace reference to trackers for lazy fallback walks
         object.__setattr__(self, '_column_tracker', ColumnAccessTracker(namespace_ref=real_ns_actual))
         object.__setattr__(self, '_structural_tracker', StructuralAccessTracker(namespace_ref=real_ns_actual))
@@ -132,21 +147,43 @@ class TrackingDict(dict):
     # Core dict protocol - delegate to _real_ns
     # =========================================================================
 
+    def _check_blocked(self, key) -> None:
+        """Raise if key is read-blocked as uncopyable (tracking enabled)."""
+        if self._tracking_enabled and key in self._blocked_reads:
+            # Paper semantics for non-checkpointable objects: warn once and
+            # block all subsequent reads (the value cannot be restored on
+            # rollback, so reads would leak unreproducible state downstream).
+            type_desc = self._blocked_reads[key]
+            raise UncopyableReadError(
+                f"FlowBook blocked this read of '{key}': its value "
+                f"({type_desc}) cannot be checkpointed, so state depending "
+                f"on it cannot be restored or reproduced. Rebind '{key}' to "
+                f"a new value (or delete it) to use the name again."
+            )
+
+    def _track_read(self, key, value) -> None:
+        """Record a read of key (in-cell masked) and lazily register pandas
+        objects for column/structural tracking."""
+        if key not in self._writes:
+            self._reads_before_writes.add(key)
+        # Lazy registration: register DataFrames/Series when accessed from
+        # namespace. This eliminates namespace walking at start/stop time.
+        if isinstance(value, pd.DataFrame):
+            self._column_tracker.register_df(value, key)
+            self._structural_tracker.register(value, key)
+        elif isinstance(value, pd.Series):
+            self._structural_tracker.register(value, key)
+
     def __getitem__(self, key):
+        self._check_blocked(key)
         value = self._real_ns[key]
         if self._tracking_enabled:
-            if key not in self._writes:
-                self._reads_before_writes.add(key)
-            # Lazy registration: register DataFrames/Series when accessed from namespace
-            # This eliminates the need to walk the namespace at start/stop time
-            if isinstance(value, pd.DataFrame):
-                self._column_tracker.register_df(value, key)
-                self._structural_tracker.register(value, key)
-            elif isinstance(value, pd.Series):
-                self._structural_tracker.register(value, key)
+            self._track_read(key, value)
         return value
 
     def __setitem__(self, key, value):
+        # Rebinding replaces the uncopyable value — lift the read block.
+        self._blocked_reads.pop(key, None)
         if self._tracking_enabled:
             self._writes.add(key)
             # Lazy registration: register DataFrames/Series when assigned to namespace
@@ -167,6 +204,15 @@ class TrackingDict(dict):
 
     def __delitem__(self, key):
         del self._real_ns[key]
+        self._blocked_reads.pop(key, None)
+        if self._tracking_enabled:
+            # `del x` is a write to x in the formal model: it changes what
+            # downstream readers of x observe. Recording it puts x in the
+            # diff's keys_to_include (OPT_ACCESSED_VARS_ONLY), so the diff
+            # reports "Variable was removed" and staleness propagates to
+            # readers of x. Recorded after the delete so a KeyError does
+            # not record a phantom write.
+            self._writes.add(key)
 
     def __contains__(self, key):
         return key in self._real_ns
@@ -185,17 +231,44 @@ class TrackingDict(dict):
     # =========================================================================
 
     def keys(self):
+        # Names-only access: reveals which variables exist, not their
+        # values. There is no location type for the namespace key set, so
+        # this is intentionally untracked (documented escape hatch).
         return self._real_ns.keys()
 
+    def _track_all_reads(self) -> None:
+        """Record reads of every user variable (values()/items() reveal all
+        values — the honest read set is 'everything')."""
+        from flowbook.kernel_support.checkpoint import is_valid_variable
+        for key, value in list(self._real_ns.items()):
+            if is_valid_variable(key, value):
+                self._track_read(key, value)
+
     def values(self):
+        if self._tracking_enabled:
+            # Iterating values reads every variable's value (audit:
+            # namespace iteration escaped read tracking).
+            self._track_all_reads()
         return self._real_ns.values()
 
     def items(self):
+        if self._tracking_enabled:
+            # Iterating items reads every variable's value (audit:
+            # namespace iteration escaped read tracking).
+            self._track_all_reads()
         return self._real_ns.items()
 
     def get(self, key, default=None):
-        """Get with default - does NOT track reads (used by IPython internals)."""
-        return self._real_ns.get(key, default)
+        """Get with default — tracked like __getitem__ (audit:
+        globals().get('x') escaped read tracking and the uncopyable
+        read block)."""
+        self._check_blocked(key)
+        if key not in self._real_ns:
+            return default
+        value = self._real_ns[key]
+        if self._tracking_enabled:
+            self._track_read(key, value)
+        return value
 
     def update(self, other=None, **kwargs):
         """Update the namespace. Uses __setitem__ to ensure tracking."""
@@ -233,6 +306,29 @@ class TrackingDict(dict):
 
     def copy(self):
         return dict(self._real_ns)
+
+    # =========================================================================
+    # Uncopyable variable read blocking
+    # =========================================================================
+
+    def block_variable(self, name: str, type_desc: str = "uncopyable object") -> None:
+        """Block tracked reads of a variable whose value cannot be checkpointed.
+
+        The value stays alive in the namespace (open files keep working,
+        displayed figures stay displayed), but user-code reads raise
+        UncopyableReadError until the name is rebound or deleted.
+        Idempotent.
+        """
+        self._blocked_reads[name] = type_desc
+
+    def unblock_variable(self, name: str) -> None:
+        """Lift the read block for a variable (no-op if not blocked)."""
+        self._blocked_reads.pop(name, None)
+
+    @property
+    def blocked_variables(self) -> Set[str]:
+        """Names currently read-blocked as uncopyable."""
+        return set(self._blocked_reads)
 
     # =========================================================================
     # Tracking control

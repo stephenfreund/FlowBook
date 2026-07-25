@@ -1,10 +1,14 @@
 """
 Command registry for managing available notebook processing commands.
 """
+import logging
 from typing import Dict, List
 
 from flowbook.server.base import NotebookCommand
 from flowbook.util.output import log, timer
+
+logger = logging.getLogger(__name__)
+
 
 class CommandRegistry:
     """Registry for all available commands."""
@@ -27,19 +31,35 @@ class CommandRegistry:
                 if is_pkg:
                     continue
                 module = importlib.import_module(f"flowbook.server.commands.{module_name}")
-                # Register all classes in the module that are subclasses of NotebookCommand
-                for attr_name in dir(module):
-                    attr = getattr(module, attr_name)
-                    try:
-                        if (
-                            isinstance(attr, type)
-                            and issubclass(attr, NotebookCommand)
-                            and attr is not NotebookCommand
-                        ):
-                            log(f"{attr_name}...")
-                            self.register(attr())
-                    except Exception:
-                        continue
+                self._register_commands_from_module(module)
+
+    def _register_commands_from_module(self, module) -> None:
+        """Register every concrete NotebookCommand subclass found in a module.
+
+        A class whose construction or registration fails is skipped with a
+        logged warning naming the class and the exception (audit R5:
+        failures used to be silently swallowed), so one broken command
+        cannot break discovery of the others.
+        """
+        for attr_name in dir(module):
+            attr = getattr(module, attr_name)
+            if not (
+                isinstance(attr, type)
+                and issubclass(attr, NotebookCommand)
+                and attr is not NotebookCommand
+                and not getattr(attr, "__abstractmethods__", False)
+            ):
+                continue
+            try:
+                log(f"{attr_name}...")
+                self.register(attr())
+            except Exception as e:
+                logger.warning(
+                    "Failed to register command class %s.%s: %r",
+                    getattr(module, "__name__", "<module>"),
+                    attr_name,
+                    e,
+                )
 
     def get_command(self, name: str) -> NotebookCommand:
         """Get a command by name."""

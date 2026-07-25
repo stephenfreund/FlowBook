@@ -82,11 +82,17 @@ def _discover_jupyter_server_info() -> Optional[dict]:
             server_token = info.get("token", "")
             pid = info.get("pid")
 
-            # Verify the server process is still running
+            # Verify the server process is still running. PermissionError
+            # means the process EXISTS but belongs to another user — treat
+            # it as alive (audit C10). PID-reuse caveat: a recycled PID can
+            # make a dead server look alive; bounded by the HTTP timeouts of
+            # the Contents API calls made against the discovered URL.
             if pid:
                 try:
                     os.kill(pid, 0)
-                except (OSError, ProcessLookupError):
+                except PermissionError:
+                    pass  # live process owned by another user
+                except OSError:
                     continue  # Server is dead, skip
 
             if server_url:

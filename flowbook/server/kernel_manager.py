@@ -2,6 +2,7 @@
 Kernel connection manager for the Jupyter server extension.
 """
 
+import threading
 from typing import Any, Dict, Optional
 from jupyter_client.blocking.client import BlockingKernelClient
 from jupyter_client.manager import KernelManager
@@ -52,16 +53,48 @@ class FlowbookKernelClient(BlockingKernelClient):
 
 
 class KernelConnectionManager:
-    """Manages kernel connections for the server extension."""
+    """Manages kernel connections for the server extension.
+
+    Clients are cached per kernel_id so repeated requests reuse one set of
+    ZMQ channels instead of leaking a new client per request. Stale entries
+    (kernel gone, channels dead) are cleaned up on the next access for that
+    kernel_id.
+
+    Because a cached client is shared across requests, callers that talk to
+    the kernel must hold the per-kernel lock from ``lock_for()`` for the
+    duration of their kernel conversation — ZMQ sockets are not thread-safe,
+    and the command handler runs commands in executor threads.
+    """
 
     def __init__(self, jupyter_server_app: ServerApp):
         self.server_app = jupyter_server_app
         self._kernel_clients: Dict[str, FlowbookKernelClient] = {}
+        self._locks: Dict[str, threading.Lock] = {}
+
+    def lock_for(self, kernel_id: str) -> threading.Lock:
+        """Get the lock serializing kernel conversations for this kernel.
+
+        Must be called from the event loop thread (like get_kernel_client);
+        the returned lock is then acquired from worker threads.
+        """
+        if kernel_id not in self._locks:
+            self._locks[kernel_id] = threading.Lock()
+        return self._locks[kernel_id]
 
     def get_kernel_client(self, kernel_id: str) -> FlowbookKernelClient:
         """Get or create a kernel client for the given kernel ID."""
         if kernel_id in self._kernel_clients:
-            return self._kernel_clients[kernel_id]
+            client = self._kernel_clients[kernel_id]
+            try:
+                # Raises if the kernel no longer exists on the server.
+                self.server_app.kernel_manager.get_kernel(kernel_id)
+            except Exception:
+                self.cleanup_client(kernel_id)
+                raise
+            if client.channels_running:
+                return client
+            # Channels died (e.g. kernel restarted with new ports) — rebuild.
+            self.cleanup_client(kernel_id)
 
         kernel_manager: KernelManager = self.server_app.kernel_manager.get_kernel(
             kernel_id
@@ -71,16 +104,22 @@ class KernelConnectionManager:
         client = FlowbookKernelClient(kernel_id=kernel_id)
         client.load_connection_info(kernel_manager.get_connection_info())
         client.start_channels()
-        client.wait_for_ready(timeout=30)
+        try:
+            client.wait_for_ready(timeout=30)
+        except Exception:
+            # Don't leak channels for a client that never became usable.
+            client.stop_channels()
+            raise
 
         self._kernel_clients[kernel_id] = client
-
-        assert isinstance(client, FlowbookKernelClient)
         return client
 
     def cleanup_client(self, kernel_id: str):
         """Clean up a kernel client."""
         if kernel_id in self._kernel_clients:
             client = self._kernel_clients[kernel_id]
-            client.stop_channels()
+            try:
+                client.stop_channels()
+            except Exception:
+                pass
             del self._kernel_clients[kernel_id]

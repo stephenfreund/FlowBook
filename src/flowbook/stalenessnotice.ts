@@ -12,9 +12,11 @@ import {
   IStalenessReason,
   IFrontendStalenessReason,
   IReproducibilityMetadata,
-  asFlowbookOutput
+  asFlowbookOutput,
+  escapeHtml
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
+import { formatBackendReasonMessage } from './reasonformat';
 
 /**
  * Type guard to check if a staleness reason is a frontend reason with message.
@@ -92,8 +94,13 @@ export class StalenessNoticeManager {
         cell.model.id
       );
 
-      // Escape HTML in the message but preserve backtick-wrapped code
-      const htmlMessage = message.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Escape HTML in the message (variable/column names come from user
+      // data), then convert backtick-wrapped code to <code> — backticks
+      // are not HTML-special, so they survive the escaping.
+      const htmlMessage = escapeHtml(message).replace(
+        /`([^`]+)`/g,
+        '<code>$1</code>'
+      );
 
       // Use different label for writer_conflict (potential violation vs stale dependency)
       const isWriterConflict = reason.type === 'writer_conflict';
@@ -148,7 +155,7 @@ export class StalenessNoticeManager {
     if (isFrontendReason(reason)) {
       return this._formatFrontendReason(reason, cellOrder, currentCellId);
     }
-    return this._formatBackendReason(reason, cellOrder, currentCellId);
+    return formatBackendReasonMessage(reason, cellOrder, currentCellId);
   }
 
   /**
@@ -230,72 +237,6 @@ export class StalenessNoticeManager {
     }
 
     return reason.message;
-  }
-
-  private _formatBackendReason(
-    reason: IStalenessReason,
-    cellOrder: string[],
-    currentCellId: string
-  ): string {
-    const cellId = 'cell_id' in reason ? reason.cell_id : undefined;
-    const loc = 'loc' in reason ? reason.loc : undefined;
-    const currentIdx = cellOrder.indexOf(currentCellId);
-
-    let causingRef = '';
-    let causingDirection = '';
-    let causingIsDeleted = false;
-    if (cellId) {
-      const causingIdx = cellOrder.indexOf(cellId);
-      causingIsDeleted = causingIdx < 0;
-      causingRef = causingIsDeleted
-        ? 'a deleted cell'
-        : indexToAlpha(causingIdx);
-      if (!causingIsDeleted && currentIdx >= 0) {
-        causingDirection = causingIdx < currentIdx ? ' above' : ' below';
-      }
-    }
-
-    switch (reason.type) {
-      case 'never_executed':
-        return 'Cell has never been executed';
-      case 'code_changed':
-        return 'Source code was edited';
-      case 'forward_stale':
-        if (loc && causingRef) {
-          return `\`${loc}\` modified by ${causingRef}${causingDirection}`;
-        }
-        return causingRef
-          ? `Input modified by ${causingRef}${causingDirection}`
-          : 'Input was modified';
-      case 'write_overlap':
-        if (loc && causingRef) {
-          return `\`${loc}\` also written by ${causingRef}`;
-        }
-        return causingRef
-          ? `Writes conflict with ${causingRef}`
-          : 'Write conflict detected';
-      case 'backward_stale':
-        if (loc && causingRef) {
-          return `\`${loc}\` write conflict with ${causingRef}`;
-        }
-        return 'Write conflict detected';
-      case 'no_read_before_write':
-        if (loc && causingRef) {
-          return `Reads \`${loc}\` written by ${causingRef} ${causingDirection}`;
-        }
-        return 'Reads value written by another cell';
-      case 'order_changed':
-        return 'Cell order changed';
-      case 'no_write_after_read':
-        if (loc && causingRef) {
-          return `Writes \`${loc}\` already read by ${causingRef} ${causingDirection}`;
-        }
-        return causingRef
-          ? `Writes variable already read by ${causingRef} ${causingDirection}`
-          : 'Writes variable already read by another cell';
-      default:
-        return 'Cell is stale';
-    }
   }
 
   /**

@@ -359,8 +359,8 @@ class TestRunActionableCell:
 class TestRunActionableCells:
     def test_runs_all_until_clean(self):
         session = _make_mock_session(cell_order=["abc1", "def2", "ghi3"])
-        # get_next_actionable_cell_id returns cells then None
-        session.get_next_actionable_cell_id.side_effect = [
+        # get_next_run_target returns cells then None
+        session.get_next_run_target.side_effect = [
             "abc1", "def2", "ghi3", None
         ]
         session.run_cell.return_value = {
@@ -383,7 +383,7 @@ class TestRunActionableCells:
 
     def test_stops_on_hard_error(self):
         session = _make_mock_session(cell_order=["abc1", "def2"])
-        session.get_next_actionable_cell_id.side_effect = ["abc1", "def2"]
+        session.get_next_run_target.side_effect = ["abc1", "def2"]
         session.run_cell.return_value = {
             "cell_id": "abc1",
             "status": "error",
@@ -409,7 +409,7 @@ class TestRunActionableCells:
             cell_order=["abc1", "def2"],
             continue_after_violation=False,
         )
-        session.get_next_actionable_cell_id.side_effect = ["abc1", "def2"]
+        session.get_next_run_target.side_effect = ["abc1", "def2"]
         session.run_cell.return_value = {
             "cell_id": "abc1",
             "status": "ok",
@@ -440,7 +440,7 @@ class TestRunActionableCells:
             continue_after_violation=True,
         )
         # First call returns abc1, second returns def2, third returns None
-        session.get_next_actionable_cell_id.side_effect = ["abc1", "def2", None]
+        session.get_next_run_target.side_effect = ["abc1", "def2", None]
 
         call_count = [0]
         def mock_run_cell(cell_id, **kwargs):
@@ -475,7 +475,7 @@ class TestRunActionableCells:
 
     def test_returns_no_actionable_immediately(self):
         session = _make_mock_session(cell_order=["abc1"])
-        session.get_next_actionable_cell_id.return_value = None
+        session.get_next_run_target.return_value = None
         session.get_status.return_value = {
             "stale_cells": {},
             "violations": [],
@@ -526,7 +526,6 @@ class TestRunCellPutsContentsApi:
         session.notebook = {"cells": [cell]}
         session.get_cell_order.return_value = ["abc1"]
         session._find_cell.return_value = (0, cell)
-        session._extract_flowbook_meta.return_value = None
         session.executed_cells = set()
         session.cell_flowbook_meta = {}
         session._stale_cells = set()

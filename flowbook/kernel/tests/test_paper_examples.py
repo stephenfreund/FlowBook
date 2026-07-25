@@ -639,17 +639,19 @@ class TestMotivatingExample_Healthcare:
         df = self._run_initial_notebook()
 
         # Insert D after C: order becomes [a, b, c, d, e, f]
-        self.helper.sdc._notebook_state.handle_insert("d", 3)
+        # (set_cell_order initializes the new cell as never-executed)
         self.helper.set_cell_order(["a", "b", "c", "d", "e", "f"])
 
         # Run D: df["age"] = (df["age"] - df["age"].mean()) / df["age"].std()
-        df_normalized = df.copy()
-        df_normalized["age"] = (df["age"] - df["age"].mean()) / df["age"].std()
+        # Mutate the ORIGINAL df in place so object identity matches the
+        # df that C read; snapshot the pre state first.
+        df_before = df.copy()
+        df["age"] = (df["age"] - df["age"].mean()) / df["age"].std()
 
         result_d = self.helper.execute_cell(
             cell_id="d",
-            pre_namespace={"pd": pd, "df": df},
-            post_namespace={"pd": pd, "df": df_normalized},
+            pre_namespace={"pd": pd, "df": df_before},
+            post_namespace={"pd": pd, "df": df},
             reads={"df"},
             writes={"df"},
             column_reads={"df": {"age"}},
@@ -1199,8 +1201,8 @@ class TestNotebookOperations:
         assert state.is_clean("a")
         assert state.is_clean("c")
 
-        # Insert B between A and C
-        state.handle_insert("b", 1)
+        # Insert B between A and C (via the [Inst-Insert] path)
+        self.helper.set_cell_order(["a", "b", "c"])
 
         # B should be stale (never executed)
         assert not state.is_clean("b"), "Inserted cell should be stale"
@@ -1467,7 +1469,11 @@ class TestColumnGranularity:
         @B: result = df["x"].sum()   (reads df.x)
         @C: df["y"] = [99]           (writes df.y)
 
-        C writes df.y, B reads df.x → no conflict at column level.
+        C writes df.y in place, B reads df.x → no conflict at column level.
+        C does not rebind df, so "df" is NOT in tracking.writes (a Var(df)
+        write would correctly conflict with B's Var(df) read). Uses the SAME
+        DataFrame object throughout so the "no conflict" outcome comes from
+        column-name precision, not broken object identity.
         """
         self.helper.set_cell_order(["a", "b", "c"])
 
@@ -1476,29 +1482,33 @@ class TestColumnGranularity:
         self.helper.execute_cell(
             cell_id="a",
             pre_namespace={},
-            post_namespace={"df": df.copy()},
+            post_namespace={"df": df},
             writes={"df"},
             column_writes={"df": {"x", "y"}},
         )
 
+        # B reads df.x from the ORIGINAL df object so its recorded read
+        # locs carry df's object identity.
         self.helper.execute_cell(
             cell_id="b",
-            pre_namespace={"df": df.copy()},
-            post_namespace={"df": df.copy(), "result": 1},
+            pre_namespace={"df": df},
+            post_namespace={"df": df, "result": 1},
             reads={"df"},
             writes={"result"},
             column_reads={"df": {"x"}},
         )
 
-        # C writes df["y"], B reads df["x"] → disjoint, no backward conflict
-        df_modified = df.copy()
-        df_modified["y"] = [99]
+        # C writes df["y"] in place (SAME object B read), B reads df["x"]
+        # → disjoint, no backward conflict.
+        # Snapshot the pre state first, then mutate the original df.
+        df_before = df.copy()
+        df["y"] = [99]
         result_c = self.helper.execute_cell(
             cell_id="c",
-            pre_namespace={"df": df.copy(), "result": 1},
-            post_namespace={"df": df_modified, "result": 1},
+            pre_namespace={"df": df_before, "result": 1},
+            post_namespace={"df": df, "result": 1},
             reads={"df"},
-            writes={"df"},
+            writes=set(),
             column_reads={"df": set()},
             column_writes={"df": {"y"}},
             continue_on_violation=True,
@@ -1524,26 +1534,30 @@ class TestColumnGranularity:
         self.helper.execute_cell(
             cell_id="a",
             pre_namespace={},
-            post_namespace={"df": df.copy()},
+            post_namespace={"df": df},
             writes={"df"},
             column_writes={"df": {"x", "y"}},
         )
 
+        # B reads df.x from the ORIGINAL df object so its recorded read
+        # locs carry df's object identity.
         self.helper.execute_cell(
             cell_id="b",
-            pre_namespace={"df": df.copy()},
-            post_namespace={"df": df.copy(), "result": 1},
+            pre_namespace={"df": df},
+            post_namespace={"df": df, "result": 1},
             reads={"df"},
             writes={"result"},
             column_reads={"df": {"x"}},
         )
 
-        df_modified = df.copy()
-        df_modified["x"] = [99]
+        # C writes df.x in place (SAME object B read).
+        # Snapshot the pre state first, then mutate the original df.
+        df_before = df.copy()
+        df["x"] = [99]
         result_c = self.helper.execute_cell(
             cell_id="c",
-            pre_namespace={"df": df.copy(), "result": 1},
-            post_namespace={"df": df_modified, "result": 1},
+            pre_namespace={"df": df_before, "result": 1},
+            post_namespace={"df": df, "result": 1},
             reads={"df"},
             writes={"df"},
             column_reads={"df": set()},
@@ -1562,7 +1576,11 @@ class TestColumnGranularity:
         @B: print(df["x"].sum())   (reads df.x only)
         @C: df["z"] = [5, 6]      (writes df.z only)
 
-        C adds df.z, B only reads df.x → B should NOT be stale.
+        C adds df.z IN PLACE, B only reads df.x → B should NOT be stale.
+        C does not rebind df, so "df" is NOT in tracking.writes (a Var(df)
+        write would correctly stale B's Var(df) read). Uses the SAME
+        DataFrame object throughout so the "not stale" outcome comes from
+        column-name precision, not broken object identity.
         """
         self.helper.set_cell_order(["a", "b", "c"])
 
@@ -1571,26 +1589,30 @@ class TestColumnGranularity:
         self.helper.execute_cell(
             cell_id="a",
             pre_namespace={},
-            post_namespace={"df": df.copy()},
+            post_namespace={"df": df},
             writes={"df"},
             column_writes={"df": {"x", "y"}},
         )
+        # B reads df.x from the ORIGINAL df object so its recorded read
+        # locs carry df's object identity.
         self.helper.execute_cell(
             cell_id="b",
-            pre_namespace={"df": df.copy()},
-            post_namespace={"df": df.copy()},
+            pre_namespace={"df": df},
+            post_namespace={"df": df},
             reads={"df"},
             column_reads={"df": {"x"}},
         )
 
-        df_with_z = df.copy()
-        df_with_z["z"] = [5, 6]
+        # C adds df["z"] in place (SAME object B read).
+        # Snapshot the pre state first, then mutate the original df.
+        df_before = df.copy()
+        df["z"] = [5, 6]
         result_c = self.helper.execute_cell(
             cell_id="c",
-            pre_namespace={"df": df.copy()},
-            post_namespace={"df": df_with_z},
+            pre_namespace={"df": df_before},
+            post_namespace={"df": df},
             reads={"df"},
-            writes={"df"},
+            writes=set(),
             column_reads={"df": set()},
             column_writes={"df": {"z"}},
             continue_on_violation=True,
@@ -1742,7 +1764,7 @@ class TestWellFormedness:
         self.helper.execute_cell("c", {"x": 1}, {"x": 1, "y": 2}, reads={"x"}, writes={"y"})
 
         state = self.helper.sdc._notebook_state
-        state.handle_insert("b", 1)
+        self.helper.set_cell_order(["a", "b", "c"])
 
         # A and C should still be clean
         assert state.is_clean("a")

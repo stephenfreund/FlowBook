@@ -1,0 +1,16 @@
+{
+  "_comment": "Backend staleness reason vocabulary. Consumed by reasonformat.spec.ts (every type must format to a non-default message) and flowbook/kernel/tests/test_frontend_parity.py (ReasonType enum values must be a subset). Add here FIRST when introducing a new ReasonType.",
+  "backend_reason_types": [
+    "backward_stale",
+    "code_changed",
+    "forward_stale",
+    "never_executed",
+    "no_read_and_write",
+    "no_read_before_write",
+    "no_write_after_read",
+    "order_changed",
+    "unrecoverable_mutation",
+    "write_before_read",
+    "write_overlap"
+  ]
+}

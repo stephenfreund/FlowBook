@@ -17,10 +17,15 @@ import { ICodeCellModel } from '@jupyterlab/cells';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { ReproducibilityExecutionHookManager } from './executionhook';
 import { KernelDetector } from '../shared/kerneldetection';
-import { IReproducibilityMetadata, IReproducibilityError } from './types';
+import {
+  IReproducibilityMetadata,
+  IReproducibilityError,
+  waitForFlowbookMetadata
+} from './types';
 import { aiTransact } from './aiattribution';
 import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
 import { StalenessManager } from './stalenessmanager';
+import { RunToCleanGuard, formatFootprintChange } from './rerunguard';
 
 // ---------------------------------------------------------------------------
 // Command result types (returned by the commands defined below)
@@ -283,9 +288,17 @@ export function registerBridgeCommands(
 
   // ------------------------------------------------------------------
   // flowbook:get-next-actionable — error > stale > unexecuted
+  //
+  // With { documentOrder: true }, stale and unexecuted cells are merged
+  // in document order (errors still first). The RunToClean loop uses
+  // this so every cell sees its final inputs before it first runs;
+  // rerunning a later stale cell before an earlier unexecuted one can
+  // legitimately change the later cell's behavior twice, which would
+  // trip the rerun footprint check on a deterministic notebook.
   // ------------------------------------------------------------------
   app.commands.addCommand('flowbook:get-next-actionable', {
-    execute: () => {
+    execute: args => {
+      const documentOrder = (args?.documentOrder as boolean) ?? false;
       const panel = getPanel();
       const widgets = panel.content.widgets;
       const staleCells = _highlighter
@@ -295,9 +308,11 @@ export function registerBridgeCommands(
       // Priority 1: cells with errors
       // Priority 2: stale cells
       // Priority 3: unexecuted cells
+      // (2 and 3 merge into document order when documentOrder is set)
       let codeIdx = 0;
       let firstStale: any = null;
       let firstUnexecuted: any = null;
+      let firstStaleOrUnexecuted: any = null;
 
       for (let i = 0; i < widgets.length; i++) {
         const cell = widgets[i];
@@ -340,7 +355,8 @@ export function registerBridgeCommands(
         }
 
         // Track first stale
-        if (!firstStale && staleCells.has(cellId)) {
+        const isStale = staleCells.has(cellId);
+        if (!firstStale && isStale) {
           firstStale = {
             index: currentCodeIdx,
             label: indexToAlpha(currentCodeIdx),
@@ -350,7 +366,8 @@ export function registerBridgeCommands(
         }
 
         // Track first unexecuted
-        if (!firstUnexecuted && codeModel.executionCount === null) {
+        const isUnexecuted = codeModel.executionCount === null;
+        if (!firstUnexecuted && isUnexecuted) {
           firstUnexecuted = {
             index: currentCodeIdx,
             label: indexToAlpha(currentCodeIdx),
@@ -358,8 +375,21 @@ export function registerBridgeCommands(
             reason: 'unexecuted'
           };
         }
+
+        // Track first stale-or-unexecuted (document order)
+        if (!firstStaleOrUnexecuted && (isStale || isUnexecuted)) {
+          firstStaleOrUnexecuted = {
+            index: currentCodeIdx,
+            label: indexToAlpha(currentCodeIdx),
+            cell_id: cellId,
+            reason: isStale ? 'stale' : 'unexecuted'
+          };
+        }
       }
 
+      if (documentOrder) {
+        return firstStaleOrUnexecuted ?? { done: true };
+      }
       if (firstStale) {
         return firstStale;
       }
@@ -599,15 +629,21 @@ export function registerBridgeCommands(
       const widgetIdx = codeCellToWidgetIndex(panel, codeCellIndex);
       const label = indexToAlpha(codeCellIndex);
 
+      // Capture pre-run metadata: it is written asynchronously by the
+      // comm handler, so the shell reply can beat it and an immediate
+      // read would return the PREVIOUS run's errors.
+      const targetCell = panel.content.widgets[widgetIdx];
+      const beforeMeta = targetCell.model.getMetadata('flowbook') as
+        | IReproducibilityMetadata
+        | undefined;
+
       // Activate and run via JupyterLab's native mechanism
       panel.content.activeCellIndex = widgetIdx;
       await NotebookActions.run(panel.content, panel.sessionContext);
 
-      // Read results after execution completes
+      // Wait for this run's metadata to land before evaluating errors
       const cell = panel.content.widgets[widgetIdx];
-      const meta = cell.model.getMetadata('flowbook') as
-        | IReproducibilityMetadata
-        | undefined;
+      const meta = await waitForFlowbookMetadata(cell.model, beforeMeta);
       const hasError = cellHasError(panel, widgetIdx);
       const violations = cellHasViolation(panel, widgetIdx);
 
@@ -623,20 +659,32 @@ export function registerBridgeCommands(
   });
 
   // ------------------------------------------------------------------
-  // flowbook:run-actionable-cells — loop until clean or error
+  // flowbook:run-actionable-cells — the RunToClean loop
+  //
+  // Repeatedly executes the first stale-or-unexecuted cell in document
+  // order. If a cell is executed a second time and its read or write
+  // sets changed, the loop may never terminate (reruns keep marking
+  // earlier cells stale), so it stops and reports potential
+  // non-termination at that cell. Report-free executions finish within
+  // n(n+2) runs (Progress theorem); the iteration cap is a backstop for
+  // cells with no tracking metadata.
   // ------------------------------------------------------------------
   app.commands.addCommand('flowbook:run-actionable-cells', {
     execute: async () => {
-      getPanel(); // Verify a notebook is open
+      const panel = getPanel(); // Verify a notebook is open
       const results: any[] = [];
       let totalRun = 0;
-      const maxIterations = 500; // safety limit
+      let potentialNonTermination: any = null;
+      const guard = new RunToCleanGuard();
+      const nCodeCells = getCodeCellOrder(panel).length;
+      const maxIterations = Math.max(25, nCodeCells * (nCodeCells + 3));
 
       while (totalRun < maxIterations) {
         try {
-          // Find next actionable
+          // Find next cell to run (stale/unexecuted merged, document order)
           const actionable = (await app.commands.execute(
-            'flowbook:get-next-actionable'
+            'flowbook:get-next-actionable',
+            { documentOrder: true }
           )) as IActionableResult;
           if (actionable.done) {
             break;
@@ -667,6 +715,43 @@ export function registerBridgeCommands(
           if (runResult.status === 'violation') {
             break;
           }
+
+          // RunToClean check: a re-executed cell must not mark an
+          // earlier cell stale, else the loop may never terminate.
+          const cellOrder = getCodeCellOrder(getPanel());
+          const report = runResult.cell_id
+            ? guard.noteRun(
+                runResult.cell_id,
+                runResult.flowbook_meta,
+                cellOrder
+              )
+            : null;
+          if (report) {
+            const markedLabels = report.backwardStale
+              .map(cid => indexToAlpha(cellOrder.indexOf(cid)))
+              .join(', ');
+            let message =
+              `Potential non-termination at ${label}: re-running this ` +
+              `cell marked earlier cell(s) ${markedLabels} stale again, ` +
+              'so repeatedly running stale cells may never make the ' +
+              'notebook clean.';
+            if (report.change) {
+              const detail = formatFootprintChange(report.change);
+              message += ` ${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
+            }
+            message +=
+              ' Varying values are fine, but the set of variables a ' +
+              'cell reads and writes must be the same on every run.';
+            potentialNonTermination = {
+              label,
+              cell_id: runResult.cell_id,
+              backward_stale: report.backwardStale,
+              change: report.change,
+              message
+            };
+            results[results.length - 1].status = 'potential-non-termination';
+            break;
+          }
         } catch (error) {
           console.error('Error in run-actionable-cells:', error);
           break;
@@ -679,6 +764,7 @@ export function registerBridgeCommands(
       return {
         results,
         cells_run: totalRun,
+        potential_non_termination: potentialNonTermination,
         summary: status
       };
     }

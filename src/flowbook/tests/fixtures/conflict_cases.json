@@ -1,0 +1,232 @@
+{
+  "_comment": "Shared parity fixture for the ▷ conflict relation. Consumed by BOTH src/flowbook/tests/types.spec.ts (writeConflictsRead) and flowbook/kernel/tests/test_frontend_parity.py (write_conflicts_read). Loc shape: {type, name, qualifier?, var_name?}. A numeric qualifier is a LocRef loc_id with var_name; a string qualifier compares by name. Keep exhaustive over the 5x5 matrix.",
+  "cases": [
+    {
+      "desc": "Var/Var same name",
+      "write": { "type": "var", "name": "x" },
+      "read": { "type": "var", "name": "x" },
+      "conflicts": true
+    },
+    {
+      "desc": "Var/Var different name",
+      "write": { "type": "var", "name": "x" },
+      "read": { "type": "var", "name": "y" },
+      "conflicts": false
+    },
+    {
+      "desc": "Var/Col no bridge",
+      "write": { "type": "var", "name": "df" },
+      "read": { "type": "col", "name": "price", "qualifier": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Var/Cols no bridge",
+      "write": { "type": "var", "name": "df" },
+      "read": { "type": "cols", "name": "df", "qualifier": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Var/Rows no bridge",
+      "write": { "type": "var", "name": "df" },
+      "read": { "type": "rows", "name": "df", "qualifier": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Var/File no bridge",
+      "write": { "type": "var", "name": "data" },
+      "read": { "type": "file", "name": "data.csv" },
+      "conflicts": false
+    },
+
+    {
+      "desc": "Col/Col same df same col",
+      "write": { "type": "col", "name": "price", "qualifier": "df" },
+      "read": { "type": "col", "name": "price", "qualifier": "df" },
+      "conflicts": true
+    },
+    {
+      "desc": "Col/Col same df different col",
+      "write": { "type": "col", "name": "price", "qualifier": "df" },
+      "read": { "type": "col", "name": "qty", "qualifier": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Col/Col different df same col",
+      "write": { "type": "col", "name": "price", "qualifier": "df1" },
+      "read": { "type": "col", "name": "price", "qualifier": "df2" },
+      "conflicts": false
+    },
+    {
+      "desc": "Col/Cols same df",
+      "write": { "type": "col", "name": "price", "qualifier": "df" },
+      "read": { "type": "cols", "name": "df", "qualifier": "df" },
+      "conflicts": true
+    },
+    {
+      "desc": "Col/Cols different df",
+      "write": { "type": "col", "name": "price", "qualifier": "df1" },
+      "read": { "type": "cols", "name": "df2", "qualifier": "df2" },
+      "conflicts": false
+    },
+    {
+      "desc": "Col/Var no bridge",
+      "write": { "type": "col", "name": "price", "qualifier": "df" },
+      "read": { "type": "var", "name": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Col/Rows independent dims",
+      "write": { "type": "col", "name": "price", "qualifier": "df" },
+      "read": { "type": "rows", "name": "df", "qualifier": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Col/File no bridge",
+      "write": { "type": "col", "name": "price", "qualifier": "df" },
+      "read": { "type": "file", "name": "price" },
+      "conflicts": false
+    },
+
+    {
+      "desc": "Cols/Col same df",
+      "write": { "type": "cols", "name": "df", "qualifier": "df" },
+      "read": { "type": "col", "name": "price", "qualifier": "df" },
+      "conflicts": true
+    },
+    {
+      "desc": "Cols/Cols same df",
+      "write": { "type": "cols", "name": "df", "qualifier": "df" },
+      "read": { "type": "cols", "name": "df", "qualifier": "df" },
+      "conflicts": true
+    },
+    {
+      "desc": "Cols/Rows independent dims",
+      "write": { "type": "cols", "name": "df", "qualifier": "df" },
+      "read": { "type": "rows", "name": "df", "qualifier": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Cols/Var no bridge",
+      "write": { "type": "cols", "name": "df", "qualifier": "df" },
+      "read": { "type": "var", "name": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Cols/Col different df",
+      "write": { "type": "cols", "name": "df1", "qualifier": "df1" },
+      "read": { "type": "col", "name": "price", "qualifier": "df2" },
+      "conflicts": false
+    },
+
+    {
+      "desc": "Rows/Col same df",
+      "write": { "type": "rows", "name": "df", "qualifier": "df" },
+      "read": { "type": "col", "name": "price", "qualifier": "df" },
+      "conflicts": true
+    },
+    {
+      "desc": "Rows/Rows same df",
+      "write": { "type": "rows", "name": "df", "qualifier": "df" },
+      "read": { "type": "rows", "name": "df", "qualifier": "df" },
+      "conflicts": true
+    },
+    {
+      "desc": "Rows/Cols independent dims",
+      "write": { "type": "rows", "name": "df", "qualifier": "df" },
+      "read": { "type": "cols", "name": "df", "qualifier": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Rows/Var no bridge",
+      "write": { "type": "rows", "name": "df", "qualifier": "df" },
+      "read": { "type": "var", "name": "df" },
+      "conflicts": false
+    },
+    {
+      "desc": "Rows/Rows different df",
+      "write": { "type": "rows", "name": "df1", "qualifier": "df1" },
+      "read": { "type": "rows", "name": "df2", "qualifier": "df2" },
+      "conflicts": false
+    },
+
+    {
+      "desc": "File/File same path",
+      "write": { "type": "file", "name": "data.csv" },
+      "read": { "type": "file", "name": "data.csv" },
+      "conflicts": true
+    },
+    {
+      "desc": "File/File different path",
+      "write": { "type": "file", "name": "data.csv" },
+      "read": { "type": "file", "name": "other.csv" },
+      "conflicts": false
+    },
+    {
+      "desc": "File/Var no bridge",
+      "write": { "type": "file", "name": "data.csv" },
+      "read": { "type": "var", "name": "data" },
+      "conflicts": false
+    },
+    {
+      "desc": "File/Col no bridge",
+      "write": { "type": "file", "name": "df" },
+      "read": { "type": "col", "name": "price", "qualifier": "df" },
+      "conflicts": false
+    },
+
+    {
+      "desc": "LocRef identity beats var name (aliases conflict)",
+      "write": {
+        "type": "col",
+        "name": "price",
+        "qualifier": 5,
+        "var_name": "df2"
+      },
+      "read": {
+        "type": "col",
+        "name": "price",
+        "qualifier": 5,
+        "var_name": "df"
+      },
+      "conflicts": true
+    },
+    {
+      "desc": "LocRef different objects same var name",
+      "write": {
+        "type": "col",
+        "name": "price",
+        "qualifier": 5,
+        "var_name": "df"
+      },
+      "read": {
+        "type": "col",
+        "name": "price",
+        "qualifier": 6,
+        "var_name": "df"
+      },
+      "conflicts": false
+    },
+    {
+      "desc": "Mixed LocRef/string falls back to var name (match)",
+      "write": {
+        "type": "col",
+        "name": "price",
+        "qualifier": 5,
+        "var_name": "df"
+      },
+      "read": { "type": "col", "name": "price", "qualifier": "df" },
+      "conflicts": true
+    },
+    {
+      "desc": "Mixed LocRef/string falls back to var name (mismatch)",
+      "write": {
+        "type": "col",
+        "name": "price",
+        "qualifier": 5,
+        "var_name": "df1"
+      },
+      "read": { "type": "col", "name": "price", "qualifier": "df2" },
+      "conflicts": false
+    }
+  ]
+}

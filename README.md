@@ -21,6 +21,8 @@ When every cell is _clean_ — executed and rerun consistent —
 the notebook is guaranteed _output consistent_: running it top-to-bottom
 from an empty store yields exactly the outputs currently recorded.
 
+For technical details and a complete evaluation, see our arXiv paper: [FlowBook: Enforcing Reproducibility in Computational Notebooks](https://arxiv.org/abs/2605.01560).
+
 (Note: we sometimes use reproducibility as a synonym for output consistency in the documentation and code.)
 
 ## Quick Start

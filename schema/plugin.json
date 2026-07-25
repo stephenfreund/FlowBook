@@ -1,12 +1,6 @@
 {
   "jupyter.lab.menus": {
-    "context": [
-      {
-        "command": "flowbook:exec-restore",
-        "selector": ".jp-Cell.jp-CodeCell",
-        "rank": 0
-      }
-    ]
+    "context": []
   },
   "jupyter.lab.shortcuts": [],
   "jupyter.lab.toolbars": {},

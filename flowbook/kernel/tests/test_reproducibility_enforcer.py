@@ -344,7 +344,13 @@ class TestColumnAwareBackwardMutation:
         return namespace
 
     def test_no_conflict_different_columns(self):
-        """Cell A reads df.price, Cell B modifies df.quantity - no violation."""
+        """Cell A reads df.price, Cell B modifies df.quantity in place - no violation.
+
+        B mutates the SAME object A read (identity preserved for LocRef
+        matching) and does NOT rebind df, so "df" is not in tracking.writes
+        (a Var(df) write would correctly conflict with A's Var(df) read).
+        The "no violation" outcome comes from column-name precision.
+        """
         import pandas as pd
 
         df = pd.DataFrame({"price": [10, 20], "quantity": [1, 2]})
@@ -363,25 +369,24 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies df.quantity (different column)
-        df_modified = df.copy()
-        df_modified["quantity"] = [10, 20]
+        # Cell B: modifies df.quantity in place (different column, SAME object).
+        # Save the pre-checkpoint first (save deep-copies), then mutate.
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        ns_b = self._make_namespace({"df": df_modified, "y": 30})
+        df["quantity"] = [10, 20]
+        ns_b = self._make_namespace({"df": df, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(
                 reads={"df"},
-                writes={"df"},
+                writes=set(),
                 column_reads={"df": set()},
                 column_writes={"df": {"quantity"}},
             ),
         )
 
         # No backward mutation - different columns
-        # (NoReadAndWrite may fire since B reads and writes df)
         assert not any(
             e.error_type == ErrorType.NO_WRITE_AFTER_READ for e in result_b.errors
         )
@@ -406,11 +411,12 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies df.price (same column)
-        df_modified = df.copy()
-        df_modified["price"] = [100, 200]
+        # Cell B: modifies df.price in place (same column, SAME object).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        ns_b = self._make_namespace({"df": df_modified, "y": 30})
+        df["price"] = [100, 200]
+        ns_b = self._make_namespace({"df": df, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
@@ -435,8 +441,10 @@ class TestColumnAwareBackwardMutation:
     def test_no_conflict_prior_var_read_vs_column_write(self):
         """Cell A reads Var(df) (binding-only), Cell B writes Col(df, price) - no violation.
 
-        Var(df) is a binding-only read. A column write does not affect the
-        binding, so there is no backward conflict.
+        Var(df) is a binding-only read. An in-place column write does not
+        affect the binding (df is NOT rebound, so "df" is not in
+        tracking.writes), so there is no backward conflict. If B rebound df
+        (writes={"df"}), the Var(df) write WOULD correctly conflict.
         """
         import pandas as pd
 
@@ -456,18 +464,18 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies df.price (Col write)
-        df_modified = df.copy()
-        df_modified["price"] = [100, 200]
+        # Cell B: modifies df.price in place (Col write, no rebinding).
+        # Save the pre-checkpoint first (save deep-copies), then mutate.
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        ns_b = self._make_namespace({"df": df_modified, "y": 30})
+        df["price"] = [100, 200]
+        ns_b = self._make_namespace({"df": df, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(
                 reads={"df"},
-                writes={"df"},
+                writes=set(),
                 column_reads={"df": set()},
                 column_writes={"df": {"price"}},
             ),
@@ -500,10 +508,12 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies entire df (no column tracking)
-        df_modified = df * 2
+        # Cell B: modifies entire df in place (no column tracking).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        ns_b = self._make_namespace({"df": df_modified, "y": 30})
+        df.loc[:, :] = df * 2
+        ns_b = self._make_namespace({"df": df, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
@@ -591,12 +601,13 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies both df.price and df.quantity
-        df_modified = df.copy()
-        df_modified["price"] = [100, 200]
-        df_modified["quantity"] = [10, 20]
+        # Cell B: modifies both df.price and df.quantity in place (SAME object).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("b", {"df": df, "y": 30})
-        ns_b = self._make_namespace({"df": df_modified, "y": 30})
+        df["price"] = [100, 200]
+        df["quantity"] = [10, 20]
+        ns_b = self._make_namespace({"df": df, "y": 30})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
@@ -637,18 +648,19 @@ class TestColumnAwareBackwardMutation:
             ),
         )
 
-        # Cell B: modifies df1.b (not df1.a) - df2 unchanged
-        df1_modified = df1.copy()
-        df1_modified["b"] = [10, 20]
+        # Cell B: adds df1.b in place (not df1.a) - df2 unchanged.
+        # In-place column write → df1 NOT rebound, not in tracking.writes.
+        # Save the pre-checkpoint first (save deep-copies), then mutate.
         self._save_pre_checkpoint("b", {"df1": df1, "df2": df2, "y": 1})
-        ns_b = self._make_namespace({"df1": df1_modified, "df2": df2, "y": 1})
+        df1["b"] = [10, 20]
+        ns_b = self._make_namespace({"df1": df1, "df2": df2, "y": 1})
         result_b = self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
             namespace=ns_b,
             tracking=make_tracking(
                 reads={"df1"},
-                writes={"df1"},
+                writes=set(),
                 column_reads={"df1": set()},
                 column_writes={"df1": {"b"}},
             ),
@@ -1150,12 +1162,13 @@ class TestStructuralTrackingEnforce:
         )
         assert not result_b.has_errors()
 
-        # Cell C: Adds a new column raw_data['x'] = 3
-        # With ENFORCE mode, this SHOULD cause a violation
-        df_modified = df.copy()
-        df_modified["x"] = 3
+        # Cell C: Adds a new column raw_data['x'] = 3 in place (SAME object).
+        # With ENFORCE mode, this SHOULD cause a violation.
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("c", {"raw_data": df})
-        ns_c = self._make_namespace({"raw_data": df_modified})
+        df["x"] = 3
+        ns_c = self._make_namespace({"raw_data": df})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
@@ -1216,12 +1229,13 @@ class TestStructuralTrackingEnforce:
         )
         assert not result_b.has_errors()
 
-        # Cell C: Adds a new column df['x'] = 3
-        # No overlap with columns a,b but structural read of .columns is violated
-        df_modified = df.copy()
-        df_modified["x"] = 3
+        # Cell C: Adds a new column df['x'] = 3 in place (SAME object).
+        # No overlap with columns a,b but structural read of .columns is violated.
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original df so object identity is preserved for LocRef matching.
         self._save_pre_checkpoint("c", {"df": df})
-        ns_c = self._make_namespace({"df": df_modified})
+        df["x"] = 3
+        ns_c = self._make_namespace({"df": df})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
@@ -1377,10 +1391,12 @@ class TestAccessedVarsOnlyOptimization:
             tracking=make_tracking(reads={"df"}, writes={"df_alias"}),
         )
 
-        # Cell C: modifies through alias
-        df_modified = pd.DataFrame({"price": [999, 999], "quantity": [5, 10]})
+        # Cell C: modifies through alias, in place (SAME object as df).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # shared object so identity is preserved for LocRef matching.
         self._save_pre_checkpoint("c", {"df": df, "df_alias": df_alias})
-        ns_c = self._make_namespace({"df": df_modified, "df_alias": df_modified})
+        df_alias["price"] = [999, 999]
+        ns_c = self._make_namespace({"df": df, "df_alias": df_alias})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
@@ -4831,19 +4847,23 @@ class TestColumnAliasExpansion:
         )
         assert not result_b.has_errors()
 
-        # Cell C: writes x['col'] (modifying through alias)
+        # Cell C: writes x['col'] IN PLACE (modifying through alias).
         # Since Cell A (earlier) read p['col'] and C writes x['col'] (alias for p),
         # this triggers a NoWriteAfterRead violation. We use continue_on_violation=True
         # to allow staleness computation even with the violation, since we're testing
         # that alias expansion correctly identifies the staleness relationship.
-        p_modified = pd.DataFrame({"col": [999, 999, 999]})
+        # The mutation hits the SAME object A read (identity preserved for
+        # LocRef matching): save the pre-checkpoint first (it deep-copies),
+        # then mutate the original object. An in-place column write does not
+        # rebind x, so "x" is NOT in tracking.writes.
         self._save_pre_checkpoint("c", {"p": p, "x": x})
-        ns_c = self._make_namespace({"p": p_modified, "x": p_modified})
+        x["col"] = [999, 999, 999]
+        ns_c = self._make_namespace({"p": p, "x": x})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace=ns_c,
-            tracking=make_tracking(writes={"x"}, column_writes={"x": {"col"}}),
+            tracking=make_tracking(reads={"x"}, column_writes={"x": {"col"}}),
             continue_on_violation=True,
         )
 
@@ -4941,17 +4961,21 @@ class TestColumnAliasExpansion:
             tracking=make_tracking(reads={"p"}, writes={"x", "y"}),
         )
 
-        # Cell C: writes through y (which is alias for p)
+        # Cell C: writes y['col'] IN PLACE (y is alias for p).
         # This is actually a backward mutation (C writes location that earlier A read),
-        # but we want to test staleness propagation, so continue_on_violation=True
-        p_modified = pd.DataFrame({"col": [999, 999, 999]})
+        # but we want to test staleness propagation, so continue_on_violation=True.
+        # The mutation hits the SAME object A read (identity preserved for
+        # LocRef matching): save the pre-checkpoint first (it deep-copies),
+        # then mutate the original object. An in-place column write does not
+        # rebind y, so "y" is NOT in tracking.writes.
         self._save_pre_checkpoint("c", {"p": p, "x": x, "y": y})
-        ns_c = self._make_namespace({"p": p_modified, "x": p_modified, "y": p_modified})
+        y["col"] = [999, 999, 999]
+        ns_c = self._make_namespace({"p": p, "x": x, "y": y})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],
             namespace=ns_c,
-            tracking=make_tracking(writes={"y"}, column_writes={"y": {"col"}}),
+            tracking=make_tracking(reads={"y"}, column_writes={"y": {"col"}}),
             continue_on_violation=True,
         )
 
@@ -5360,8 +5384,16 @@ class TestUnrecoverableMutation:
     # Staleness propagation tests
     # =========================================================================
 
-    def test_inplace_mutation_does_not_propagate_staleness(self):
-        """In-place mutation should NOT make downstream cells stale (even when accepted)."""
+    def test_accepted_inplace_mutation_propagates_staleness(self):
+        """An ACCEPTED in-place mutation propagates staleness to readers.
+
+        Under continue_on_violation=True the unrecoverable mutation is
+        accepted, so the changed value of x PERSISTS in the namespace. B read
+        the old value of x, so B must be marked stale — leaving it clean
+        would be unsound (B's recorded outputs no longer match the state it
+        would see on re-run). Only REJECTED violations (rollback) skip
+        staleness propagation.
+        """
         # A writes x
         self._save_pre_checkpoint("a", {})
         ns_a = self._make_namespace({"x": [1, 2, 3]})
@@ -5394,9 +5426,10 @@ class TestUnrecoverableMutation:
             continue_on_violation=True,
         )
 
-        # B should NOT be stale — x mutation is unrecoverable, doesn't propagate
-        assert self.sdc._notebook_state.is_clean("b"), \
-            f"B should stay clean but got: {self.sdc._notebook_state.get_status('b')}"
+        # B IS stale — the accepted mutation of x persists, so B (a reader
+        # of x) would see different data on re-run.
+        assert not self.sdc._notebook_state.is_clean("b"), \
+            f"B should be stale after accepted mutation of x, got: {self.sdc._notebook_state.get_status('b')}"
 
     def test_recoverable_write_propagates_staleness(self):
         """Rebinding x=2 should make cells reading x stale."""
@@ -5516,11 +5549,15 @@ class TestUnrecoverableMutation:
         assert not self.sdc._notebook_state.is_clean("d"), \
             f"D should be stale due to y change, but got: {self.sdc._notebook_state.get_status('d')}"
 
-    def test_delete_mutating_cell_no_staleness(self):
-        """Deleting a cell that only mutated in-place should not propagate staleness.
+    def test_delete_mutating_cell_reader_already_stale(self):
+        """Deleting a cell that mutated in place: reader staleness persists.
 
-        D mutates x[5]=3 (accepted). D deleted. Cells reading x should NOT be
-        marked stale from D since D was never last_writer.
+        D mutates x[5]=99 (accepted). The accepted mutation persists in the
+        namespace, so B (which read x) is marked stale at D's execution —
+        accepted-but-unrecoverable changes propagate staleness (readers saw
+        data that has since changed). D is still never last_writer of x
+        (in-place mutation does not rebind), and deleting D does not clear
+        B's staleness: x still holds the mutated value.
         """
         # A writes x
         self._save_pre_checkpoint("a", {})
@@ -5557,12 +5594,16 @@ class TestUnrecoverableMutation:
         # D is NOT last_writer of x (A is) - D only mutated in place
         assert self.sdc._notebook_state.last_writer_for("x", "d") == "a"
 
+        # B is stale from D's accepted mutation of x (which B read)
+        assert not self.sdc._notebook_state.is_clean("b"), \
+            f"B should be stale after D's accepted mutation, got: {self.sdc._notebook_state.get_status('b')}"
+
         # Delete D
         self.sdc.set_cell_order(["a", "b", "c"])
 
-        # B should still be clean — D was never last_writer of x
-        assert self.sdc._notebook_state.is_clean("b"), \
-            f"B should stay clean after D deletion, got: {self.sdc._notebook_state.get_status('b')}"
+        # B stays stale — deleting D does not restore the value B read
+        assert not self.sdc._notebook_state.is_clean("b"), \
+            f"B should remain stale after D deletion, got: {self.sdc._notebook_state.get_status('b')}"
 
     def test_recoverable_column_write_propagates_staleness(self):
         """Column write (df['col']=val) without rebinding df should propagate staleness
@@ -5571,13 +5612,17 @@ class TestUnrecoverableMutation:
         This is a recoverable mutation (column is tracked in column_writes),
         so it SHOULD make cells reading that column stale. Cells with only
         Var(df) (binding-only read) are NOT staled since Col ▷ Var = false.
+
+        Uses the SAME DataFrame object throughout: LocRef conflict detection
+        compares stable object IDs, so C's mutation must hit the very object
+        B read (as it does in a real kernel).
         """
         import pandas as pd
 
         # A: df = DataFrame
-        df_orig = pd.DataFrame({"price": [10, 20]})
+        df = pd.DataFrame({"price": [10, 20]})
         self._save_pre_checkpoint("a", {})
-        ns_a = self._make_namespace({"df": df_orig.copy()})
+        ns_a = self._make_namespace({"df": df})
         self.sdc.check(
             cell_id="a",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}a"],
@@ -5585,9 +5630,9 @@ class TestUnrecoverableMutation:
             tracking=make_tracking(reads=set(), writes={"df"}),
         )
 
-        # B: reads df['price'] (column-level read)
-        self._save_pre_checkpoint("b", {"df": df_orig.copy()})
-        ns_b = self._make_namespace({"df": df_orig.copy(), "total": 30})
+        # B: reads df['price'] (column-level read, SAME object)
+        self._save_pre_checkpoint("b", {"df": df})
+        ns_b = self._make_namespace({"df": df, "total": 30})
         self.sdc.check(
             cell_id="b",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}b"],
@@ -5599,11 +5644,12 @@ class TestUnrecoverableMutation:
         )
         assert self.sdc._notebook_state.is_clean("b")
 
-        # C: df['price'] = df['price'] * 2 (recoverable column write, NO rebinding)
-        df_mod = df_orig.copy()
-        df_mod["price"] = df_mod["price"] * 2
-        self._save_pre_checkpoint("c", {"df": df_orig.copy(), "total": 30})
-        ns_c = self._make_namespace({"df": df_mod, "total": 30})
+        # C: df['price'] = df['price'] * 2 (recoverable column write, NO rebinding).
+        # Save the pre-checkpoint first (save deep-copies), then mutate the
+        # original object in place so identity is preserved.
+        self._save_pre_checkpoint("c", {"df": df, "total": 30})
+        df["price"] = df["price"] * 2
+        ns_c = self._make_namespace({"df": df, "total": 30})
         result_c = self.sdc.check(
             cell_id="c",
             pre_checkpoint=self.checkpoints.saved[f"{PRE_CHECKPOINT_PREFIX}c"],

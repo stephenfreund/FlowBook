@@ -29,6 +29,7 @@ from flowbook.mcp.session import (
     format_outputs_text,
 )
 from flowbook.util.cell_index import index_to_alpha
+from flowbook.util.footprint import RunToCleanGuard, format_footprint_change
 
 
 def _get_session(ctx: Context) -> NotebookSession:
@@ -551,10 +552,20 @@ def run_actionable_cell(ctx: Context) -> str:
 def run_actionable_cells(ctx: Context) -> str:
     """Run all actionable cells in sequence until the notebook is clean.
 
-    Loops: find next actionable cell, run it, check for errors/violations,
-    repeat. Stops on:
+    Implements the RunToClean algorithm from the formal development:
+    repeatedly execute the first cell that needs execution in notebook
+    order, recording the set of cells already executed this call. If a
+    cell is executed a second time and marks an earlier cell stale
+    (it dropped a write that the earlier cell must now restore), the
+    loop may never terminate, so it stops and reports potential
+    non-termination at that cell. Also stops on:
     - Hard errors (execution exceptions): always stops
     - Violations: stops only if continue_after_violation is False
+
+    Deterministic cells never trigger the non-termination report, and
+    neither do cells that write varying values (e.g. random numbers) to
+    a fixed set of variables — a rerun marks backward only when the set
+    of variables it writes shrinks, never because values changed.
 
     Returns a summary with the number of cells run and the final status.
     """
@@ -564,9 +575,15 @@ def run_actionable_cells(ctx: Context) -> str:
     cells_ran = []
     violations_seen = []
     error_cell = None
+    guard = RunToCleanGuard()
+    nontermination = None
+    # Report-free executions finish within n(n+2) runs (Progress theorem);
+    # the cap is a backstop for cells with no tracking metadata.
+    n_cells = len(session.get_cell_order())
+    max_runs = max(25, n_cells * (n_cells + 3))
 
-    while True:
-        next_id = session.get_next_actionable_cell_id()
+    while len(cells_ran) < max_runs:
+        next_id = session.get_next_run_target()
         if next_id is None:
             break
 
@@ -580,13 +597,24 @@ def run_actionable_cells(ctx: Context) -> str:
             break
 
         # Check for violations — stop if continue_after_violation is False
+        # (a rejected run is rolled back, so its footprint is not recorded)
         fb_meta = session.cell_flowbook_meta.get(next_id, {})
         errors = fb_meta.get("errors", [])
+        if errors and not session._continue_after_violation:
+            for e in errors:
+                violations_seen.append({"cell_id": next_id, **e})
+            break
+
+        # RunToClean check: a re-executed cell must not mark an earlier
+        # cell stale, else the loop may never terminate.
+        report = guard.note_run(next_id, fb_meta, session.get_cell_order())
+        if report is not None:
+            nontermination = {"cell_id": next_id, "label": label, **report}
+            break
+
         if errors:
             for e in errors:
                 violations_seen.append({"cell_id": next_id, **e})
-            if not session._continue_after_violation:
-                break
 
     # Build summary
     n = len(cells_ran)
@@ -601,9 +629,35 @@ def run_actionable_cells(ctx: Context) -> str:
     stale_count = len(status["stale_cells"])
     line += f" | {stale_count} stale"
 
-    if error_cell is None and not violations_seen and stale_count == 0:
+    if nontermination:
+        cid = nontermination["cell_id"]
+        marked = ", ".join(
+            f"{_cell_label(session, m)} [{m}]"
+            for m in nontermination["backward_stale"]
+        )
+        line += (
+            f"\nPOTENTIAL NON-TERMINATION at {nontermination['label']} [{cid}]: "
+            f"re-running this cell marked earlier cell(s) {marked} stale "
+            "again, so repeatedly running stale cells may never make the "
+            "notebook clean."
+        )
+        if "prev_writes" in nontermination:
+            line += (
+                f" {format_footprint_change(nontermination).capitalize()}."
+            )
+        line += (
+            " Varying values are fine, but the set of variables a cell "
+            "reads and writes must be the same on every run. Rerun to retry."
+        )
+    elif error_cell is None and not violations_seen and stale_count == 0:
         line += "\nAll clean!"
-    elif violations_seen:
+    elif len(cells_ran) >= max_runs and stale_count > 0:
+        line += (
+            f"\nStopped after {max_runs} runs without reaching a clean state "
+            "(possible untracked nondeterminism)."
+        )
+
+    if violations_seen:
         for e in violations_seen:
             cid = e.get("cell_id", "?")
             vlabel = _cell_label(session, cid)
@@ -693,8 +747,9 @@ def get_notebook_path(ctx: Context) -> str:
 def checkpoint(ctx: Context) -> str:
     """Create a snapshot of the current notebook state.
 
-    Captures all cell sources so you can restore later if a fix attempt
-    makes things worse. Returns a checkpoint ID to use with restore().
+    Captures all cells (sources AND structure) so you can restore later if
+    a fix attempt makes things worse. Returns a checkpoint ID to use with
+    restore().
     """
     session = _get_session(ctx)
     ckpt_id = session.checkpoint()
@@ -706,8 +761,11 @@ def checkpoint(ctx: Context) -> str:
 def restore(checkpoint_id: str, ctx: Context) -> str:
     """Restore the notebook to a previous checkpoint.
 
-    Reverts cell sources to the snapshot without restarting the kernel.
-    Changed cells are marked stale so they can be re-run incrementally.
+    Reverts both cell sources and notebook structure to the snapshot:
+    cells deleted or merged since the checkpoint are reinserted in their
+    original positions, and cells added since are removed. The kernel is
+    NOT restarted. Changed and reinserted cells are marked stale so they
+    can be re-run incrementally.
 
     Args:
         checkpoint_id: The checkpoint ID returned by checkpoint().

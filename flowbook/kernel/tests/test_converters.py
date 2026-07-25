@@ -11,7 +11,6 @@ import pytest
 from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.types import CompoundDiff, MemoryCheckpointDiffResult, ValueComparison
 
-from flowbook.kernel.access_events import ColumnRead, ColumnWrite, StructuralRead, VariableRead
 from flowbook.kernel.change_detector import (
     _analyze_column_change,
     _extract_column_name,
@@ -34,109 +33,6 @@ from flowbook.kernel.changes import (
 # =============================================================================
 # Test TrackingData conversion methods
 # =============================================================================
-
-
-class TestToAccessEvents:
-    """Tests for TrackingData.to_access_events() method."""
-
-    def test_empty_tracking(self):
-        """Empty TrackingData produces empty list."""
-        tracking = TrackingData()
-        events = tracking.to_access_events()
-        assert events == []
-
-    def test_column_reads(self):
-        """Column reads are converted to ColumnRead events."""
-        tracking = TrackingData(
-            column_reads_before_writes={"df": {"price", "quantity"}}
-        )
-        events = tracking.to_access_events()
-
-        column_reads = [e for e in events if isinstance(e, ColumnRead)]
-        assert len(column_reads) == 2
-        assert ColumnRead(variable="df", column="price") in column_reads
-        assert ColumnRead(variable="df", column="quantity") in column_reads
-
-    def test_column_writes(self):
-        """Column writes are converted to ColumnWrite events."""
-        tracking = TrackingData(column_writes={"df": {"total", "tax"}})
-        events = tracking.to_access_events()
-
-        column_writes = [e for e in events if isinstance(e, ColumnWrite)]
-        assert len(column_writes) == 2
-        assert ColumnWrite(variable="df", column="total") in column_writes
-        assert ColumnWrite(variable="df", column="tax") in column_writes
-
-    def test_structural_reads(self):
-        """Structural reads are converted to StructuralRead events."""
-        tracking = TrackingData(structural_reads={"df": {"columns", "shape"}})
-        events = tracking.to_access_events()
-
-        structural_reads = [e for e in events if isinstance(e, StructuralRead)]
-        assert len(structural_reads) == 2
-        assert StructuralRead(variable="df", attr="columns") in structural_reads
-        assert StructuralRead(variable="df", attr="shape") in structural_reads
-
-    def test_multiple_variables(self):
-        """Events from multiple variables are all included."""
-        tracking = TrackingData(
-            column_reads_before_writes={"df1": {"a"}, "df2": {"b"}},
-            structural_reads={"df1": {"columns"}},
-        )
-        events = tracking.to_access_events()
-
-        assert len(events) == 3
-        assert ColumnRead(variable="df1", column="a") in events
-        assert ColumnRead(variable="df2", column="b") in events
-        assert StructuralRead(variable="df1", attr="columns") in events
-
-    def test_deterministic_order(self):
-        """Events are in deterministic order (sorted by variable, then column/attr)."""
-        tracking = TrackingData(
-            column_reads_before_writes={"z": {"b", "a"}, "a": {"x"}},
-        )
-        events = tracking.to_access_events()
-
-        # Should be sorted: a.x, z.a, z.b
-        assert events[0] == ColumnRead(variable="a", column="x")
-        assert events[1] == ColumnRead(variable="z", column="a")
-        assert events[2] == ColumnRead(variable="z", column="b")
-
-
-class TestToReadEvents:
-    """Tests for TrackingData.to_read_events() method."""
-
-    def test_excludes_writes(self):
-        """to_read_events excludes ColumnWrite events."""
-        tracking = TrackingData(
-            column_reads_before_writes={"df": {"price"}},
-            column_writes={"df": {"total"}},
-            structural_reads={"df": {"columns"}},
-        )
-        events = tracking.to_read_events()
-
-        # Should have 2 events (read + structural), not 3 (no write)
-        assert len(events) == 2
-        assert ColumnRead(variable="df", column="price") in events
-        assert StructuralRead(variable="df", attr="columns") in events
-        # No ColumnWrite
-        assert not any(isinstance(e, ColumnWrite) for e in events)
-
-    def test_includes_variable_reads(self):
-        """to_read_events includes VariableRead for non-DataFrame reads."""
-        tracking = TrackingData(
-            reads_before_writes={"x", "config"},  # Variable-level reads
-            column_reads_before_writes={"df": {"price"}},  # df has column detail
-        )
-        events = tracking.to_read_events()
-
-        # x and config should become VariableRead (no column/structural detail)
-        # df should become ColumnRead (has column detail)
-        assert VariableRead(variable="x") in events
-        assert VariableRead(variable="config") in events
-        assert ColumnRead(variable="df", column="price") in events
-        # df should NOT also be a VariableRead since it has detail
-        assert VariableRead(variable="df") not in events
 
 
 class TestGetReadVariables:

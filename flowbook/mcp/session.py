@@ -25,11 +25,12 @@ from flowbook.cli.helpers import (
     setup_kernel,
 )
 from flowbook.kernel_discovery import read_discovery, write_discovery, remove_discovery
+import urllib.parse
 import urllib.request
 
 from flowbook.mcp.jupyter_config import discover_jupyter_server, discover_jupyter_server_root
 from flowbook.util.cell_ids import normalize_notebook_alpha, next_insertion_id
-from flowbook.server.kernel_helper import KernelHelper
+from flowbook.server.kernel_helper import KernelHelper, extract_flowbook_metadata
 from flowbook.server.kernel_manager import FlowbookKernelClient
 from flowbook.scripts.fix_repro_errors import (
     rename_variable_in_code,
@@ -228,6 +229,7 @@ class NotebookSession:
         self._session_start: float = time.time()
         self._last_known_api_sources: Dict[str, str] = {}  # cell_id -> source from last API refresh
         self._conflict_warnings: List[str] = []  # populated by _put_contents_api
+        self._push_pending: bool = False  # a Contents API PUT failed; retry before refreshing
 
     @property
     def is_loaded(self) -> bool:
@@ -317,7 +319,7 @@ class NotebookSession:
 
         abs_path = os.path.abspath(os.path.expanduser(path))
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(abs_path, "r", encoding="utf-8") as f:
             raw_notebook = json.load(f)
 
         # Check for existing kernel via discovery file
@@ -331,6 +333,12 @@ class NotebookSession:
         self._checkpoints = {}
         self._event_log = []
         self._session_start = time.time()
+
+        # Reset Contents API state BEFORE kernel/contents setup. If setup for
+        # this notebook fails partway, stale config from a previously loaded
+        # notebook must not survive — a later _put_contents_api() would PUT
+        # this notebook's content over the OLD notebook's Y.js document.
+        self._reset_contents_api_state()
 
         if discovery:
             # Join existing kernel — skip ID normalization to preserve
@@ -382,6 +390,20 @@ class NotebookSession:
             "info": f"Loaded{joined}{contents_status}",
         }
 
+    def _reset_contents_api_state(self) -> None:
+        """Clear all Contents API sync state.
+
+        Called on load() (before setup) and close(). Stale values pointing at
+        a previously loaded notebook are dangerous: _put_contents_api() would
+        overwrite that notebook's live document with this session's content.
+        """
+        self._jupyter_server_url = None
+        self._jupyter_token = None
+        self._jupyter_contents_path = None
+        self._last_contents_refresh = 0
+        self._last_known_api_sources = {}
+        self._push_pending = False
+
     def _setup_contents_api(self, notebook_abs_path: str) -> str:
         """Configure Contents API for reading live notebook state from JupyterLab.
 
@@ -401,8 +423,11 @@ class NotebookSession:
             else:
                 contents_path = os.path.basename(notebook_abs_path)
 
-            # Verify the Contents API works with a test request
-            url = f"{server_url}/api/contents/{contents_path}?content=0"
+            # Verify the Contents API works with a test request.
+            # Quote the path (audit R4): spaces etc. would otherwise produce
+            # an invalid URL.
+            quoted = urllib.parse.quote(contents_path, safe="/")
+            url = f"{server_url}/api/contents/{quoted}?content=0"
             headers = {}
             if token:
                 headers["Authorization"] = f"token {token}"
@@ -454,6 +479,7 @@ class NotebookSession:
         self.cell_status = {}
         self._stale_cells = set()
         self._checkpoints = {}
+        self._reset_contents_api_state()
 
     # ------------------------------------------------------------------
     # Contents API sync (read live JupyterLab edits)
@@ -471,9 +497,12 @@ class NotebookSession:
         if not self._jupyter_server_url or not self._jupyter_contents_path:
             return None
         try:
+            # Quote the path (audit R4): spaces etc. would otherwise
+            # produce an invalid URL.
             url = (
                 f"{self._jupyter_server_url}/api/contents/"
-                f"{self._jupyter_contents_path}?content=1&type=notebook"
+                f"{urllib.parse.quote(self._jupyter_contents_path, safe='/')}"
+                f"?content=1&type=notebook"
             )
             headers = {}
             if self._jupyter_token:
@@ -500,6 +529,19 @@ class NotebookSession:
         if now - self._last_contents_refresh < 0.2:
             return
         self._last_contents_refresh = now
+
+        # If a previous PUT failed, our local edits never reached the API.
+        # Refreshing now would be "API wins" and silently revert them. Retry
+        # the push once; if it still fails, skip the refresh so local edits
+        # survive until a push succeeds.
+        if self._push_pending:
+            self._put_contents_api()
+            if self._push_pending:
+                logger.debug(
+                    "Skipping Contents API refresh: a pending local push "
+                    "has not yet succeeded"
+                )
+                return
 
         api_notebook = self._fetch_contents_api()
         if not api_notebook:
@@ -550,16 +592,20 @@ class NotebookSession:
 
         self.notebook["cells"] = new_cells
 
-        # Notify kernel of new cell order
+        # Notify kernel of new cell order. Notification-only send: we don't
+        # consume the reply, and it queues behind whatever the shared kernel
+        # is currently running, so a long JupyterLab cell blocks MCP for up
+        # to this timeout (audit R6) — keep it short.
         if self.kernel_client:
             new_order = [
                 c["id"] for c in new_cells if c.get("cell_type") == "code"
             ]
             KernelHelper.execute_code(
-                self.kernel_client, "", timeout=10, store_history=False,
+                self.kernel_client, "", timeout=3, store_history=False,
                 flowbook_msg={
                     "type": "notebook_structure", "cell_order": new_order
                 },
+                on_foreign_msg=self._process_iopub_msg,
             )
 
         # Clean up tracking for removed cells
@@ -584,17 +630,47 @@ class NotebookSession:
         """
         self._require_loaded()
         self._continue_after_violation = enabled
+        # Notification-only send: we don't consume the reply, and it queues
+        # behind whatever the shared kernel is currently running, so a long
+        # JupyterLab cell blocks MCP for up to this timeout (audit R6) —
+        # keep it short.
         KernelHelper.execute_code(
             self.kernel_client,
             "",
-            timeout=10,
+            timeout=3,
             store_history=False,
             flowbook_msg={"type": "continue_after_violation", "enabled": enabled},
+            on_foreign_msg=self._process_iopub_msg,
         )
 
     # ------------------------------------------------------------------
     # IOPub polling (catch JupyterLab-initiated executions)
     # ------------------------------------------------------------------
+
+    def _process_iopub_msg(self, msg: Dict[str, Any]) -> None:
+        """Process one IOPub message from an external execution.
+
+        Applies flowbook_update metadata (staleness, executed cells) to keep
+        MCP's state current when JupyterLab runs cells on the shared kernel.
+        Used both by _poll_iopub (drain between tool calls) and as the
+        on_foreign_msg handler for KernelHelper.execute_code (messages that
+        arrive WHILE an MCP execution is in flight would otherwise be drained
+        off the shared IOPub socket and lost).
+        """
+        msg_type = msg.get("msg_type", "")
+        if msg_type != "flowbook_update":
+            return
+        content = msg.get("content", {})
+        data = content.get("data", content)
+        if isinstance(data, dict) and data.get("type") == "metadata":
+            cell_id = data.get("cell_id")
+            if cell_id:
+                self.cell_flowbook_meta[cell_id] = data
+                self.executed_cells.add(cell_id)
+                stale = set(data.get("stale_cells", []))
+                self._stale_cells = (self._stale_cells | stale) - {cell_id}
+                # Update cell outputs if we have them
+                # (outputs come via separate IOPub messages, not flowbook_update)
 
     def _poll_iopub(self) -> None:
         """Drain pending IOPub messages to catch external executions.
@@ -610,19 +686,7 @@ class NotebookSession:
         try:
             while True:
                 msg = self.kernel_client.get_iopub_msg(timeout=0)
-                msg_type = msg.get("msg_type", "")
-                if msg_type == "flowbook_update":
-                    content = msg.get("content", {})
-                    data = content.get("data", content)
-                    if isinstance(data, dict) and data.get("type") == "metadata":
-                        cell_id = data.get("cell_id")
-                        if cell_id:
-                            self.cell_flowbook_meta[cell_id] = data
-                            self.executed_cells.add(cell_id)
-                            stale = set(data.get("stale_cells", []))
-                            self._stale_cells = (self._stale_cells | stale) - {cell_id}
-                            # Update cell outputs if we have them
-                            # (outputs come via separate IOPub messages, not flowbook_update)
+                self._process_iopub_msg(msg)
         except Empty:
             pass  # No more messages — normal
         except Exception as e:
@@ -748,22 +812,50 @@ class NotebookSession:
             return None
         return result["cell_id"]
 
+    def get_next_run_target(self) -> Optional[str]:
+        """Return the next cell the run-until-clean loop should execute.
+
+        Like get_next_actionable, cells with errors or violations take
+        priority (the loop retries them once and stops if they persist).
+        Stale and unexecuted cells, however, are merged in *document
+        order*: the RunToClean algorithm from the paper runs the first
+        cell that needs execution, counting never-executed cells as
+        stale, so that every cell sees its final inputs before it first
+        runs. (Rerunning a later stale cell before an earlier unexecuted
+        one can legitimately change the later cell's behavior twice,
+        which would trip the rerun footprint check on a perfectly
+        deterministic notebook.)
+        """
+        self._require_loaded()
+        self._refresh_from_contents_api()
+        self._poll_iopub()
+        code_cell_ids = self.get_cell_order()
+
+        for cid in code_cell_ids:
+            if self.cell_status.get(cid) == "error":
+                return cid
+
+        for cid in code_cell_ids:
+            if self.cell_flowbook_meta.get(cid, {}).get("errors"):
+                return cid
+
+        for cid in code_cell_ids:
+            source = get_cell_source(self._find_cell(cid)[1])
+            if not source.strip():
+                # Skip empty cells whether stale or unexecuted: running
+                # them is a no-op that never clears their staleness, so
+                # returning one would loop forever.
+                continue
+            if cid in self._stale_cells:
+                return cid
+            if cid not in self.executed_cells:
+                return cid
+
+        return None  # all clean
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
-
-    def _extract_flowbook_meta(
-        self, flowbook_messages: List[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        """Extract flowbook metadata from protocol messages.
-
-        Args:
-            flowbook_messages: Protocol messages from KernelHelper.execute_code()
-        """
-        for msg in flowbook_messages:
-            if msg.get("type") == "metadata":
-                return msg
-        return None
 
     def run_cell(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
         """Execute a single cell and return outputs + flowbook metadata."""
@@ -790,6 +882,7 @@ class NotebookSession:
             cell_id=cell_id,
             cell_metadata=cell_metadata,
             actor="ai",  # MCP runs cells on behalf of an LLM
+            on_foreign_msg=self._process_iopub_msg,
         )
 
         # Update cell in notebook
@@ -798,17 +891,13 @@ class NotebookSession:
         self._put_contents_api()  # Push outputs to JupyterLab via Y.js
         self.executed_cells.add(cell_id)
 
-        # Extract flowbook metadata
-        fb_meta = self._extract_flowbook_meta(
-            result.get("flowbook_messages", [])
-        )
+        # Extract flowbook metadata (shared helper — audit A4)
+        fb_meta = extract_flowbook_metadata(result)
         if fb_meta:
             self.cell_flowbook_meta[cell_id] = fb_meta
             # Update stale cell tracking
             stale = set(fb_meta.get("stale_cells", []))
             self._stale_cells = (self._stale_cells | stale) - {cell_id}
-            if cell_id in self._stale_cells:
-                self._stale_cells.discard(cell_id)
 
         # Track execution status
         if result["status"] == "error":
@@ -830,7 +919,18 @@ class NotebookSession:
         return response
 
     def run_all(self, timeout: float = 300) -> Dict[str, Any]:
-        """Execute all code cells top-to-bottom."""
+        """Execute all code cells top-to-bottom.
+
+        NOTE (audit A4): ExecuteCommand.process in
+        flowbook/server/commands/execute.py runs a similar per-cell loop.
+        The shared metadata-extraction step lives in
+        kernel_helper.extract_flowbook_metadata() (used via run_cell). The
+        loops intentionally stay separate: this one delegates to run_cell,
+        which maintains live session state (stale-cell sets, executed_cells,
+        Contents API pushes to JupyterLab), while the server command is a
+        stateless one-shot that shapes a ProcessingResult and persists
+        violations into the saved notebook's cell metadata.
+        """
         self._require_loaded()
         self._refresh_from_contents_api()
         cell_order = self.get_cell_order()
@@ -974,12 +1074,16 @@ class NotebookSession:
         if cell_id not in self.executed_cells:
             return
 
+        # Unlike the notification-only sends (audit R6, timeout=3), this
+        # round-trip KEEPS timeout=10: we reconcile staleness from the
+        # kernel's reply below, so we must wait for it.
         result = KernelHelper.execute_code(
             self.kernel_client,
             "",
             timeout=10,
             store_history=False,
             flowbook_msg={"type": "cell_edited", "cell_id": cell_id, "source": new_source},
+            on_foreign_msg=self._process_iopub_msg,
         )
 
         if new_source is None:
@@ -989,24 +1093,28 @@ class NotebookSession:
 
         # Source provided: the kernel decides. It emits a metadata message only
         # when the edit changes the cell's status; reconcile from that reply.
-        for fb in result.get("flowbook_messages", []):
-            if isinstance(fb, dict) and fb.get("type") == "metadata":
-                if cell_id in set(fb.get("stale_cells", [])):
-                    self._stale_cells.add(cell_id)
-                else:
-                    self._stale_cells.discard(cell_id)
-                return
+        fb = extract_flowbook_metadata(result)
+        if fb is not None:
+            if cell_id in set(fb.get("stale_cells", [])):
+                self._stale_cells.add(cell_id)
+            else:
+                self._stale_cells.discard(cell_id)
         # No metadata reply → cosmetic no-op; leave staleness unchanged.
 
     def _notify_structure(self) -> None:
         """Tell the kernel the current code-cell order (after a structural edit)."""
         new_order = self.get_cell_order()
+        # Notification-only send: we don't consume the reply, and it queues
+        # behind whatever the shared kernel is currently running, so a long
+        # JupyterLab cell blocks MCP for up to this timeout (audit R6) —
+        # keep it short.
         KernelHelper.execute_code(
             self.kernel_client,
             "",
-            timeout=10,
+            timeout=3,
             store_history=False,
             flowbook_msg={"type": "notebook_structure", "cell_order": new_order},
+            on_foreign_msg=self._process_iopub_msg,
         )
 
     def edit_cell(self, cell_id: str, new_source: str) -> Dict[str, Any]:
@@ -1110,9 +1218,11 @@ class NotebookSession:
                         )
 
         try:
+            # Quote the path (audit R4): spaces etc. would otherwise
+            # produce an invalid URL.
             url = (
                 f"{self._jupyter_server_url}/api/contents/"
-                f"{self._jupyter_contents_path}"
+                f"{urllib.parse.quote(self._jupyter_contents_path, safe='/')}"
             )
             body = json.dumps({
                 "type": "notebook",
@@ -1124,8 +1234,13 @@ class NotebookSession:
                 headers["Authorization"] = f"token {self._jupyter_token}"
             req = urllib.request.Request(url, data=body, headers=headers, method="PUT")
             urllib.request.urlopen(req, timeout=10)
+            self._push_pending = False
             return self.notebook_path
         except Exception as e:
+            # Remember the failure: _refresh_from_contents_api must not pull
+            # ("API wins") until a push succeeds, or the unsent local edits
+            # would be silently reverted.
+            self._push_pending = True
             logger.debug(f"Contents API PUT failed: {e}")
             return None
 
@@ -1181,11 +1296,20 @@ class NotebookSession:
             if cid in set(cell_order) and cid not in stale_with_reasons:
                 stale_with_reasons[cid] = [{"type": "code_changed"}]
 
-        executed_count = len(self.executed_cells & set(cell_order))
-        clean_count = executed_count - len(
-            set(self.cell_status.keys())
-            & {k for k, v in self.cell_status.items() if v == "error"}
-        ) - len(self._stale_cells & self.executed_cells)
+        # Clean = executed cells (in the CURRENT cell order) that are
+        # neither error nor stale. Computed as a set difference (audit C9):
+        # subtracting counts double-counted cells that were both error and
+        # stale, and error entries for since-deleted cells could drive the
+        # result negative. Set arithmetic restricted to cell_order is
+        # correct by construction (and thus never negative).
+        order_set = set(cell_order)
+        executed_in_order = self.executed_cells & order_set
+        executed_count = len(executed_in_order)
+        error_cells = {
+            cid for cid in executed_in_order
+            if self.cell_status.get(cid) == "error"
+        }
+        clean_count = len(executed_in_order - error_cells - self._stale_cells)
 
         lines = [
             f"Notebook: {self.notebook_path}",
@@ -1217,52 +1341,95 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def checkpoint(self) -> str:
-        """Snapshot current notebook cell sources. Returns checkpoint_id."""
+        """Snapshot the full notebook cell list. Returns checkpoint_id.
+
+        Deep-copies notebook["cells"] so restore() can undo structural
+        changes (deleted/merged/inserted/reordered cells), not just source
+        edits.
+        """
         self._require_loaded()
         ckpt_id = f"ckpt_{uuid.uuid4().hex[:8]}"
-        cell_sources = {}
-        for cell in self.notebook["cells"]:
-            cell_sources[cell.get("id", "")] = get_cell_source(cell)
-
         self._checkpoints[ckpt_id] = {
             "timestamp": time.time(),
-            "cell_sources": cell_sources,
-            "cell_order": [c.get("id", "") for c in self.notebook["cells"]],
+            "cells": copy.deepcopy(self.notebook["cells"]),
         }
         return ckpt_id
 
     def restore(self, checkpoint_id: str) -> Dict[str, Any]:
-        """Restore notebook cell sources to a checkpoint.
+        """Restore the notebook (sources AND structure) to a checkpoint.
 
-        Does NOT restart the kernel. Changed cells are marked stale so
-        they can be re-run incrementally via run_until_clean() or manually.
+        Replaces notebook["cells"] wholesale with a deep copy of the
+        snapshot, so cells deleted or merged since the checkpoint come back
+        and cells added since are removed.
+
+        Does NOT restart the kernel. Changed and reinserted cells are marked
+        stale so they can be re-run incrementally via run_until_clean() or
+        manually.
         """
         self._require_loaded()
         if checkpoint_id not in self._checkpoints:
             raise ValueError(f"Unknown checkpoint: {checkpoint_id}")
 
         ckpt = self._checkpoints[checkpoint_id]
-        cell_sources = ckpt["cell_sources"]
+        snapshot_cells = copy.deepcopy(ckpt["cells"])
 
-        # Restore cell sources and mark changed cells as stale
-        changed_cells = []
-        for cell in self.notebook["cells"]:
-            cid = cell.get("id", "")
-            if cid in cell_sources:
-                old = get_cell_source(cell)
-                if old != cell_sources[cid]:
-                    set_cell_source(cell, cell_sources[cid])
+        # Diff snapshot against the current notebook.
+        current_by_id = {
+            c.get("id", ""): c for c in self.notebook["cells"]
+        }
+        snapshot_ids = {c.get("id", "") for c in snapshot_cells}
+        changed_cells = []      # present in both, source differs
+        reinserted_cells = []   # in snapshot but deleted since the checkpoint
+        for snap_cell in snapshot_cells:
+            cid = snap_cell.get("id", "")
+            if cid in current_by_id:
+                if get_cell_source(current_by_id[cid]) != get_cell_source(snap_cell):
                     changed_cells.append(cid)
-                    # Mark as stale and notify kernel
-                    self._mark_cell_edited(cid)
-                    # Clear old violation metadata for changed cells
-                    self.cell_flowbook_meta.pop(cid, None)
-                    self.cell_status.pop(cid, None)
+            else:
+                reinserted_cells.append(cid)
+        # Cells added since the checkpoint disappear on restore.
+        removed_cells = [
+            cid for cid in current_by_id if cid not in snapshot_ids
+        ]
 
+        # Replace structure wholesale.
+        self.notebook["cells"] = snapshot_cells
+
+        # Best-effort: tell the kernel the restored cell order.
+        if self.kernel_client:
+            try:
+                self._notify_structure()
+            except Exception as e:
+                logger.debug(f"restore: notify_structure failed: {e}")
+
+        # Changed and reinserted cells go through the same edited-cell path:
+        # mark stale (kernel [Inst-Edit] if previously executed) and drop
+        # stale flowbook bookkeeping.
+        for cid in changed_cells + reinserted_cells:
+            self._mark_cell_edited(cid)
+            self.cell_flowbook_meta.pop(cid, None)
+            self.cell_status.pop(cid, None)
+
+        # Cells removed by the restore: clean up their bookkeeping entirely.
+        for cid in removed_cells:
+            self.executed_cells.discard(cid)
+            self.cell_flowbook_meta.pop(cid, None)
+            self.cell_status.pop(cid, None)
+            self._stale_cells.discard(cid)
+
+        # Best-effort: push the restored notebook to JupyterLab.
+        try:
+            self._put_contents_api()
+        except Exception as e:
+            logger.debug(f"restore: Contents API push failed: {e}")
+
+        restored = changed_cells + reinserted_cells
         return {
             "checkpoint_id": checkpoint_id,
-            "cells_restored": len(changed_cells),
-            "changed_cells": changed_cells,
+            "cells_restored": len(restored),
+            "changed_cells": restored,
+            "cells_reinserted": reinserted_cells,
+            "cells_removed": removed_cells,
         }
 
     def list_checkpoints(self) -> List[Dict[str, Any]]:
@@ -1272,7 +1439,7 @@ class NotebookSession:
             result.append({
                 "checkpoint_id": ckpt_id,
                 "timestamp": ckpt["timestamp"],
-                "cell_count": len(ckpt["cell_sources"]),
+                "cell_count": len(ckpt["cells"]),
             })
         return result
 

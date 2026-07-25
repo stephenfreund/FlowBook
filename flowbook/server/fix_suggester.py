@@ -12,6 +12,12 @@ flowbook/scripts/fix_repro_errors.py, behind a strict allowlist.
 Model selection lives in the FlowBookExtension.fix_model traitlet. Provider
 API keys come from standard env vars (ANTHROPIC_API_KEY, OPENAI_API_KEY,
 etc.) — litellm picks them up automatically based on the model prefix.
+
+Privacy note (audit S2): the suggest-fix and custom-fix endpoints send the
+FULL notebook JSON — cell sources AND cell outputs (including any data
+printed or displayed in them) — to the configured LLM provider, both in the
+initial prompt context and via the agentic loop's read-only tools. Do not
+enable this feature on notebooks whose outputs must not leave the machine.
 """
 
 from __future__ import annotations

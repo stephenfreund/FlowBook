@@ -4609,7 +4609,6 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
 
     # Collect aggregate data
     all_overhead_ms = []
-    all_memory_ratios = []
     all_peak_pcts = []
     all_overhead_pct = []  # Per-cell overhead: (state + check) / (base + 150) * 100
     all_base_runtime_ms = []  # Per-cell base runtime (code execution time)
@@ -4651,16 +4650,6 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
                 peak_ratio = max(peak_ratio, ratio)
 
         all_peak_pcts.append(peak_ratio * 100)
-
-        # Per-cell overhead data
-        for i, c in enumerate(cells):
-            c_base = c.user_ns_mb + c.gpu_mb
-            if i > 0 and c_base > 0.1:
-                prev = cells[i - 1]
-                delta = max(0, c.checkpoint_mb - prev.checkpoint_mb)
-                prev_base = prev.user_ns_mb + prev.gpu_mb
-                if prev_base > 0.1:
-                    all_memory_ratios.append(delta / prev_base)
 
         # Get timing data
         result = results.get(path)
@@ -4764,13 +4753,26 @@ def print_v5_summary(raw_data: Dict[str, Dict], results: Dict[str, Any]) -> None
         print(f"  Max: {np.max(arr):.1f}ms")
         print()
 
-    if all_memory_ratios:
-        arr = np.array(all_memory_ratios)
-        print("Per-Cell Memory Overhead (checkpoint_delta / prev_base):")
-        print(f"  P50: {np.percentile(arr, 50) * 100:.1f}%")
-        print(f"  P95: {np.percentile(arr, 95) * 100:.1f}%")
-        print(f"  P99: {np.percentile(arr, 99) * 100:.1f}%")
-        print(f"  Max: {np.max(arr) * 100:.1f}%")
+    # Per-cell checkpoint size, in absolute MB (Checkpoint - Base). This uses
+    # the exact same cell population as Figure 5 panel 3 / the paper: cells
+    # whose analysis time is > 0, matched by cell_index to the per-cell time
+    # CDF, over the already-error-filtered notebooks. We recompute it here via
+    # extract_cdf_data so the text and the figure can never disagree.
+    memory_abs_mb: List[float] = []
+    if len(results) > 1:
+        cdf_data = extract_cdf_data(
+            list(results.values()),
+            [raw_data[p] for p in results.keys()],
+        )
+        if cdf_data and cdf_data.memory_abs_mb:
+            memory_abs_mb = list(cdf_data.memory_abs_mb)
+    if memory_abs_mb:
+        arr = np.array(memory_abs_mb)
+        print(f"Per-Cell Checkpoint Size (Checkpoint - Base, N={len(arr)}):")
+        print(f"  P50: {np.percentile(arr, 50):.3f}MB")
+        print(f"  P95: {np.percentile(arr, 95):.1f}MB")
+        print(f"  P99: {np.percentile(arr, 99):.1f}MB")
+        print(f"  Max: {np.max(arr):.1f}MB")
         print()
 
     if all_peak_pcts:

@@ -32,6 +32,67 @@ from flowbook.util.output import log, error, timer
 # Below this size, the overhead of checking isn't worth it.
 _LARGE_CONTAINER_THRESHOLD = 1000
 
+def _column_label_strings(key) -> list:
+    """Normalize a column-label key to a list of string column names.
+
+    The checkpoint diff reports DataFrame columns as ``str(label)``, so
+    tracking must use the same normalization: with str-only guards,
+    non-string labels (``df[0] = ...``, MultiIndex tuples) recorded no
+    column write, and their diff-detected changes were misclassified as
+    UNRECOVERABLE_MUTATION (audit M5).
+
+    Returns [] for non-label keys: booleans (mask selections), None, and
+    containers (Series/Index/list/slice are handled by the callers).
+    """
+    import numbers
+
+    if isinstance(key, str):
+        return [key]
+    if isinstance(key, bool) or key is None:
+        return []
+    if isinstance(key, (numbers.Number, tuple)):
+        return [str(key)]
+    return []
+
+
+def _column_label_strings_from_iterable(keys) -> list:
+    """Flatten an iterable of labels (list / pd.Index) to string names."""
+    out = []
+    for k in keys:
+        out.extend(_column_label_strings(k))
+    return out
+
+
+# DataFrame methods that read the data of EVERY column. Each is patched with
+# a wrapper that records all-column reads for tracked DataFrames.
+# Shared by install and _restore_dataframe_methods — keep the two in sync by
+# construction. FORMAL_DEVELOPMENT.md §8.3 enumerates this coverage; anything
+# NOT listed here (and not covered by __getitem__/loc/iloc/structural
+# tracking) produces only a binding-level Var read — a documented gap.
+ALL_COL_READ_METHODS = (
+    # Aggregations / whole-frame readers
+    'sum', 'mean', 'std', 'var', 'min', 'max', 'median',
+    'describe', 'corr', 'cov', 'quantile', 'nunique',
+    'apply', 'to_numpy', 'to_dict', 'to_records',
+    'agg', 'aggregate', 'transform', 'round', 'rank',
+    'diff', 'shift', 'cumsum', 'cumprod', 'cummax', 'cummin',
+    'isna', 'isnull', 'notna', 'notnull', 'count', 'mode',
+    'all', 'any', 'prod', 'astype', 'clip',
+    # Expression / iteration readers
+    'query', 'eval', 'iterrows', 'itertuples',
+    # Numpy conversion (np.asarray(df), np.array(df), matplotlib, sklearn)
+    '__array__',
+    # Binary arithmetic (df * 2, df + other, ...)
+    '__add__', '__radd__', '__sub__', '__rsub__',
+    '__mul__', '__rmul__', '__truediv__', '__rtruediv__',
+    '__floordiv__', '__rfloordiv__', '__mod__', '__rmod__',
+    '__pow__', '__rpow__',
+    # Element-wise comparisons (df == x, df > x, ...)
+    '__eq__', '__ne__', '__lt__', '__le__', '__gt__', '__ge__',
+    # Unary
+    '__neg__', '__pos__', '__abs__', '__invert__',
+)
+
 # Primitive immutable types - lists/tuples containing only these cannot
 # contain DataFrames or Series, so we can skip iterating through them.
 _PRIMITIVE_TYPES = frozenset({
@@ -359,17 +420,14 @@ class ColumnAccessTracker:
         def tracked_df_getitem(df: pd.DataFrame, key):
             tracker = ColumnAccessTracker._get_active_tracker()
             if tracker is not None:
-                # Track column access
-                if isinstance(key, str):
-                    tracker.record_read(id(df), [key])
-                elif isinstance(key, list):
-                    str_keys = [k for k in key if isinstance(k, str)]
-                    if str_keys:
-                        tracker.record_read(id(df), str_keys)
-                elif isinstance(key, pd.Index):
-                    str_keys = [k for k in key if isinstance(k, str)]
-                    if str_keys:
-                        tracker.record_read(id(df), str_keys)
+                # Track column access (labels normalized via str, matching
+                # the diff's column naming — see _column_label_strings)
+                if isinstance(key, (list, pd.Index)):
+                    str_keys = _column_label_strings_from_iterable(key)
+                else:
+                    str_keys = _column_label_strings(key)
+                if str_keys:
+                    tracker.record_read(id(df), str_keys)
             return original_df_getitem(df, key)
 
         pd.DataFrame.__getitem__ = tracked_df_getitem
@@ -394,21 +452,19 @@ class ColumnAccessTracker:
                         for k in key:
                             if isinstance(k, str) and k in df.columns:
                                 old_dtypes[k] = dtypes[k]
-                # Track column writes
-                if isinstance(key, str):
-                    tracker.record_write(id(df), [key])
+                # Track column writes (labels normalized via str, matching
+                # the diff's column naming — see _column_label_strings)
+                if isinstance(key, (list, pd.Index)):
+                    str_keys = _column_label_strings_from_iterable(key)
+                else:
+                    str_keys = _column_label_strings(key)
+                if str_keys:
+                    tracker.record_write(id(df), str_keys)
                     # Record column provenance (first writer wins)
                     if tracker._cell_id is not None:
                         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
-                        DataFrameProvenanceTracker.record_column_write(df, key, tracker._cell_id)
-                elif isinstance(key, list):
-                    str_keys = [k for k in key if isinstance(k, str)]
-                    if str_keys:
-                        tracker.record_write(id(df), str_keys)
-                        if tracker._cell_id is not None:
-                            from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
-                            for k in str_keys:
-                                DataFrameProvenanceTracker.record_column_write(df, k, tracker._cell_id)
+                        for k in str_keys:
+                            DataFrameProvenanceTracker.record_column_write(df, k, tracker._cell_id)
             result = original_df_setitem(df, key, value)
             # Check for dtype changes after write.
             # Use df.dtypes[col] instead of df[col].dtype to avoid triggering
@@ -430,10 +486,11 @@ class ColumnAccessTracker:
 
         def tracked_df_delitem(df: pd.DataFrame, key):
             tracker = ColumnAccessTracker._get_active_tracker()
-            if tracker is not None and isinstance(key, str):
-                from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
-                DataFrameProvenanceTracker.record_column_delete(df, key, tracker._cell_id)
-                tracker.record_column_deletion(id(df), key)
+            if tracker is not None:
+                for k in _column_label_strings(key):
+                    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                    DataFrameProvenanceTracker.record_column_delete(df, k, tracker._cell_id)
+                    tracker.record_column_deletion(id(df), k)
             return original_df_delitem(df, key)
 
         pd.DataFrame.__delitem__ = tracked_df_delitem
@@ -444,11 +501,12 @@ class ColumnAccessTracker:
 
         def tracked_df_insert(df: pd.DataFrame, loc, column, value, allow_duplicates=False):
             tracker = ColumnAccessTracker._get_active_tracker()
-            if tracker is not None and isinstance(column, str):
-                tracker.record_write(id(df), [column])
-                if tracker._cell_id is not None:
-                    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
-                    DataFrameProvenanceTracker.record_column_write(df, column, tracker._cell_id)
+            if tracker is not None:
+                for col_name in _column_label_strings(column):
+                    tracker.record_write(id(df), [col_name])
+                    if tracker._cell_id is not None:
+                        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+                        DataFrameProvenanceTracker.record_column_write(df, col_name, tracker._cell_id)
             return original_df_insert(df, loc, column, value, allow_duplicates=allow_duplicates)
 
         pd.DataFrame.insert = tracked_df_insert
@@ -515,7 +573,7 @@ class ColumnAccessTracker:
                 if isinstance(by, str):
                     tracker.record_read(id(df), [by])
                 elif isinstance(by, list):
-                    str_keys = [k for k in by if isinstance(k, str)]
+                    str_keys = _column_label_strings_from_iterable(by)
                     if str_keys:
                         tracker.record_read(id(df), str_keys)
             result = original_groupby(df, by=by, *args, **kwargs)
@@ -672,12 +730,13 @@ class ColumnAccessTracker:
                     if tracker is not None:
                         df_id = tracker._groupby_to_df.get(id(gb))
                         if df_id is not None:
-                            if isinstance(key, str):
-                                tracker.record_read(df_id, [key])
-                            elif isinstance(key, list):
-                                str_keys = [k for k in key if isinstance(k, str)]
-                                if str_keys:
-                                    tracker.record_read(df_id, str_keys)
+                            str_keys = (
+                                _column_label_strings_from_iterable(key)
+                                if isinstance(key, list)
+                                else _column_label_strings(key)
+                            )
+                            if str_keys:
+                                tracker.record_read(df_id, str_keys)
                     # Call cudf's native method directly (bypass proxy recursion)
                     return cudf_compat.call_native_groupby_getitem(gb, key)
 
@@ -693,12 +752,13 @@ class ColumnAccessTracker:
                         df_id = tracker._groupby_to_df.get(id(gb))
 
                     if df_id is not None:
-                        if isinstance(key, str):
-                            tracker.record_read(df_id, [key])
-                        elif isinstance(key, list):
-                            str_keys = [k for k in key if isinstance(k, str)]
-                            if str_keys:
-                                tracker.record_read(df_id, str_keys)
+                        str_keys = (
+                            _column_label_strings_from_iterable(key)
+                            if isinstance(key, list)
+                            else _column_label_strings(key)
+                        )
+                        if str_keys:
+                            tracker.record_read(df_id, str_keys)
                 return original_gb_getitem(gb, key)
 
             DataFrameGroupBy.__getitem__ = tracked_gb_getitem
@@ -736,13 +796,7 @@ class ColumnAccessTracker:
         # every column so that column-level staleness works correctly.
         # Without this, df.sum() would only produce Var(df) in the read set,
         # and Col writes wouldn't trigger staleness (Col ▷ Var = false).
-        _ALL_COL_METHODS = [
-            'sum', 'mean', 'std', 'var', 'min', 'max', 'median',
-            'describe', 'corr', 'cov', 'quantile', 'nunique',
-            'apply', 'to_numpy', 'to_dict', 'to_records',
-        ]
-
-        for method_name in _ALL_COL_METHODS:
+        for method_name in ALL_COL_READ_METHODS:
             original = getattr(pd.DataFrame, method_name, None)
             if original is None:
                 continue
@@ -779,6 +833,40 @@ class ColumnAccessTracker:
 
             pd.DataFrame.values = property(tracked_values)
 
+        # ========== pandas.concat (module-level function) ==========
+        # pd.concat([df1, df2]) reads every column of each input frame.
+        original_concat = pd.concat
+        self._original_methods['pandas.concat'] = original_concat
+
+        def tracked_concat(objs, *args, **kwargs):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None:
+                if isinstance(objs, dict):
+                    frames = list(objs.values())
+                elif isinstance(objs, (list, tuple)):
+                    frames = list(objs)
+                elif isinstance(objs, (pd.DataFrame, pd.Series)):
+                    frames = [objs]
+                else:
+                    # Generator/iterable: materialize so we can both inspect
+                    # it and still hand a usable sequence to pandas.
+                    try:
+                        objs = list(objs)
+                        frames = objs
+                    except TypeError:
+                        frames = []
+                for obj in frames:
+                    if isinstance(obj, pd.DataFrame):
+                        df_id = id(obj)
+                        if df_id in tracker._id_to_path:
+                            tracker.record_read(
+                                df_id, [str(c) for c in obj.columns]
+                            )
+            return original_concat(objs, *args, **kwargs)
+
+        tracked_concat.__doc__ = original_concat.__doc__
+        pd.concat = tracked_concat
+
         # ========== DataFrame._set_axis (index/columns setter) ==========
         # pd.DataFrame.index is an AxisProperty (Cython descriptor), not a
         # Python property, so we can't patch fget/fset. Instead patch _set_axis,
@@ -808,22 +896,37 @@ class ColumnAccessTracker:
                 if not inplace or tracker is None or tracker._cell_id is None:
                     return original(df_self, *args, inplace=inplace, **kwargs)
 
-                pre_len = len(df_self)
-                pre_index = df_self.index.copy()
-                pre_dtypes = {str(c): df_self[c].dtype for c in df_self.columns}
+                # Snapshot under suspension: len()/.index/.dtypes go through
+                # patched accessors and would otherwise record spurious
+                # structural/column READS of the mutated frame, turning every
+                # inplace call into a false read-and-write conflict.
+                from flowbook.kernel_support.structural_tracking import (
+                    suspend_structural_tracking,
+                )
+
+                with suspend_column_tracking(), suspend_structural_tracking():
+                    pre_len = len(df_self)
+                    pre_index = df_self.index.copy()
+                    pre_dtypes = {str(c): t for c, t in df_self.dtypes.items()}
 
                 result = original(df_self, *args, inplace=True, **kwargs)
 
+                with suspend_column_tracking(), suspend_structural_tracking():
+                    len_changed = len(df_self) != pre_len
+                    index_changed = not df_self.index.equals(pre_index)
+                    post_dtypes = {str(c): t for c, t in df_self.dtypes.items()}
+
+                # Record OUTSIDE the suspension blocks — the record_* methods
+                # are no-ops while suspended.
                 from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                 cell_id = tracker._cell_id
                 df_id = id(df_self)
-                if len(df_self) != pre_len:
+                if len_changed:
                     DataFrameProvenanceTracker.record_row_mutation(df_self, cell_id)
                     tracker.record_row_mutation(df_id)
-                if not df_self.index.equals(pre_index):
+                if index_changed:
                     DataFrameProvenanceTracker.record_index_mutation(df_self, cell_id)
                     tracker.record_index_mutation(df_id)
-                post_dtypes = {str(c): df_self[c].dtype for c in df_self.columns}
                 for col in post_dtypes:
                     if col in pre_dtypes and pre_dtypes[col] != post_dtypes[col]:
                         DataFrameProvenanceTracker.record_dtype_change(df_self, col, cell_id)
@@ -874,13 +977,15 @@ class ColumnAccessTracker:
         if 'DataFrame.drop_duplicates' in self._original_methods:
             pd.DataFrame.drop_duplicates = self._original_methods['DataFrame.drop_duplicates']
 
-        # Restore aggregation/transformation methods
-        for method_name in ['sum', 'mean', 'std', 'var', 'min', 'max', 'median',
-                            'describe', 'corr', 'cov', 'quantile', 'nunique',
-                            'apply', 'to_numpy', 'to_dict', 'to_records']:
+        # Restore aggregation/transformation/operator methods
+        for method_name in ALL_COL_READ_METHODS:
             key = f'DataFrame.{method_name}'
             if key in self._original_methods:
                 setattr(pd.DataFrame, method_name, self._original_methods[key])
+
+        # Restore pandas.concat
+        if 'pandas.concat' in self._original_methods:
+            pd.concat = self._original_methods['pandas.concat']
 
         # Restore values property
         if 'DataFrame.values' in self._original_methods:
@@ -933,12 +1038,10 @@ def _extract_columns_from_loc_key(key, df: pd.DataFrame) -> list:
 
     col_key = key[1]
 
-    if isinstance(col_key, str):
-        return [col_key]
-    elif isinstance(col_key, list):
-        return [k for k in col_key if isinstance(k, str)]
-    elif isinstance(col_key, pd.Index):
-        return [k for k in col_key if isinstance(k, str)]
+    if isinstance(col_key, (list, pd.Index)):
+        return _column_label_strings_from_iterable(col_key)
+    elif not isinstance(col_key, slice) and _column_label_strings(col_key):
+        return _column_label_strings(col_key)
     elif isinstance(col_key, slice):
         # Slice of columns - need to resolve against DataFrame columns
         try:

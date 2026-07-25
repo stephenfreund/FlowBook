@@ -196,17 +196,16 @@ class NotebookState:
         if before_cell not in self.cell_order:
             return None
 
-        before_pos = self.cell_order.index(before_cell)
+        # Single pass in document order up to before_cell — the last match
+        # wins. (The previous implementation called list.index() per writer,
+        # making this O(cells²) on every staleness pass.)
         result: Optional[str] = None
-        result_pos = -1
-
-        for cell_id, cell_writes in self.writes.items():
-            if any(w.var_name() == var_name for w in cell_writes) and cell_id in self.cell_order:
-                pos = self.cell_order.index(cell_id)
-                if pos < before_pos and pos > result_pos:
-                    result = cell_id
-                    result_pos = pos
-
+        for cell_id in self.cell_order:
+            if cell_id == before_cell:
+                break
+            cell_writes = self.writes.get(cell_id)
+            if cell_writes and any(w.var_name() == var_name for w in cell_writes):
+                result = cell_id
         return result
 
     # =========================================================================
@@ -498,7 +497,11 @@ class NotebookState:
                         ReasonType.BACKWARD_STALE, loc=w.display_name(), cell_id=deleted_cell
                     ))
 
-        # Remove deleted cell from state
+        self.remove_cell_state(deleted_cell)
+
+    def remove_cell_state(self, deleted_cell: str) -> None:
+        """Remove all per-cell state for a deleted cell (no staleness
+        propagation — see handle_delete for the propagating variant)."""
         self.status.pop(deleted_cell, None)
         self.reads.pop(deleted_cell, None)
         self.writes.pop(deleted_cell, None)
@@ -511,55 +514,9 @@ class NotebookState:
         if deleted_cell in self.cell_order:
             self.cell_order.remove(deleted_cell)
 
-    def handle_insert(self, cell_id: str, position: int) -> None:
-        """
-        INSERT transition: new cell at position with Stale({NeverExecuted})
-
-        Also checks if insertion affects Runnable for later cells.
-        """
-        # Insert into cell_order at position
-        if position < 0:
-            position = 0
-        if position > len(self.cell_order):
-            position = len(self.cell_order)
-
-        self.cell_order.insert(position, cell_id)
-        self.status[cell_id] = CellStatus.never_executed()
-        self.reads[cell_id] = frozenset()
-        self.writes[cell_id] = frozenset()
-
-        # Cells after insertion point may be affected by order change
-        # but without provenance tracking we cannot check Runnable here.
-
-    def handle_move(self, cell_id: str, new_position: int) -> None:
-        """
-        MOVE transition: reposition cell and check affected cells.
-        """
-        if cell_id not in self.cell_order:
-            return
-
-        old_position = self.cell_order.index(cell_id)
-        if old_position == new_position:
-            return
-
-        # Remove from old position
-        self.cell_order.remove(cell_id)
-
-        # new_position is the target index in the final list (no adjustment needed)
-
-        # Clamp to valid range
-        if new_position < 0:
-            new_position = 0
-        if new_position > len(self.cell_order):
-            new_position = len(self.cell_order)
-
-        # Insert at new position
-        self.cell_order.insert(new_position, cell_id)
-
-        # Cells in affected range may be affected by order change
-        # but without provenance tracking we cannot check Runnable here.
-
-    def set_cell_order(self, new_order: List[str]) -> List[str]:
+    def set_cell_order(
+        self, new_order: List[str], propagate_staleness: bool = True
+    ) -> List[str]:
         """
         Update cell order and handle structural changes.
 
@@ -568,6 +525,12 @@ class NotebookState:
 
         Args:
             new_order: New list of cell IDs in document order
+            propagate_staleness: When True (default, standalone use), each
+                deletion propagates staleness via handle_delete. The
+                enforcer passes False: its _handle_deletions() has ALREADY
+                run the typed [Inst-Delete] rule (with deleted-set
+                exclusion), and running a second, divergent propagation
+                here could mark the wrong LastWriter and duplicate reasons.
 
         Returns:
             List of cell IDs that became stale due to this change
@@ -578,7 +541,10 @@ class NotebookState:
 
         # Handle deletions
         for deleted in old_set - new_set:
-            self.handle_delete(deleted)
+            if propagate_staleness:
+                self.handle_delete(deleted)
+            else:
+                self.remove_cell_state(deleted)
 
         # Handle insertions (new cells not in old order)
         for inserted in new_set - old_set:

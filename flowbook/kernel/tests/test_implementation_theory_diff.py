@@ -148,41 +148,43 @@ class TestAliasingAndReferenceSharing:
         """
         helper = sdc_helper_with_order
 
-        # Create initial DataFrame
-        df_pre = pd.DataFrame({"col": [1, 2, 3, 4, 5]})
+        # One shared object throughout — conflict detection is
+        # object-identity based (LocRef), so A must read the SAME DataFrame
+        # that B later mutates through the alias.
+        df_shared = pd.DataFrame({"col": [1, 2, 3, 4, 5]})
 
         # Cell A reads df1
         result_a = helper.execute_cell(
             "a",
-            pre_namespace={"df1": df_pre.copy()},
-            post_namespace={"df1": df_pre.copy(), "mean": 3.0},
+            pre_namespace={"df1": df_shared},
+            post_namespace={"df1": df_shared, "mean": 3.0},
             reads={"df1"},
             writes={"mean"},
             column_reads={"df1": {"col"}},
         )
         assert not result_a.has_errors()
 
-        # For cell B: PRE-checkpoint has df1 and df2 as ALIASES (same object)
-        # This simulates: df2 = df1 (creating alias before B runs)
-        df_shared = pd.DataFrame({"col": [1, 2, 3, 4, 5]})
+        # Cell B: df2 = df1 alias exists in the PRE checkpoint (where the
+        # alias index is built); B mutates the shared column IN PLACE via
+        # the alias (no rebinding — "df2" not in writes).
         pre_b = {"df1": df_shared, "df2": df_shared, "mean": 3.0}  # ALIASES!
+        helper.save_pre_checkpoint("b", pre_b)
+        df_shared["col"] = [10, 20, 30, 40, 50]
 
-        # POST-checkpoint: df2 modified (and df1 too, since they're aliases)
-        df_modified = pd.DataFrame({"col": [10, 20, 30, 40, 50]})
-        post_b = {"df1": df_modified, "df2": df_modified, "mean": 3.0}
-
-        # Cell B writes df2 - deep alias expansion should include df1
-        result_b = helper.execute_cell(
-            "b",
-            pre_namespace=pre_b,
-            post_namespace=post_b,
-            reads=set(),
-            writes={"df2"},
-            column_writes={"df2": {"col"}},
+        from flowbook.kernel.tests.conftest import make_tracking
+        result_b = helper.sdc.check(
+            cell_id="b",
+            pre_checkpoint=helper.get_pre_checkpoint("b"),
+            namespace=pre_b,
+            tracking=make_tracking(
+                reads={"df2"},
+                column_writes={"df2": {"col"}},
+            ),
+            continue_on_violation=True,
         )
 
         # Since df1 and df2 are aliases in pre-checkpoint, expanding df2
-        # should include df1. Since df1 changed and A read df1 → conflict
+        # should include df1. Since df1's col changed and A read it → conflict
         has_conflict = (
             result_b.has_errors() or
             "a" in result_b.stale_cells

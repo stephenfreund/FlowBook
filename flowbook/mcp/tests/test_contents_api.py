@@ -230,6 +230,86 @@ class TestPutContentsApi:
         assert result is None
 
 
+class TestPushPending:
+    """A failed PUT must block 'API wins' refreshes until a push succeeds."""
+
+    def _urlopen_router(self, get_notebook, put_fails):
+        """Route urlopen by method: GET returns get_notebook, PUT may raise."""
+        calls = {"GET": 0, "PUT": 0}
+
+        def router(req, timeout=None):
+            method = req.get_method()
+            calls[method] = calls.get(method, 0) + 1
+            if method == "PUT":
+                if put_fails():
+                    raise ConnectionError("refused")
+                resp = MagicMock()
+                resp.read.return_value = b"{}"
+                return resp
+            return _mock_urlopen_response(get_notebook)
+
+        return router, calls
+
+    def test_failed_put_sets_push_pending(self):
+        session = _setup_session_with_api([_make_code_cell("A", "x = 1")])
+        with patch("urllib.request.urlopen", side_effect=ConnectionError("refused")):
+            assert session._put_contents_api() is None
+        assert session._push_pending is True
+
+    def test_successful_put_clears_push_pending(self):
+        session = _setup_session_with_api([_make_code_cell("A", "x = 1")])
+        session._push_pending = True
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"{}"
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            assert session._put_contents_api() is not None
+        assert session._push_pending is False
+
+    def test_refresh_skipped_while_push_pending(self):
+        """Local edits survive: refresh is skipped while the push keeps failing."""
+        session = _setup_session_with_api([_make_code_cell("A", "local edit")])
+        api_notebook = _make_notebook([_make_code_cell("A", "api version")])
+
+        # First PUT fails → pending
+        with patch("urllib.request.urlopen", side_effect=ConnectionError("refused")):
+            session._put_contents_api()
+        assert session._push_pending is True
+
+        # Refresh: retries PUT once (fails again) and skips the pull
+        router, calls = self._urlopen_router(api_notebook, put_fails=lambda: True)
+        session._last_contents_refresh = 0
+        with patch("urllib.request.urlopen", side_effect=router):
+            session._refresh_from_contents_api()
+
+        assert calls["PUT"] == 1  # single retry
+        assert calls["GET"] == 0  # pull skipped
+        assert get_cell_source(session.notebook["cells"][0]) == "local edit"
+        assert session._push_pending is True
+
+    def test_refresh_resumes_after_push_succeeds(self):
+        """Once the retry PUT succeeds, refresh proceeds normally."""
+        session = _setup_session_with_api([_make_code_cell("A", "local edit")])
+        session._push_pending = True
+        api_notebook = _make_notebook([_make_code_cell("A", "api version")])
+
+        router, calls = self._urlopen_router(api_notebook, put_fails=lambda: False)
+        session._last_contents_refresh = 0
+        with patch("urllib.request.urlopen", side_effect=router):
+            session._refresh_from_contents_api()
+
+        assert calls["PUT"] == 1
+        assert calls["GET"] >= 1
+        assert session._push_pending is False
+        # Pull proceeded ("API wins" again now that our push landed)
+        assert get_cell_source(session.notebook["cells"][0]) == "api version"
+
+    def test_reset_clears_push_pending(self):
+        session = _setup_session_with_api([_make_code_cell("A", "x = 1")])
+        session._push_pending = True
+        session._reset_contents_api_state()
+        assert session._push_pending is False
+
+
 class TestSetupContentsApi:
     """Tests for _setup_contents_api."""
 
@@ -415,3 +495,132 @@ class TestConflictDetection:
             session._refresh_from_contents_api()
 
         assert session._last_known_api_sources == {"A": "x = 42"}
+
+
+class TestContentsApiStateReset:
+    """Regression tests for audit finding C1: stale Contents API config
+    surviving close()/load() could make a later PUT overwrite the WRONG
+    notebook's live Y.js document."""
+
+    def test_close_clears_contents_state(self):
+        session = _setup_session_with_api(
+            [_make_code_cell("a", "x = 1")], contents_path="old/notebook.ipynb"
+        )
+        session._last_known_api_sources = {"a": "x = 1"}
+        session._last_contents_refresh = time.time()
+
+        session.close()
+
+        assert session._jupyter_server_url is None
+        assert session._jupyter_token is None
+        assert session._jupyter_contents_path is None
+        assert session._last_known_api_sources == {}
+        assert session._last_contents_refresh == 0
+
+    def test_reset_makes_put_and_fetch_noops(self):
+        session = _setup_session_with_api(
+            [_make_code_cell("a", "x = 1")], contents_path="old/notebook.ipynb"
+        )
+        session._reset_contents_api_state()
+
+        # With cleared state, neither direction of sync may touch the old
+        # notebook's document.
+        assert session._fetch_contents_api() is None
+        assert session._put_contents_api() is None
+
+
+class TestUrlQuoting:
+    """Audit R4: the contents path must be URL-encoded, otherwise paths
+    with spaces (or other reserved characters) produce invalid URLs."""
+
+    SPACEY_PATH = "my notebooks/test nb.ipynb"
+    QUOTED_PATH = "my%20notebooks/test%20nb.ipynb"
+
+    def test_fetch_quotes_path(self):
+        session = _setup_session_with_api(
+            [_make_code_cell("A", "x = 1")], contents_path=self.SPACEY_PATH
+        )
+        api_nb = _make_notebook([_make_code_cell("A", "x = 1")])
+        with patch(
+            "urllib.request.urlopen", return_value=_mock_urlopen_response(api_nb)
+        ) as mock_open:
+            session._fetch_contents_api()
+
+        req = mock_open.call_args[0][0]
+        assert self.QUOTED_PATH in req.full_url
+        assert " " not in req.full_url
+
+    def test_put_quotes_path(self):
+        session = _setup_session_with_api(
+            [_make_code_cell("A", "x = 1")], contents_path=self.SPACEY_PATH
+        )
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"{}"
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+            session._last_contents_refresh = time.time()  # skip conflict GET
+            assert session._put_contents_api() is not None
+
+        req = mock_open.call_args[0][0]
+        assert req.method == "PUT"
+        assert self.QUOTED_PATH in req.full_url
+        assert " " not in req.full_url
+
+    def test_setup_quotes_path_in_test_get(self):
+        session = NotebookSession()
+        session.notebook = _make_notebook([])
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"{}"
+
+        with patch(
+            "flowbook.mcp.session.discover_jupyter_server",
+            return_value=("http://localhost:8888", "tok"),
+        ), patch(
+            "flowbook.mcp.session.discover_jupyter_server_root",
+            return_value="/server/root",
+        ), patch(
+            "urllib.request.urlopen", return_value=mock_resp
+        ) as mock_open:
+            result = session._setup_contents_api(
+                "/server/root/my notebooks/test nb.ipynb"
+            )
+
+        assert result == " [live sync]"
+        req = mock_open.call_args[0][0]
+        assert self.QUOTED_PATH in req.full_url
+        assert " " not in req.full_url
+        # The stored path stays UNQUOTED; quoting happens at URL build time.
+        assert session._jupyter_contents_path == self.SPACEY_PATH
+
+
+class TestProcessIopubMsg:
+    """Regression test for audit finding C2: flowbook_update messages from
+    JupyterLab-initiated executions arriving WHILE an MCP kernel round-trip
+    is in flight are now routed to _process_iopub_msg instead of dropped."""
+
+    def _metadata_msg(self, cell_id, stale_cells):
+        return {
+            "msg_type": "flowbook_update",
+            "content": {
+                "data": {
+                    "type": "metadata",
+                    "cell_id": cell_id,
+                    "stale_cells": stale_cells,
+                }
+            },
+        }
+
+    def test_metadata_updates_session_state(self):
+        session = _setup_session_with_api([_make_code_cell("a", "x = 1")])
+        session._process_iopub_msg(self._metadata_msg("a", ["b", "c"]))
+
+        assert "a" in session.executed_cells
+        assert session.cell_flowbook_meta["a"]["cell_id"] == "a"
+        assert session._stale_cells == {"b", "c"}
+
+    def test_non_flowbook_messages_ignored(self):
+        session = _setup_session_with_api([_make_code_cell("a", "x = 1")])
+        session._process_iopub_msg(
+            {"msg_type": "stream", "content": {"name": "stdout", "text": "hi"}}
+        )
+        assert session.executed_cells == set()
+        assert session.cell_flowbook_meta == {}

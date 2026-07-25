@@ -44,7 +44,7 @@ from flowbook.kernel.changes import (
     ValueChanged,
 )
 from flowbook.kernel.loc_ids import StableIdMap, get_qualifier
-from flowbook.kernel.locations import WriteLoc, WriteLocSet
+from flowbook.kernel.locations import WriteLoc, WriteLocSet, tracking_to_writelocset
 
 
 def detect_changes(diff: MemoryCheckpointDiffResult) -> List[Change]:
@@ -284,20 +284,29 @@ def _parse_row_change(variable: str, node: Any) -> List[Change]:
     if not isinstance(node, ValueComparison):
         return []
 
-    msg = node.message or ""
+    # Preferred: structured counts carried in value1/value2 (audit M11 —
+    # regex-parsing the human message broke on unusual formats).
+    old_count = node.value1 if isinstance(node.value1, int) else None
+    new_count = node.value2 if isinstance(node.value2, int) else None
 
-    # Try to parse "Row count changed from X to Y"
-    match = re.search(r"from (\d+) to (\d+)", msg)
-    if match:
-        old_count = int(match.group(1))
-        new_count = int(match.group(2))
+    if old_count is None or new_count is None:
+        # Legacy fallback: parse "Row count changed from X to Y"
+        msg = node.message or ""
+        match = re.search(r"from (\d+) to (\d+)", msg)
+        if match:
+            old_count = int(match.group(1))
+            new_count = int(match.group(2))
+
+    if old_count is not None and new_count is not None:
         diff = new_count - old_count
         if diff > 0:
             return [RowsAdded(variable=variable, count=diff)]
         elif diff < 0:
             return [RowsRemoved(variable=variable, count=abs(diff))]
+        return []
 
-    # If we can't parse, assume some rows changed
+    # Last resort: the node says rows changed but carries no counts.
+    # Report a row change (the count is not used by conflict detection).
     return [RowsAdded(variable=variable, count=1)]
 
 
@@ -382,9 +391,16 @@ def _parse_column_structural_change(variable: str, node: Any) -> List[Change]:
     if not isinstance(node, ValueComparison):
         return []
 
-    msg = node.message or ""
+    # Preferred: structured column-name list in value2 (audit M11 — the
+    # message regex broke on names containing quotes, commas, or brackets).
+    if isinstance(node.value2, list):
+        return [
+            ColumnAdded(variable=variable, column=str(col))
+            for col in node.value2
+        ]
 
-    # Try to parse "Columns added: ['col1', 'col2']"
+    # Legacy fallback: parse "Columns added: ['col1', 'col2']"
+    msg = node.message or ""
     match = re.search(r"Columns added: \[([^\]]+)\]", msg)
     if match:
         cols_str = match.group(1)
@@ -405,10 +421,14 @@ def _extract_column_name(key: str) -> Optional[str]:
     Returns:
         Column name, or None if not a column key
     """
-    # Match ['col'] or ["col"]
-    match = re.match(r"\[[\'\"](.+)[\'\"]\]", key)
-    if match:
-        return match.group(1)
+    # Exact inverse of the diff's key construction (children[f"['{col}']"]) —
+    # slicing recovers ANY column name, including ones containing quotes,
+    # commas, or brackets that broke the old regex (audit M11). Keys with a
+    # suffix (e.g. "['col']._dtype") intentionally do not match.
+    if len(key) > 4 and key.startswith("['") and key.endswith("']"):
+        return key[2:-2]
+    if len(key) > 4 and key.startswith('["') and key.endswith('"]'):
+        return key[2:-2]
     return None
 
 
@@ -507,6 +527,38 @@ def detect_write_locs(
     """Convert diff result to WriteLocSet."""
     changes = detect_changes(diff)
     return changes_to_write_locs(changes, namespace, stable_map)
+
+
+def compute_cell_write_locs(
+    tracking,
+    typed_changes: Optional[List[Change]],
+    namespace: Optional[dict] = None,
+    stable_map: Optional[StableIdMap] = None,
+) -> WriteLocSet:
+    """The canonical Wᵢ for a cell execution.
+
+    Union of:
+    - tracking-derived write locs (`tracking_to_writelocset`): rebinds (Var),
+      column writes (Col), structural mutations (Rows/Cols), column deletions
+      (Col), and file writes (File). Present even when the diff is empty —
+      e.g. an idempotent column rewrite or a re-run structural mutation.
+    - diff-derived write locs (`changes_to_write_locs`): value replacements
+      (Var), column changes (Col), row-count/index changes (Rows), dtype
+      changes (Col+Cols) actually detected by the checkpoint diff.
+
+    This is the single builder used by NoReadAndWrite, NoWriteAfterRead,
+    ForwardStale, and BackwardStale, so that no predicate can silently drop
+    a class of write locations again (audit item 6; previously three
+    divergent builders caused exactly that: H2/M3/M4).
+
+    Note on precision: Var(x) appears for rebinds only — an in-place column
+    write records Col(d, c) without Var(d) (`df["y"] = ...` never assigns
+    the name), preserving binding-only ▷ semantics.
+    """
+    w = tracking_to_writelocset(tracking, namespace, stable_map)
+    if typed_changes:
+        w = w | changes_to_write_locs(typed_changes, namespace, stable_map)
+    return frozenset(w)
 
 
 def get_changed_variables(diff: MemoryCheckpointDiffResult) -> set:

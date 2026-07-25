@@ -33,6 +33,17 @@ export interface IFixSuggesterProbe {
   isFixApplied(cellId: string): boolean;
 }
 
+/**
+ * The execution signals the managers subscribe to. In production this is
+ * always `NotebookActions` (the default); tests inject emittable fakes so
+ * the real connect/disconnect wiring is exercised (see FRONTEND_TESTING.md
+ * §5 — this is the harness's single production seam).
+ */
+export interface IExecutionSignals {
+  readonly executed: typeof NotebookActions.executed;
+  readonly executionScheduled: typeof NotebookActions.executionScheduled;
+}
+
 export class ReproducibilityCellHighlighter {
   private _tracker: INotebookTracker;
   private _panel: ReproducibilityMetadataPanel;
@@ -42,14 +53,32 @@ export class ReproducibilityCellHighlighter {
   private _pendingRestartUpdate = new Set<string>();
   private _executedInSession = new Map<string, Set<string>>();
   private _monitoredNotebooks = new Set<string>();
+  // Monitor listeners per notebook path, kept so dispose() can disconnect
+  // them — previously anonymous closures were connected and leaked, firing
+  // on non-flowbook notebooks after every kernel switch away and back.
+  private _monitorHandlers = new Map<
+    string,
+    {
+      panel: NotebookPanel;
+      onCellsChanged: () => void;
+      onStatusChanged: (sender: unknown, status: string) => void;
+      onPathChanged: (sender: unknown, newPath: string) => void;
+    }
+  >();
   private _stalenessNotice = new StalenessNoticeManager();
   private _violationNotice = new ViolationNoticeManager();
   private _fixSuggester: IFixSuggesterProbe | null = null;
+  private _executionSignals: IExecutionSignals;
   private _isDisposed = false;
 
-  constructor(tracker: INotebookTracker, panel: ReproducibilityMetadataPanel) {
+  constructor(
+    tracker: INotebookTracker,
+    panel: ReproducibilityMetadataPanel,
+    executionSignals: IExecutionSignals = NotebookActions
+  ) {
     this._tracker = tracker;
     this._panel = panel;
+    this._executionSignals = executionSignals;
     this._initialize();
   }
 
@@ -102,13 +131,31 @@ export class ReproducibilityCellHighlighter {
       this._stalenessManagers.set(path, manager);
 
       manager.stalenessChanged.connect(() => {
+        if (this._isDisposed || notebook.isDisposed) {
+          return;
+        }
         this._updateAllCells(notebook);
       });
 
       notebook.disposed.connect(() => {
         manager?.dispose();
-        this._stalenessManagers.delete(path);
-        this._monitoredNotebooks.delete(path);
+        // Delete by value, not by the path captured at creation time —
+        // a rename/move migrates entries to the new path key.
+        for (const [key, m] of this._stalenessManagers) {
+          if (m === manager) {
+            this._stalenessManagers.delete(key);
+            break;
+          }
+        }
+        for (const [key, entry] of this._monitorHandlers) {
+          if (entry.panel === notebook) {
+            this._monitorHandlers.delete(key);
+            this._monitoredNotebooks.delete(key);
+            this._pendingRestartUpdate.delete(key);
+            this._executedInSession.delete(key);
+            break;
+          }
+        }
       });
     }
 
@@ -226,7 +273,24 @@ export class ReproducibilityCellHighlighter {
 
     this._tracker.currentChanged.disconnect(this._onNotebookChanged, this);
     this._tracker.activeCellChanged.disconnect(this._onActiveCellChanged, this);
-    NotebookActions.executed.disconnect(this._onExecuted, this);
+    this._executionSignals.executed.disconnect(this._onExecuted, this);
+
+    // Disconnect per-notebook monitor listeners (cells.changed,
+    // statusChanged and pathChanged) so a disposed highlighter stops
+    // reacting entirely.
+    for (const {
+      panel,
+      onCellsChanged,
+      onStatusChanged,
+      onPathChanged
+    } of this._monitorHandlers.values()) {
+      if (!panel.isDisposed) {
+        panel.content.model?.cells.changed.disconnect(onCellsChanged);
+        panel.sessionContext.statusChanged.disconnect(onStatusChanged);
+        panel.context.pathChanged.disconnect(onPathChanged);
+      }
+    }
+    this._monitorHandlers.clear();
 
     if (this._depPanelFrameId !== null) {
       cancelAnimationFrame(this._depPanelFrameId);
@@ -243,7 +307,7 @@ export class ReproducibilityCellHighlighter {
   private _initialize(): void {
     this._tracker.currentChanged.connect(this._onNotebookChanged, this);
     this._tracker.activeCellChanged.connect(this._onActiveCellChanged, this);
-    NotebookActions.executed.connect(this._onExecuted, this);
+    this._executionSignals.executed.connect(this._onExecuted, this);
 
     if (this._tracker.currentWidget) {
       this._monitorNotebook(this._tracker.currentWidget);
@@ -323,22 +387,86 @@ export class ReproducibilityCellHighlighter {
     this._monitoredNotebooks.add(path);
     this._updateAllCells(notebook);
 
-    notebook.content.model?.cells.changed.connect(() => {
+    const onCellsChanged = () => {
+      if (this._isDisposed || notebook.isDisposed) {
+        return;
+      }
       this._updateAllCells(notebook);
       this._updatePanelWithCurrentCellOrder(notebook);
-    });
+    };
+    notebook.content.model?.cells.changed.connect(onCellsChanged);
 
-    // Listen for kernel restart
-    notebook.sessionContext.statusChanged.connect((_, status) => {
+    // Listen for kernel restart. Read the path at event time — the
+    // notebook may have been renamed/moved since monitoring started.
+    const onStatusChanged = (_sender: unknown, status: string) => {
+      if (this._isDisposed || notebook.isDisposed) {
+        return;
+      }
+      const currentPath = notebook.context.path;
       if (status === 'restarting' || status === 'autorestarting') {
-        this._pendingRestartUpdate.add(path);
-        this._executedInSession.delete(path);
+        this._pendingRestartUpdate.add(currentPath);
+        this._executedInSession.delete(currentPath);
         this._clearAllFlowbookMetadata(notebook);
-      } else if (status === 'idle' && this._pendingRestartUpdate.has(path)) {
-        this._pendingRestartUpdate.delete(path);
+      } else if (
+        status === 'idle' &&
+        this._pendingRestartUpdate.has(currentPath)
+      ) {
+        this._pendingRestartUpdate.delete(currentPath);
         this._updateAllCells(notebook);
       }
+    };
+    notebook.sessionContext.statusChanged.connect(onStatusChanged);
+
+    // Migrate all path-keyed state when the notebook is renamed/moved —
+    // otherwise staleness resets and the old entries leak.
+    let knownPath = path;
+    const onPathChanged = (_sender: unknown, newPath: string) => {
+      if (this._isDisposed) {
+        return;
+      }
+      const oldPath = knownPath;
+      knownPath = newPath;
+      this._migratePathKeys(oldPath, newPath);
+    };
+    notebook.context.pathChanged.connect(onPathChanged);
+
+    this._monitorHandlers.set(path, {
+      panel: notebook,
+      onCellsChanged,
+      onStatusChanged,
+      onPathChanged
     });
+  }
+
+  /**
+   * Move all per-notebook state from one path key to another.
+   * Called when a monitored notebook is renamed or moved.
+   */
+  private _migratePathKeys(oldPath: string, newPath: string): void {
+    if (oldPath === newPath) {
+      return;
+    }
+    const manager = this._stalenessManagers.get(oldPath);
+    if (manager) {
+      this._stalenessManagers.delete(oldPath);
+      this._stalenessManagers.set(newPath, manager);
+    }
+    const executed = this._executedInSession.get(oldPath);
+    if (executed) {
+      this._executedInSession.delete(oldPath);
+      this._executedInSession.set(newPath, executed);
+    }
+    if (this._monitoredNotebooks.delete(oldPath)) {
+      this._monitoredNotebooks.add(newPath);
+    }
+    const handlers = this._monitorHandlers.get(oldPath);
+    if (handlers) {
+      this._monitorHandlers.delete(oldPath);
+      this._monitorHandlers.set(newPath, handlers);
+    }
+    if (this._pendingRestartUpdate.delete(oldPath)) {
+      this._pendingRestartUpdate.add(newPath);
+    }
   }
 
   private _updatePanelWithCurrentCellOrder(notebook: NotebookPanel): void {
@@ -363,6 +491,9 @@ export class ReproducibilityCellHighlighter {
   }
 
   private _updateAllCells(notebook: NotebookPanel): void {
+    if (this._isDisposed || notebook.isDisposed) {
+      return;
+    }
     const stalenessManager = this.getStalenessManager(notebook);
     const cellOrder = getCodeCellOrder(notebook);
     const cells = notebook.content.widgets;

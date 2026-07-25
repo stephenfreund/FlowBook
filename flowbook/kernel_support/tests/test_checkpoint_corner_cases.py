@@ -894,6 +894,11 @@ class TestBaseKernelCheckpointRemoval:
         from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
 
         # Call _take_checkpoint directly using the bound method pattern
+        # Bind the real helper too — _take_checkpoint delegates warning/
+        # collection to _report_uncopyable, which a bare MagicMock would stub.
+        mock_kernel._report_uncopyable = (
+            BaseFlowbookKernel._report_uncopyable.__get__(mock_kernel)
+        )
         _take_checkpoint = BaseFlowbookKernel._take_checkpoint.__get__(mock_kernel)
         checkpoint, uncopyable_vars = _take_checkpoint("test_checkpoint")
 
@@ -938,6 +943,11 @@ class TestBaseKernelCheckpointRemoval:
         mock_kernel._checkpoints = Checkpoints()
 
         from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
+        # Bind the real helper too — _take_checkpoint delegates warning/
+        # collection to _report_uncopyable, which a bare MagicMock would stub.
+        mock_kernel._report_uncopyable = (
+            BaseFlowbookKernel._report_uncopyable.__get__(mock_kernel)
+        )
         _take_checkpoint = BaseFlowbookKernel._take_checkpoint.__get__(mock_kernel)
         checkpoint, uncopyable_vars = _take_checkpoint("test_checkpoint")
 
@@ -974,6 +984,11 @@ class TestBaseKernelCheckpointRemoval:
         mock_kernel._checkpoints = Checkpoints()
 
         from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
+        # Bind the real helper too — _take_checkpoint delegates warning/
+        # collection to _report_uncopyable, which a bare MagicMock would stub.
+        mock_kernel._report_uncopyable = (
+            BaseFlowbookKernel._report_uncopyable.__get__(mock_kernel)
+        )
         _take_checkpoint = BaseFlowbookKernel._take_checkpoint.__get__(mock_kernel)
         checkpoint, uncopyable_vars = _take_checkpoint("test_checkpoint")
 

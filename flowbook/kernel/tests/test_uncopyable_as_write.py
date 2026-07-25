@@ -65,34 +65,77 @@ class TestUncopyableAsWriteConfig:
             assert fk.FlowbookKernel._uncopyable_as_write is False
 
 
-class TestUncopyableHandlingOldBehavior:
-    """Tests for old behavior: remove uncopyable vars from namespace."""
+class TestUncopyableHandlingDefaultBehavior:
+    """Default behavior (paper semantics): keep the object alive, warn once,
+    and block subsequent reads until the variable is rebound or deleted."""
 
-    def test_uncopyable_removed_when_env_not_set(self):
-        """Uncopyable vars should be removed from namespace when env var not set."""
+    def _make_ns(self):
         import tempfile
+        from flowbook.kernel_support.tracking import TrackingDict
 
-        # Create uncopyable object (file handle)
         tmp = tempfile.NamedTemporaryFile(mode='w', delete=False)
+        user_ns = TrackingDict({"x": 1, "f": tmp})
+        return user_ns, tmp
 
-        user_ns = {"x": 1, "f": tmp}
+    def test_blocked_read_raises_and_object_survives(self):
+        from flowbook.kernel_support.tracking import UncopyableReadError
 
-        # Simulate old behavior
-        uncopyable_vars = {"f"}
-        _uncopyable_as_write = False
+        user_ns, tmp = self._make_ns()
+        try:
+            user_ns.block_variable("f", "TextIOWrapper")
 
-        if uncopyable_vars:
-            if not _uncopyable_as_write:
-                for k in uncopyable_vars:
-                    if k in user_ns:
-                        del user_ns[k]
+            # Object stays alive in the namespace (not deleted)
+            assert "f" in user_ns
+            assert not tmp.closed
 
-        assert "x" in user_ns
-        assert "f" not in user_ns
+            # Tracked reads are blocked with a clear error
+            with pytest.raises(UncopyableReadError, match="cannot be checkpointed"):
+                user_ns["f"]
 
-        # Cleanup
-        tmp.close()
-        os.unlink(tmp.name)
+            # Unaffected variables still readable
+            assert user_ns["x"] == 1
+        finally:
+            tmp.close()
+            os.unlink(tmp.name)
+
+    def test_rebind_lifts_block(self):
+        user_ns, tmp = self._make_ns()
+        try:
+            user_ns.block_variable("f")
+            user_ns["f"] = 42  # rebind
+            assert user_ns["f"] == 42
+            assert "f" not in user_ns.blocked_variables
+        finally:
+            tmp.close()
+            os.unlink(tmp.name)
+
+    def test_delete_lifts_block(self):
+        user_ns, tmp = self._make_ns()
+        try:
+            user_ns.block_variable("f")
+            del user_ns["f"]
+            assert "f" not in user_ns.blocked_variables
+        finally:
+            tmp.close()
+            os.unlink(tmp.name)
+
+    def test_block_not_enforced_outside_tracking(self):
+        """IPython internals (completion, display) read between cells with
+        tracking disabled — the block must not break them."""
+        user_ns, tmp = self._make_ns()
+        try:
+            user_ns.block_variable("f")
+            user_ns._tracking_enabled = False
+            assert user_ns["f"] is tmp  # no raise
+        finally:
+            tmp.close()
+            os.unlink(tmp.name)
+
+    def test_uncopyable_read_error_is_name_error(self):
+        """Subclasses NameError so user code catching NameError still works."""
+        from flowbook.kernel_support.tracking import UncopyableReadError
+
+        assert issubclass(UncopyableReadError, NameError)
 
 
 class TestUncopyableHandlingNewBehavior:

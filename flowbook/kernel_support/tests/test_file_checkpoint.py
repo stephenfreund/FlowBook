@@ -193,3 +193,90 @@ class TestFileCheckpointDiff:
         assert len(diff.modified) == 1  # a changed
         assert len(diff.added) == 1    # c added
         assert len(diff.removed) == 0  # nothing removed
+
+
+class TestRestoreUndoesCreatedFiles:
+    """Audit M1: files first written AFTER the checkpoint (by the rejected
+    cell) must be undone on restore — previously they silently survived."""
+
+    def _fake_vfs(self, overlay_root):
+        class FakeVfs:
+            enabled = True
+            _deleted_paths = set()
+
+            def _to_overlay_path(self, p):
+                return os.path.join(overlay_root, p.replace(os.sep, "__"))
+
+            def _resolve_read_path(self, p):
+                overlay = self._to_overlay_path(p)
+                return overlay if os.path.exists(overlay) else p
+
+        return FakeVfs()
+
+    def test_created_overlay_file_removed(self, tmp_path):
+        overlay_root = str(tmp_path / "overlay")
+        os.makedirs(overlay_root)
+        vfs = self._fake_vfs(overlay_root)
+
+        cps = FileCheckpoints()
+        cps.enable()
+        try:
+            # Checkpoint taken with NO writes yet
+            cps.save("pre", set(), vfs=vfs)
+
+            # The (rejected) cell then creates a file — overlay-only
+            created = str(tmp_path / "made_by_cell.txt")
+            with open(vfs._to_overlay_path(created), "w") as f:
+                f.write("should not survive rollback")
+
+            cps.restore("pre", vfs=vfs, current_write_paths={created})
+
+            assert not os.path.exists(vfs._to_overlay_path(created)), (
+                "overlay copy of a file created by the rejected cell must "
+                "be removed on restore"
+            )
+        finally:
+            cps.disable()
+
+    def test_overlay_removal_reexposes_real_file(self, tmp_path):
+        """First write to a PRE-EXISTING real file goes to the overlay;
+        rollback must remove the overlay so the intact real file shows."""
+        overlay_root = str(tmp_path / "overlay")
+        os.makedirs(overlay_root)
+        vfs = self._fake_vfs(overlay_root)
+
+        real = str(tmp_path / "data.csv")
+        with open(real, "w") as f:
+            f.write("original")
+
+        cps = FileCheckpoints()
+        cps.enable()
+        try:
+            cps.save("pre", set(), vfs=vfs)
+            with open(vfs._to_overlay_path(real), "w") as f:
+                f.write("mutated by rejected cell")
+
+            cps.restore("pre", vfs=vfs, current_write_paths={real})
+
+            assert not os.path.exists(vfs._to_overlay_path(real))
+            with open(real) as f:
+                assert f.read() == "original"
+        finally:
+            cps.disable()
+
+    def test_no_vfs_leaves_file_but_does_not_crash(self, tmp_path):
+        """Without a VFS we cannot distinguish created from overwrote-a-
+        never-snapshotted file; restore warns and leaves it."""
+        cps = FileCheckpoints()
+        cps.enable()
+        try:
+            cps.save("pre", set())
+            created = str(tmp_path / "made_by_cell.txt")
+            with open(created, "w") as f:
+                f.write("x")
+
+            cps.restore("pre", current_write_paths={created})
+
+            assert os.path.exists(created)  # conservative: not deleted
+        finally:
+            cps.disable()

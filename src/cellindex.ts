@@ -155,6 +155,26 @@ export class CellIndexManager {
   }
 
   /**
+   * Re-key monitoring for a notebook after a rename/move.
+   *
+   * The MutationObserver callback, signal listeners and DOM handlers all
+   * capture the notebook path in their closures, so re-keying the maps
+   * alone would leave them updating the orphaned old key. Tearing down
+   * and restarting monitoring re-captures the new path everywhere.
+   */
+  migratePath(oldPath: string, newPath: string): void {
+    if (oldPath === newPath) {
+      return;
+    }
+    const notebook = this._notebooks.get(oldPath);
+    if (!notebook) {
+      return;
+    }
+    this.stopMonitoring(oldPath);
+    this.startMonitoring(newPath, notebook);
+  }
+
+  /**
    * Update all cell index overlays for a notebook
    */
   private updateAllOverlays(

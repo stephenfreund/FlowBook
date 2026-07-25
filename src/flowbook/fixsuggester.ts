@@ -273,10 +273,10 @@ export class FixSuggester {
       }>('apply-fix', { notebook: nb, tool: fix.tool, args: fix.args });
       result = response.result;
     } catch (err) {
-      entry.state = 'failed';
+      // Return to 'ready' so the user can retry or pick another fix.
+      entry.state = 'ready';
       this._renderDiagnosisRegion(cell, `Apply failed: ${err}`);
       this._renderFixButtons(cell, entry.plan.fixes);
-      entry.state = 'ready';
       return;
     }
 
@@ -431,10 +431,10 @@ export class FixSuggester {
         entry.undoTimer = null;
       }, UNDO_TTL_MS);
     } catch (err) {
-      entry.state = 'failed';
+      // Return to 'ready' so the user can retry or pick another fix.
+      entry.state = 'ready';
       this._renderDiagnosisRegion(cell, `Custom fix failed: ${err}`);
       this._renderFixButtons(cell, entry.plan?.fixes || []);
-      entry.state = 'ready';
     }
   }
 

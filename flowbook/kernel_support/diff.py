@@ -1236,7 +1236,8 @@ class Diff:
             log(f"    ... and {len(column_timings) - 5} more columns: {remaining_time*1000:.3f}ms")
 
     def _check_structural_change(
-        self, path: str, change_type: str, detail: str
+        self, path: str, change_type: str, detail: str,
+        value1=None, value2=None,
     ) -> Optional[ValueComparison]:
         """
         Check if a structural change should be reported based on structural_mode.
@@ -1290,10 +1291,13 @@ class Diff:
             self._warnings.append(message)
             return None
         else:  # ENFORCE
+            # value1/value2 carry STRUCTURED data (e.g. row counts, added
+            # column names) so change_detector does not have to regex-parse
+            # the human-readable message (audit M11).
             return ValueComparison(
                 status="different",
-                value1=None,
-                value2=None,
+                value1=value1,
+                value2=value2,
                 message=message,
             )
 
@@ -2087,7 +2091,8 @@ class Diff:
         if len(val_a) != len(val_b):
             structural_diff = self._check_structural_change(
                 path, 'len',
-                f"Series length changed from {len(val_a)} to {len(val_b)}"
+                f"Series length changed from {len(val_a)} to {len(val_b)}",
+                value1=len(val_a), value2=len(val_b),
             )
             if structural_diff:
                 children["_structural_len"] = structural_diff
@@ -2096,7 +2101,8 @@ class Diff:
         if val_a.dtype != val_b.dtype:
             structural_diff = self._check_structural_change(
                 path, 'dtype',
-                f"Series dtype changed from {val_a.dtype} to {val_b.dtype}"
+                f"Series dtype changed from {val_a.dtype} to {val_b.dtype}",
+                value1=str(val_a.dtype), value2=str(val_b.dtype),
             )
             if structural_diff:
                 children["_structural_dtype"] = structural_diff
@@ -2486,7 +2492,8 @@ class Diff:
         if len(val_a) != len(val_b):
             structural_diff = self._check_structural_change(
                 path, 'rows',
-                f"Row count changed from {len(val_a)} to {len(val_b)}"
+                f"Row count changed from {len(val_a)} to {len(val_b)}",
+                value1=len(val_a), value2=len(val_b),
             )
             if structural_diff:
                 children["_structural_rows"] = structural_diff
@@ -2495,9 +2502,11 @@ class Diff:
         # Check for structural changes (column additions)
         added_cols = cols_b - cols_a
         if added_cols:
+            added_col_names = sorted((str(c) for c in added_cols))
             structural_diff = self._check_structural_change(
                 path, 'columns',
-                f"Columns added: {sorted(added_cols)}"
+                f"Columns added: {added_col_names}",
+                value1=[], value2=added_col_names,
             )
             if structural_diff:
                 children["_structural_columns"] = structural_diff
@@ -2517,7 +2526,7 @@ class Diff:
                 else:
                     # Track missing RBW columns as differences (but don't return early!)
                     missing_in_a = rbw_cols - cols_a
-                    for col in sorted(missing_in_a):
+                    for col in sorted(missing_in_a, key=str):
                         children[f"['{col}']"] = ValueComparison(
                             status="different",
                             value1=None,
@@ -2527,7 +2536,7 @@ class Diff:
                         total_diff_count += 1
 
                     missing_in_b = rbw_cols - cols_b
-                    for col in sorted(missing_in_b):
+                    for col in sorted(missing_in_b, key=str):
                         children[f"['{col}']"] = ValueComparison(
                             status="different",
                             value1=None,
@@ -2542,7 +2551,7 @@ class Diff:
                 # No column-level RBW info - in leq mode, compare all of val_a's columns
                 # Track columns missing in b
                 missing_cols = cols_a - cols_b
-                for col in sorted(missing_cols):
+                for col in sorted(missing_cols, key=str):
                     children[f"['{col}']"] = ValueComparison(
                         status="different",
                         value1=_get_column_as_series(val_a, col) if col in val_a.columns else None,
@@ -2558,7 +2567,7 @@ class Diff:
             only_in_a = cols_a - cols_b
             only_in_b = cols_b - cols_a
 
-            for col in sorted(only_in_a):
+            for col in sorted(only_in_a, key=str):
                 children[f"['{col}']"] = ValueComparison(
                     status="different",
                     value1=_get_column_as_series(val_a, col),
@@ -2567,7 +2576,7 @@ class Diff:
                 )
                 total_diff_count += 1
 
-            for col in sorted(only_in_b):
+            for col in sorted(only_in_b, key=str):
                 children[f"['{col}']"] = ValueComparison(
                     status="different",
                     value1=None,
@@ -2617,7 +2626,7 @@ class Diff:
         # Track column timings for profiling
         column_timings: List[Tuple[float, str, str]] = []  # (elapsed, col_name, dtype)
 
-        for col in sorted(cols_to_compare_values):
+        for col in sorted(cols_to_compare_values, key=str):
             if _PROFILE_DIFF:
                 col_start = time.perf_counter()
 
@@ -3062,7 +3071,7 @@ class Diff:
                     value1=sorted(keys_a),
                     value2=sorted(keys_b),
                     message=f"Module structure mismatch at {path}: "
-                            f"only in first: {sorted(only_in_a)}, only in second: {sorted(only_in_b)}",
+                            f"only in first: {sorted(only_in_a, key=str)}, only in second: {sorted(only_in_b, key=str)}",
                 )
 
         # Compare state_dicts (parameters and buffers)

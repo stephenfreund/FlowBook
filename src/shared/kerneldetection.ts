@@ -19,7 +19,10 @@ export interface IKernelChangeInfo {
 export class KernelDetector {
   private _tracker: INotebookTracker;
   private _kernelChanged = new Signal<this, IKernelChangeInfo>(this);
-  private _notebookKernels = new Map<string, FlowbookKernelType>();
+  // Keyed by panel identity, NOT context.path — the path changes on
+  // rename/move, and a path key captured at monitor time would orphan the
+  // entry (and could cross-talk with a new notebook opened at the old path).
+  private _notebookKernels = new Map<NotebookPanel, FlowbookKernelType>();
 
   constructor(tracker: INotebookTracker) {
     this._tracker = tracker;
@@ -68,19 +71,17 @@ export class KernelDetector {
   }
 
   private _monitorNotebook(notebook: NotebookPanel): void {
-    const path = notebook.context.path;
-
     // Initial kernel type
     const initialKernel = this.getKernelType(notebook);
-    this._notebookKernels.set(path, initialKernel);
+    this._notebookKernels.set(notebook, initialKernel);
 
     // Listen for kernel changes
     notebook.sessionContext.kernelChanged.connect(() => {
-      const previousKernel = this._notebookKernels.get(path) || 'none';
+      const previousKernel = this._notebookKernels.get(notebook) || 'none';
       const currentKernel = this.getKernelType(notebook);
 
       if (previousKernel !== currentKernel) {
-        this._notebookKernels.set(path, currentKernel);
+        this._notebookKernels.set(notebook, currentKernel);
         this._kernelChanged.emit({
           notebook,
           previousKernel,
@@ -91,7 +92,7 @@ export class KernelDetector {
 
     // Cleanup on dispose
     notebook.disposed.connect(() => {
-      this._notebookKernels.delete(path);
+      this._notebookKernels.delete(notebook);
     });
   }
 }

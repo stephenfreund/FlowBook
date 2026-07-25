@@ -233,9 +233,13 @@ KNOWN LIMITATIONS:
    Restored iterators may behave unexpectedly.
 
 4. EXTERNAL SIDE EFFECTS
-   File I/O, network calls, database modifications are NOT rolled back:
-       f.write(data)  # File is modified even if cell is rolled back
-   Reproducibility only manages Python namespace state.
+   Tracked file writes ARE rolled back: modified files are restored from
+   the file checkpoint, deleted files re-deleted, and (under the VFS)
+   files first written by the rejected cell are removed from the overlay.
+   Without the VFS, a file FIRST written by the rejected cell has no
+   pre-image and cannot be restored (a warning is logged). Network calls,
+   database modifications, and subprocess file writes are never rolled
+   back.
 
 5. MATPLOTLIB OBJECTS EXCLUDED
    Matplotlib figures/axes are not checkpointed (unpicklable).
@@ -432,9 +436,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
     _max_passes = 2  # Max timeout handler passes
 
     # Environment variable to control handling of uncopyable variables.
-    # When False (default): uncopyable variables are removed from user_ns
+    # When False (default): the variable stays alive but subsequent reads are
+    #            blocked (UncopyableReadError) until it is rebound — paper
+    #            semantics: warn once + block reads.
     # When True: uncopyable variables are added to W (writes) as a conservative
-    #            treatment that preserves analysis soundness
+    #            treatment; reads stay allowed but rollback cannot restore them
     _uncopyable_as_write = os.environ.get("FLOWBOOK_UNCOPYABLE_AS_WRITE", "").lower() in ("1", "true", "yes")
 
     def __init__(self, **kwargs):
@@ -518,8 +524,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         if self._flowbook_comm is not None:
             try:
                 self._flowbook_comm.send(msg)
-            except Exception:
-                # Comm may be closed; clear reference
+            except Exception as e:
+                # Comm may be closed; clear the reference but say so —
+                # from here on the frontend only gets IOPub updates, and a
+                # silent drop made that impossible to diagnose (audit R1).
+                from flowbook.util.output import log
+                log(f"WARNING: flowbook comm send failed ({e}); dropping "
+                    f"comm — frontend will reconnect on next kernel idle")
                 self._flowbook_comm = None
 
     def _handle_flowbook_message(self, msg: dict) -> None:
@@ -1257,13 +1268,39 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             # Patch run_code to use TrackingDict for both globals and locals
             self._patch_run_code(tracking_dict)
 
+            # Patch transform_cell so IPython's prefilter lookups are not
+            # recorded as user reads
+            self._patch_transform_cell(tracking_dict)
+
             # Save initial state checkpoint (σ_0) for EXEC-RESTORE on the first cell
-            # For initial state, uncopyable vars are handled by old behavior (removed)
-            # since there's no tracking context yet
+            # Uncopyable vars in the initial namespace are read-blocked, same
+            # as during normal execution (paper semantics: warn + block reads).
             _, initial_uncopyable = self._take_checkpoint("_initial_state")
             for k in initial_uncopyable:
-                if k in self.shell.user_ns:
-                    del self.shell.user_ns[k]
+                tracking_dict.block_variable(k)
+
+    def _patch_transform_cell(self, tracking_dict: TrackingDict) -> None:
+        """
+        Patch shell.transform_cell to run with tracking suspended.
+
+        IPython's cell transformation runs its prefilter machinery, whose
+        autocall check looks up the first token of the cell's first line
+        in user_ns (e.g. ``y`` for the cell ``y = x * 2``). With tracking
+        enabled, that infrastructure lookup is recorded as a user read.
+        On a rerun the write target already exists in the namespace, so
+        the lookup hits and the cell is falsely reported as reading and
+        writing the same location (NoReadAndWrite) — rejecting every
+        rerun of a plain assignment cell. Transformation never executes
+        user code, so suspending tracking around it is safe.
+        """
+        shell = self.shell
+        original_transform_cell = shell.transform_cell
+
+        def transform_cell_untracked(raw_cell):
+            with tracking_dict.suspended():
+                return original_transform_cell(raw_cell)
+
+        shell.transform_cell = transform_cell_untracked
 
     def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
         """
@@ -1391,10 +1428,19 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 # Handle uncopyable variables based on configuration
                 if uncopyable_vars:
                     if not self._uncopyable_as_write:
-                        # Old behavior: remove uncopyable vars from namespace
-                        for k in uncopyable_vars:
-                            if k in self.shell.user_ns:
-                                del self.shell.user_ns[k]
+                        # Default (paper semantics): keep the object alive but
+                        # block subsequent reads until the name is rebound.
+                        # Its state cannot be restored on rollback, so reads
+                        # would leak unreproducible state downstream.
+                        if isinstance(user_ns, TrackingDict):
+                            for k in uncopyable_vars:
+                                user_ns.block_variable(k)
+                        else:
+                            # No TrackingDict to enforce blocking — fall back
+                            # to removal so reads at least fail loudly.
+                            for k in uncopyable_vars:
+                                if k in self.shell.user_ns:
+                                    del self.shell.user_ns[k]
                     # If _uncopyable_as_write is True, we add them to tracking.writes
                     # after execution (see below where tracking data is processed)
 
@@ -1802,6 +1848,28 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             # Mark clean AFTER propagation (so this cell isn't self-staled)
             state.set_clean(self._cell_id)
 
+        # Shell escape hatch, made visible (audit): `!cmd` lines run
+        # subprocesses whose file/environment effects FlowBook cannot track
+        # or roll back. The cell has no Python-namespace reads/writes, but
+        # its side effects are outside the guarantees — say so instead of
+        # staying silent.
+        has_shell_lines = any(
+            line.strip().startswith("!")
+            for line in code.strip().split("\n")
+        )
+        shell_warnings = (
+            [
+                "Cell runs shell commands (!): their file and environment "
+                "effects are not tracked and are excluded from FlowBook's "
+                "reproducibility guarantees."
+            ]
+            if has_shell_lines
+            else []
+        )
+        if has_shell_lines:
+            from flowbook.util.output import log
+            log(f"[Untracked] {self._cell_id}: {shell_warnings[0]}")
+
         # Send empty metadata to clear any stale metadata from previous executions
         if not silent and self._cell_id:
             empty_metadata = ReproducibilityMetadata(
@@ -1812,11 +1880,16 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 changed_locs=[],
                 stale_cells=self._enforcer.get_stale_cells(),
                 cell_order=self._enforcer.cell_order,
+                structural_warnings=shell_warnings,
                 staleness_reasons=self._enforcer._notebook_state.get_all_reasons(),
             )
             self._send_flowbook_message(build_metadata_message(empty_metadata))
             self._send_flowbook_message(
-                build_status_message("✓", "Magic cell", cell_id=self._cell_id or "")
+                build_status_message(
+                    "⚠️" if has_shell_lines else "✓",
+                    "Shell cell (untracked side effects)" if has_shell_lines else "Magic cell",
+                    cell_id=self._cell_id or "",
+                )
             )
 
         return result

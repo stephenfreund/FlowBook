@@ -10,7 +10,8 @@ import { IOutput } from '@jupyterlab/nbformat';
 import {
   IReproducibilityError,
   IReproducibilityMetadata,
-  asFlowbookOutput
+  asFlowbookOutput,
+  escapeHtml
 } from './types';
 import { indexToAlpha } from '../cellindexutils';
 
@@ -178,8 +179,11 @@ export class ViolationNoticeManager {
     const plainMessages: string[] = [];
 
     for (const group of grouped.values()) {
-      const locs = group.locs.map(l => '`' + l + '`').join(', ');
-      const htmlLocs = locs.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Location names come from user data (e.g. CSV column headers) —
+      // escape them before interpolating into the text/html payload.
+      const htmlLocs = group.locs
+        .map(l => `<code>${escapeHtml(l)}</code>`)
+        .join(', ');
       const causersStr = this._joinCausers(group.causers);
 
       let message: string;
@@ -194,7 +198,7 @@ export class ViolationNoticeManager {
           for (const loc of group.locs) {
             if (loc.includes('.')) {
               const [dfName, colName] = loc.split('.');
-              message += `<br>Use <code>${dfName}["${colName}"]</code> = ... for full-column assignment`;
+              message += `<br>Use <code>${escapeHtml(dfName)}["${escapeHtml(colName)}"]</code> = ... for full-column assignment`;
             }
           }
           break;
@@ -218,7 +222,16 @@ export class ViolationNoticeManager {
       }
 
       htmlMessages.push(message);
-      plainMessages.push(message.replace(/<code>([^<]+)<\/code>/g, '`$1`'));
+      // Derive the plain-text variant: <code> → backticks, then undo the
+      // HTML escaping applied for the html payload.
+      const plain = message
+        .replace(/<code>([^<]+)<\/code>/g, '`$1`')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&');
+      plainMessages.push(plain);
     }
 
     const combinedHtml = htmlMessages

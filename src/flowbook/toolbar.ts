@@ -6,12 +6,14 @@ import { NotebookPanel, NotebookActions } from '@jupyterlab/notebook';
 import { ICodeCellModel } from '@jupyterlab/cells';
 import { DocumentRegistry } from '@jupyterlab/docregistry';
 import { IDisposable } from '@lumino/disposable';
-import { ToolbarButton } from '@jupyterlab/apputils';
+import { showErrorMessage, ToolbarButton } from '@jupyterlab/apputils';
 import { stepIntoIcon } from '@jupyterlab/ui-components';
 
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
-import { IReproducibilityMetadata } from './types';
+import { IReproducibilityMetadata, waitForFlowbookMetadata } from './types';
 import { KernelDetector } from '../shared/kerneldetection';
+import { RunToCleanGuard, formatFootprintChange } from './rerunguard';
+import { indexToAlpha } from '../cellindexutils';
 
 /**
  * Extension that adds "Run Next Stale" button to the notebook toolbar
@@ -28,9 +30,11 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
   }
 
   /**
-   * Set the highlighter reference (called when plugin activates)
+   * Set the highlighter reference (called when plugin activates).
+   * Pass null on deactivation so the button doesn't touch a disposed
+   * highlighter.
    */
-  setHighlighter(highlighter: ReproducibilityCellHighlighter): void {
+  setHighlighter(highlighter: ReproducibilityCellHighlighter | null): void {
     this._highlighter = highlighter;
   }
 
@@ -63,9 +67,16 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
     };
 
     // Initial visibility update when session is ready
-    panel.sessionContext.ready.then(() => {
-      updateButtonVisibility();
-    });
+    panel.sessionContext.ready
+      .then(() => {
+        updateButtonVisibility();
+      })
+      .catch(err => {
+        console.warn(
+          'FlowBook toolbar: session failed to initialize; leaving button hidden',
+          err
+        );
+      });
 
     // Listen for kernel changes
     panel.sessionContext.kernelChanged.connect(() => {
@@ -83,13 +94,26 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
   }
 
   /**
-   * Run all stale and unrun code cells in document order.
-   * Stops on hard error always. Stops on violation if continue_after_violation is false.
+   * Run all stale and unrun code cells in document order — the
+   * RunToClean loop. Stops on hard error always. Stops on violation if
+   * continue_after_violation is false. If a cell is executed a second
+   * time and its read or write sets changed, the loop may never
+   * terminate (reruns keep marking earlier cells stale), so it stops
+   * and reports potential non-termination at that cell. Report-free
+   * sweeps finish within n(n+2) runs (Progress theorem); the iteration
+   * cap is a backstop for cells with no tracking metadata.
    * User can cancel mid-loop via kernel interrupt.
    */
   private async _runAllActionable(panel: NotebookPanel): Promise<void> {
     const notebook = panel.content;
-    const maxIterations = 500;
+    const guard = new RunToCleanGuard();
+    let nCodeCells = 0;
+    for (const w of notebook.widgets) {
+      if (w.model.type === 'code') {
+        nCodeCells++;
+      }
+    }
+    const maxIterations = Math.max(25, nCodeCells * (nCodeCells + 3));
 
     for (let iter = 0; iter < maxIterations; iter++) {
       // Find next actionable cell
@@ -100,12 +124,16 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
       }
 
       let targetWidgetIdx = -1;
+      let targetCodeIdx = -1;
+      let codeIdx = 0;
       const widgets = notebook.widgets;
       for (let i = 0; i < widgets.length; i++) {
         const cell = widgets[i];
         if (cell.model.type !== 'code') {
           continue;
         }
+        const currentCodeIdx = codeIdx;
+        codeIdx++;
         const codeModel = cell.model as ICodeCellModel;
         const source = codeModel.sharedModel.getSource();
         if (!source || source.trim() === '') {
@@ -116,6 +144,7 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
           staleCells.has(cellId) || codeModel.executionCount === null;
         if (needsRun) {
           targetWidgetIdx = i;
+          targetCodeIdx = currentCodeIdx;
           break;
         }
       }
@@ -124,13 +153,30 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
         break;
       }
 
+      // Capture identity + metadata before the run: the widget index can
+      // go stale if cells are added/removed during execution, and the
+      // flowbook metadata is written asynchronously by the comm handler
+      // (the shell reply can beat it, leaving us reading the PREVIOUS
+      // run's errors).
+      const targetCell = widgets[targetWidgetIdx];
+      const targetModelId = targetCell.model.id;
+      const beforeMeta = targetCell.model.getMetadata('flowbook') as
+        | IReproducibilityMetadata
+        | undefined;
+
       // Run the cell
       notebook.activeCellIndex = targetWidgetIdx;
-      notebook.scrollToCell(widgets[targetWidgetIdx]);
+      notebook.scrollToCell(targetCell);
       await NotebookActions.run(notebook, panel.sessionContext);
 
-      // Check for hard error
-      const cell = widgets[targetWidgetIdx];
+      // Re-find the cell by model ID — indices may have shifted.
+      const cell = notebook.widgets.find(w => w.model.id === targetModelId);
+      if (!cell) {
+        // Cell was removed during the run — look for the next actionable.
+        continue;
+      }
+
+      // Check for hard error (outputs land with the shell reply, no race)
       const outputs = (cell.model as ICodeCellModel).outputs;
       let hasError = false;
       if (outputs) {
@@ -146,11 +192,35 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
         break;
       }
 
-      // Check for violation
-      const meta = cell.model.getMetadata('flowbook') as
-        | IReproducibilityMetadata
-        | undefined;
+      // Wait for this run's metadata to land before checking violations.
+      const meta = await waitForFlowbookMetadata(cell.model, beforeMeta);
       if (meta?.errors && meta.errors.length > 0) {
+        break;
+      }
+
+      // RunToClean check: a re-executed cell must not mark an earlier
+      // cell stale, else the loop may never terminate.
+      const cellOrder = notebook.widgets
+        .filter(w => w.model.type === 'code')
+        .map(w => w.model.id);
+      const report = guard.noteRun(targetModelId, meta ?? null, cellOrder);
+      if (report) {
+        const label = indexToAlpha(targetCodeIdx);
+        const markedLabels = report.backwardStale
+          .map(cid => indexToAlpha(cellOrder.indexOf(cid)))
+          .join(', ');
+        let message =
+          `Re-running cell ${label} marked earlier cell(s) ` +
+          `${markedLabels} stale again, so repeatedly running stale ` +
+          'cells may never make the notebook clean.';
+        if (report.change) {
+          const detail = formatFootprintChange(report.change);
+          message += ` ${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
+        }
+        message +=
+          ' Varying values are fine, but the set of variables a cell ' +
+          'reads and writes must be the same on every run.';
+        await showErrorMessage('FlowBook: Potential Non-Termination', message);
         break;
       }
     }

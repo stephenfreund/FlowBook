@@ -114,3 +114,60 @@ class TestKernelConnectionManager:
         mgr._kernel_clients["k1"] = c1
         mgr._kernel_clients["k2"] = c2
         assert mgr.get_kernel_client("k1") is not mgr.get_kernel_client("k2")
+
+
+class TestKernelConnectionManagerLifecycle:
+    """Regression tests for the per-request ZMQ client leak fix (audit R1/A2)."""
+
+    def _make_manager(self):
+        mock_app = MagicMock()
+        return KernelConnectionManager(mock_app), mock_app
+
+    def test_failed_wait_for_ready_stops_channels_and_does_not_cache(self):
+        """A client that never becomes ready must not leak started channels."""
+        mgr, mock_app = self._make_manager()
+        with patch(
+            "flowbook.server.kernel_manager.FlowbookKernelClient"
+        ) as mock_cls:
+            client = mock_cls.return_value
+            client.wait_for_ready.side_effect = RuntimeError("kernel dead")
+
+            with pytest.raises(RuntimeError):
+                mgr.get_kernel_client("k1")
+
+            client.start_channels.assert_called_once()
+            client.stop_channels.assert_called_once()
+        assert "k1" not in mgr._kernel_clients
+
+    def test_cached_client_with_dead_channels_is_rebuilt(self):
+        mgr, mock_app = self._make_manager()
+        stale = MagicMock(spec=FlowbookKernelClient)
+        stale.channels_running = False
+        mgr._kernel_clients["k1"] = stale
+
+        with patch(
+            "flowbook.server.kernel_manager.FlowbookKernelClient"
+        ) as mock_cls:
+            fresh = mock_cls.return_value
+            result = mgr.get_kernel_client("k1")
+
+        stale.stop_channels.assert_called_once()
+        assert result is fresh
+        assert mgr._kernel_clients["k1"] is fresh
+
+    def test_cached_client_for_dead_kernel_is_cleaned_up(self):
+        mgr, mock_app = self._make_manager()
+        stale = MagicMock(spec=FlowbookKernelClient)
+        mgr._kernel_clients["k1"] = stale
+        mock_app.kernel_manager.get_kernel.side_effect = KeyError("k1")
+
+        with pytest.raises(KeyError):
+            mgr.get_kernel_client("k1")
+
+        stale.stop_channels.assert_called_once()
+        assert "k1" not in mgr._kernel_clients
+
+    def test_lock_for_is_stable_per_kernel(self):
+        mgr, _ = self._make_manager()
+        assert mgr.lock_for("k1") is mgr.lock_for("k1")
+        assert mgr.lock_for("k1") is not mgr.lock_for("k2")

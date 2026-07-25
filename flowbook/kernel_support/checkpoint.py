@@ -211,11 +211,24 @@ class Checkpoints:
         )
         return total, removed
 
-    def restore(self, name: str, user_ns: dict, vfs=None) -> None:
-        """Restore memory + file checkpoint."""
+    def restore(
+        self,
+        name: str,
+        user_ns: dict,
+        vfs=None,
+        current_write_paths: Optional[Set[str]] = None,
+    ) -> None:
+        """Restore memory + file checkpoint.
+
+        current_write_paths (paths written as of now) lets the file restore
+        also undo files first written AFTER the checkpoint was taken — i.e.
+        by the rejected cell (see FileCheckpoints.restore).
+        """
         self.memory.restore(name, user_ns)
         if self.file._enabled and self.file.exists(name):
-            self.file.restore(name, vfs=vfs)
+            self.file.restore(
+                name, vfs=vfs, current_write_paths=current_write_paths
+            )
 
     def get(self, name: str) -> Checkpoint:
         return Checkpoint(

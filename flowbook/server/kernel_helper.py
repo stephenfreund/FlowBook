@@ -5,7 +5,8 @@ This module provides utilities for executing code in Jupyter kernels and
 injecting runtime modifications like CSV downsampling.
 """
 import textwrap
-from typing import Any, Dict, Optional
+from queue import Empty
+from typing import Any, Callable, Dict, Optional
 
 import time
 from flowbook.server.kernel_manager import FlowbookKernelClient
@@ -47,6 +48,22 @@ CSV_DOWNSAMPLE_PATCH_TEMPLATE = textwrap.dedent('''
 ''').strip()
 
 
+def extract_flowbook_metadata(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the first ``type == "metadata"`` flowbook protocol message
+    from a ``KernelHelper.execute_code()`` result, or None.
+
+    Shared per-cell metadata extraction (audit A4) used by both
+    ``ExecuteCommand.process`` (flowbook/server/commands/execute.py) and
+    ``NotebookSession.run_cell`` (flowbook/mcp/session.py). The two callers
+    keep separate execution loops on purpose — see the cross-reference
+    comments at those call sites.
+    """
+    for msg in result.get("flowbook_messages", []):
+        if isinstance(msg, dict) and msg.get("type") == "metadata":
+            return msg
+    return None
+
+
 class KernelHelper:
     """Helper class for kernel communication."""
 
@@ -80,6 +97,9 @@ class KernelHelper:
             Dictionary with execution results from applying the patch,
             including any outputs or errors.
 
+        Raises:
+            ValueError: If proportion is not a number in [0.0, 1.0].
+
         Example:
             >>> # Keep only 10% of CSV data for faster testing
             >>> KernelHelper.inject_csv_downsampling(kernel_client, 0.1)
@@ -91,6 +111,21 @@ class KernelHelper:
               were kept vs. the original count.
             - The patch persists for the lifetime of the kernel session.
         """
+        # Coerce and validate BEFORE interpolating into kernel code (audit
+        # S5): a string or expression must never reach the template, where
+        # it would be executed verbatim in the kernel.
+        try:
+            proportion = float(proportion)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"proportion must be a number between 0.0 and 1.0, "
+                f"got {proportion!r}"
+            )
+        if not 0.0 <= proportion <= 1.0:  # also rejects NaN
+            raise ValueError(
+                f"proportion must be between 0.0 and 1.0, got {proportion!r}"
+            )
+
         patch_code = CSV_DOWNSAMPLE_PATCH_TEMPLATE.format(proportion=proportion)
         result = KernelHelper.execute_code(
             kernel_client,
@@ -111,6 +146,7 @@ class KernelHelper:
         store_history: bool = True,
         flowbook_msg: dict = None,
         actor: str = None,
+        on_foreign_msg: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
         Execute code in the kernel and return results.
@@ -124,6 +160,12 @@ class KernelHelper:
             store_history: Whether to store the code in the kernel's history (default: True)
             flowbook_msg: Optional FlowBook protocol message to send via execute metadata.
                 e.g. {"type": "cell_edited", "cell_id": "abc"}
+            on_foreign_msg: Optional callback invoked with each IOPub message
+                whose parent is NOT this execution. On a shared kernel, another
+                client's executions (e.g. JupyterLab while MCP is inside this
+                call) produce messages on the same IOPub socket; without a
+                handler they are drained and lost, silently desyncing the
+                caller's state. Callback errors are logged and swallowed.
         Returns:
             Dictionary with execution results including outputs, status, and
             flowbook_messages (list of protocol messages received from kernel).
@@ -156,10 +198,17 @@ class KernelHelper:
 
             try:
                 msg = kernel_client.get_iopub_msg(timeout=1.0)
-            except:
+            except Empty:
                 continue
 
             if msg['parent_header'].get('msg_id') != msg_id:
+                # Message from another execution on a shared kernel — hand it
+                # to the caller instead of dropping it.
+                if on_foreign_msg is not None:
+                    try:
+                        on_foreign_msg(msg)
+                    except Exception as e:
+                        log(f"on_foreign_msg handler error: {e}")
                 continue
 
             msg_type = msg['header']['msg_type']
@@ -209,9 +258,19 @@ class KernelHelper:
                 if content['execution_state'] == 'idle':
                     break
 
-        # Get the execute_reply message
+        # Get the execute_reply message. Replies on the shell channel can only
+        # be for OUR requests, but an earlier call that timed out may have
+        # abandoned its reply in the queue — discard stale replies until we
+        # find the one matching this request.
         try:
-            reply = kernel_client.get_shell_msg(timeout=1.0)
+            shell_deadline = time.time() + 1.0
+            while True:
+                remaining = shell_deadline - time.time()
+                if remaining <= 0:
+                    raise Empty
+                reply = kernel_client.get_shell_msg(timeout=remaining)
+                if reply['parent_header'].get('msg_id') == msg_id:
+                    break
             reply_status = reply['content']['status']
             if reply_status == 'error':
                 status = 'error'

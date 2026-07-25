@@ -110,10 +110,11 @@ class TestSDCStructuralReadsModeEnforce:
         enforcer.set_cell_order(['cell_a', 'cell_b'])
 
 
-        # Cell A reads df.columns
+        # Cell A reads df.columns (namespace holds the ORIGINAL df so
+        # recorded read locs carry its object identity)
         df = pd.DataFrame({'a': [1], 'b': [2]})
-        ns_a = {'df': df.copy()}
-        pre_a = MemoryCheckpoint('pre_a', ns_a, {})
+        ns_a = {'df': df}
+        pre_a = MemoryCheckpoint('pre_a', {'df': df.copy()}, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -126,10 +127,11 @@ class TestSDCStructuralReadsModeEnforce:
         )
         assert not result_a.has_errors()
 
-        # Cell B adds column 'c'
-        df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
-        ns_b_post = {'df': df_b}
+        # Cell B adds column 'c' in place (SAME object A read).
+        # Snapshot the pre state first, then mutate the original df.
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
+        df['c'] = [3]
+        ns_b_post = {'df': df}
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
@@ -225,10 +227,11 @@ class TestSDCStructuralReadsModeEnforce:
         enforcer.set_cell_order(['cell_a', 'cell_b'])
 
 
-        # Cell A iterates over df
+        # Cell A iterates over df (namespace holds the ORIGINAL df so
+        # recorded read locs carry its object identity)
         df = pd.DataFrame({'a': [1], 'b': [2]})
-        ns_a = {'df': df.copy()}
-        pre_a = MemoryCheckpoint('pre_a', ns_a, {})
+        ns_a = {'df': df}
+        pre_a = MemoryCheckpoint('pre_a', {'df': df.copy()}, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -241,10 +244,11 @@ class TestSDCStructuralReadsModeEnforce:
         )
         assert not result_a.has_errors()
 
-        # Cell B adds column
-        df_b = pd.DataFrame({'a': [1], 'b': [2], 'c': [3]})
-        ns_b_post = {'df': df_b}
+        # Cell B adds column in place (SAME object A read).
+        # Snapshot the pre state first, then mutate the original df.
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
+        df['c'] = [3]
+        ns_b_post = {'df': df}
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
@@ -263,10 +267,11 @@ class TestSDCStructuralReadsModeEnforce:
         enforcer.set_cell_order(['cell_a', 'cell_b'])
 
 
-        # Cell A calls df.describe()
+        # Cell A calls df.describe() (namespace holds the ORIGINAL df so
+        # recorded read locs carry its object identity)
         df = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
-        ns_a = {'df': df.copy()}
-        pre_a = MemoryCheckpoint('pre_a', ns_a, {})
+        ns_a = {'df': df}
+        pre_a = MemoryCheckpoint('pre_a', {'df': df.copy()}, {})
         checkpoints.save('_pre_cell_a', ns_a)
 
         tracking_a = TrackingData(
@@ -279,10 +284,11 @@ class TestSDCStructuralReadsModeEnforce:
         )
         assert not result_a.has_errors()
 
-        # Cell B adds column
-        df_b = pd.DataFrame({'a': [1, 2], 'b': [3, 4], 'c': [5, 6]})
-        ns_b_post = {'df': df_b}
+        # Cell B adds column in place (SAME object A read).
+        # Snapshot the pre state first, then mutate the original df.
         pre_b = MemoryCheckpoint('pre_b', {'df': df.copy()}, {})
+        df['c'] = [5, 6]
+        ns_b_post = {'df': df}
         tracking_b = TrackingData(
             reads_before_writes={'df'},
             writes={'df'},
@@ -521,13 +527,17 @@ class TestSDCStructuralMultipleVariables:
         enforcer.check('cell_a', pre_a, ns_a, tracking_a,
         )
 
-        # Cell B adds column to df2 (not read by A)
+        # Cell B adds column to df2 in place (not read by A).
+        # In-place column write (df2['y'] = [2]) does NOT rebind df2, so
+        # 'df2' is NOT in tracking.writes — only column_writes records it.
+        # (A Var(df2) write alongside the Var(df2) read would incorrectly
+        # trigger NoReadAndWrite.)
         df2_b = pd.DataFrame({'x': [1], 'y': [2]})
         ns_b_post = {'df1': df1.copy(), 'df2': df2_b}
         pre_b = MemoryCheckpoint('pre_b', ns_a.copy(), {})
         tracking_b = TrackingData(
             reads_before_writes={'df2'},
-            writes={'df2'},
+            writes=set(),
             column_writes={'df2': {'y'}},
         )
 

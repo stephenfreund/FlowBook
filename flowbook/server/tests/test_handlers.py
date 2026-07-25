@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import pytest
 
 from flowbook.server.handlers import (
+    FlowbookCommandHandler,
     KernelDiscoveryHandler,
     CommandListHandler,
 )
@@ -95,14 +96,56 @@ class TestKernelDiscoveryPut:
             "kernel_name": "flowbook_kernel",
         })
 
-        with patch("flowbook.server.handlers.write_discovery", return_value="/tmp/disc.json") as mock_write, \
+        with patch("flowbook.server.handlers.write_discovery", return_value=True) as mock_write, \
              patch.object(handler, "_get_kernel_pid", return_value=(42, "/full/kernel-abc.json")):
             import asyncio
             asyncio.get_event_loop().run_until_complete(handler.put("nb.ipynb"))
 
         mock_write.assert_called_once()
+        assert mock_write.call_args.kwargs["pid"] == 42
         body = json.loads(handler.finish.call_args[0][0])
-        assert body["discovery_file"] == "/tmp/disc.json"
+        assert body["written"] is True
+
+    def test_refuses_pid_zero(self, tmp_path):
+        """pid=0 (lookup failure) must not produce a doomed discovery file."""
+        handler = _make_discovery_handler(str(tmp_path))
+        handler.finish = MagicMock()
+        handler.set_status = MagicMock()
+        handler.get_json_body = MagicMock(return_value={
+            "connection_file": "not-a-kernel-file.txt",
+            "kernel_name": "flowbook_kernel",
+        })
+
+        with patch("flowbook.server.handlers.write_discovery") as mock_write, \
+             patch.object(handler, "_get_kernel_pid", return_value=(0, "not-a-kernel-file.txt")):
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(handler.put("nb.ipynb"))
+
+        mock_write.assert_not_called()
+        # Still HTTP 200 — the frontend ignores the body
+        handler.set_status.assert_not_called()
+        body = json.loads(handler.finish.call_args[0][0])
+        assert body["written"] is False
+        assert "reason" in body
+
+    def test_reports_refused_write(self, tmp_path):
+        """write_discovery returning False is surfaced as written=false."""
+        handler = _make_discovery_handler(str(tmp_path))
+        handler.finish = MagicMock()
+        handler.set_status = MagicMock()
+        handler.get_json_body = MagicMock(return_value={
+            "connection_file": "kernel-abc.json",
+        })
+
+        with patch("flowbook.server.handlers.write_discovery", return_value=False), \
+             patch.object(handler, "_get_kernel_pid", return_value=(42, "/full/kernel-abc.json")):
+            import asyncio
+            asyncio.get_event_loop().run_until_complete(handler.put("nb.ipynb"))
+
+        handler.set_status.assert_not_called()
+        body = json.loads(handler.finish.call_args[0][0])
+        assert body["written"] is False
+        assert "reason" in body
 
 
 # ---------------------------------------------------------------------------
@@ -138,3 +181,80 @@ class TestGetKernelPid:
 
         pid, conn = handler._get_kernel_pid("kernel-abc123.json")
         assert pid == 0
+
+
+# ---------------------------------------------------------------------------
+# FlowbookCommandHandler.post — command timeout enforcement
+# ---------------------------------------------------------------------------
+
+
+def _make_command_handler(command):
+    """Build a FlowbookCommandHandler wired to a stub registry/command."""
+    registry = MagicMock()
+    registry.get_command.return_value = command
+    app = MagicMock()
+    app.settings = {}
+    handler = FlowbookCommandHandler.__new__(FlowbookCommandHandler)
+    handler.application = app
+    handler.request = MagicMock()
+    handler._jupyter_current_user = "test-user"
+    handler.current_user = "test-user"
+    handler.initialize(registry=registry, connection_manager=None)
+    handler.finish = MagicMock()
+    handler.set_status = MagicMock()
+    handler.get_json_body = MagicMock(return_value={
+        "command": "stub",
+        "notebook": {"cells": []},
+    })
+    return handler
+
+
+class _StubCommand:
+    """Minimal command stub: optionally blocks on an event until released."""
+
+    command_name = "stub"
+    requires_kernel = False
+
+    def __init__(self, timeout, release=None, result=None):
+        self.timeout = timeout
+        self._release = release
+        self._result = result or {"notebook": {"cells": []}, "metadata": {}}
+
+    async def process(self, notebook_content, kernel_client=None,
+                      selected_cell_ids=None, **kwargs):
+        if self._release is not None:
+            # Block the worker thread until the test releases it.
+            self._release.wait(timeout=10)
+        return self._result
+
+
+class TestCommandTimeout:
+    def test_hung_command_returns_504(self):
+        import asyncio
+        import threading
+
+        release = threading.Event()
+        command = _StubCommand(timeout=0.2, release=release)
+        handler = _make_command_handler(command)
+
+        try:
+            asyncio.get_event_loop().run_until_complete(handler.post())
+        finally:
+            release.set()  # let the worker thread exit
+
+        handler.set_status.assert_called_once_with(504)
+        body = json.loads(handler.finish.call_args[0][0])
+        assert "stub" in body["error"]
+        assert "0.2" in body["error"]
+
+    def test_fast_command_completes(self):
+        import asyncio
+
+        command = _StubCommand(timeout=30)
+        handler = _make_command_handler(command)
+
+        asyncio.get_event_loop().run_until_complete(handler.post())
+
+        handler.set_status.assert_not_called()
+        body = json.loads(handler.finish.call_args[0][0])
+        assert body == {"notebook": {"cells": []}, "metadata": {}}
