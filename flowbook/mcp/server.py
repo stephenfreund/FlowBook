@@ -29,7 +29,11 @@ from flowbook.mcp.session import (
     format_outputs_text,
 )
 from flowbook.util.cell_index import index_to_alpha
-from flowbook.util.footprint import RunToCleanGuard, format_footprint_change
+from flowbook.util.footprint import (
+    MAX_RERUNS_PER_CELL,
+    RunToCleanGuard,
+    format_footprint_change,
+)
 
 
 def _get_session(ctx: Context) -> NotebookSession:
@@ -557,15 +561,17 @@ def run_actionable_cells(ctx: Context) -> str:
     order, recording the set of cells already executed this call. If a
     cell is executed a second time and marks an earlier cell stale
     (it dropped a write that the earlier cell must now restore), the
-    loop may never terminate, so it stops and reports potential
-    non-termination at that cell. Also stops on:
+    loop may never terminate, so it emits a warning at that cell and
+    continues; the sweep stops with a potential non-termination error
+    only once a cell has run more than MAX_RERUNS_PER_CELL times.
+    Also stops on:
     - Hard errors (execution exceptions): always stops
     - Violations: stops only if continue_after_violation is False
 
-    Deterministic cells never trigger the non-termination report, and
-    neither do cells that write varying values (e.g. random numbers) to
-    a fixed set of variables — a rerun marks backward only when the set
-    of variables it writes shrinks, never because values changed.
+    Deterministic cells never trigger the warning, and neither do cells
+    that write varying values (e.g. random numbers) to a fixed set of
+    variables — a rerun marks backward only when the set of variables
+    it writes shrinks, never because values changed.
 
     Returns a summary with the number of cells run and the final status.
     """
@@ -577,8 +583,10 @@ def run_actionable_cells(ctx: Context) -> str:
     error_cell = None
     guard = RunToCleanGuard()
     nontermination = None
-    # Report-free executions finish within n(n+2) runs (Progress theorem);
-    # the cap is a backstop for cells with no tracking metadata.
+    rerun_warnings = []
+    warned_cells = set()
+    # The per-cell cap is the primary stop for rerun instability; this
+    # global cap is a backstop for many-cell rerun cycles.
     n_cells = len(session.get_cell_order())
     max_runs = max(25, n_cells * (n_cells + 3))
 
@@ -605,11 +613,34 @@ def run_actionable_cells(ctx: Context) -> str:
                 violations_seen.append({"cell_id": next_id, **e})
             break
 
-        # RunToClean check: a re-executed cell must not mark an earlier
-        # cell stale, else the loop may never terminate.
+        # RunToClean check: a re-executed cell marking an earlier cell
+        # stale means the sweep may never terminate — warn and continue.
         report = guard.note_run(next_id, fb_meta, session.get_cell_order())
         if report is not None:
-            nontermination = {"cell_id": next_id, "label": label, **report}
+            warned_cells.add(next_id)
+            marked = ", ".join(
+                f"{_cell_label(session, m)} [{m}]"
+                for m in report["backward_stale"]
+            )
+            warning = (
+                f"warning: rerun of {label} [{next_id}] re-marked {marked} "
+                f"stale (run {report['run_count']}/{MAX_RERUNS_PER_CELL}); "
+                "continuing"
+            )
+            if "prev_writes" in report:
+                warning += (
+                    f". {format_footprint_change(report).capitalize()}."
+                )
+            rerun_warnings.append(warning)
+
+        # Per-cell run cap: the hard stop for potential non-termination.
+        if guard.cap_exceeded(next_id):
+            nontermination = {
+                "cell_id": next_id,
+                "label": label,
+                "run_count": guard.run_count(next_id),
+                **(report or {}),
+            }
             break
 
         if errors:
@@ -629,26 +660,47 @@ def run_actionable_cells(ctx: Context) -> str:
     stale_count = len(status["stale_cells"])
     line += f" | {stale_count} stale"
 
+    for warning in rerun_warnings:
+        line += f"\n{warning}"
+
     if nontermination:
         cid = nontermination["cell_id"]
-        marked = ", ".join(
-            f"{_cell_label(session, m)} [{m}]"
-            for m in nontermination["backward_stale"]
-        )
+        count = nontermination["run_count"]
         line += (
             f"\nPOTENTIAL NON-TERMINATION at {nontermination['label']} [{cid}]: "
-            f"re-running this cell marked earlier cell(s) {marked} stale "
-            "again, so repeatedly running stale cells may never make the "
-            "notebook clean."
+            f"this cell ran {count} times in one sweep "
+            f"(limit {MAX_RERUNS_PER_CELL})"
         )
-        if "prev_writes" in nontermination:
-            line += (
-                f" {format_footprint_change(nontermination).capitalize()}."
+        if cid in warned_cells:
+            marked = ", ".join(
+                f"{_cell_label(session, m)} [{m}]"
+                for m in nontermination.get("backward_stale", [])
             )
-        line += (
-            " Varying values are fine, but the set of variables a cell "
-            "reads and writes must be the same on every run. Rerun to retry."
-        )
+            line += (
+                f" and its re-runs kept marking earlier cell(s) {marked} "
+                "stale, so repeatedly running stale cells may never make "
+                "the notebook clean."
+            )
+            if "prev_writes" in nontermination:
+                line += (
+                    f" {format_footprint_change(nontermination).capitalize()}."
+                )
+            line += (
+                " Varying values are fine, but the set of variables a cell "
+                "reads and writes must be the same on every run. "
+                "Rerun to retry."
+            )
+        elif warned_cells:
+            line += (
+                " without the notebook reaching a clean state; the "
+                "warnings above name the cell(s) whose re-runs kept "
+                "marking earlier cells stale. Rerun to retry."
+            )
+        else:
+            line += (
+                " without the notebook reaching a clean state "
+                "(possible untracked nondeterminism). Rerun to retry."
+            )
     elif error_cell is None and not violations_seen and stale_count == 0:
         line += "\nAll clean!"
     elif len(cells_ran) >= max_runs and stale_count > 0:

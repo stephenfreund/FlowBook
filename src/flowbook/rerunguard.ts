@@ -7,8 +7,11 @@
  * executes a cell in E a second time, the new run's read and write sets
  * must match those recorded by the cell's previous run. If they do not,
  * the loop may fail to terminate — a rerun that drops a write can mark an
- * earlier cell stale (BackwardStale) again and again — so the loop reports
- * potential non-termination at that cell.
+ * earlier cell stale (BackwardStale) again and again — so the guard
+ * reports the rerun as a *warning* at that cell and the loop continues.
+ * The hard stop is the per-cell run counter: once a cell has run more
+ * than MAX_RERUNS_PER_CELL times in one sweep, the loop fails with a
+ * potential non-termination error.
  *
  * Deterministic cells never trigger the report, and neither do
  * nondeterministic cells whose read and write sets are fixed while the
@@ -23,6 +26,14 @@
  */
 
 import { IReadLoc, IReproducibilityMetadata, IWriteLoc } from './types';
+
+/**
+ * Maximum runs of a single cell within one run-until-clean sweep. The
+ * paper's Progress theorem is qualitative (no run bound exists for
+ * footprint-unstable cells), so this is a pragmatic limit: warnings are
+ * issued while under it, and exceeding it stops the sweep.
+ */
+export const MAX_RERUNS_PER_CELL = 10;
 
 /** Reduce a ReadLoc/WriteLoc to a name-level key stable across reruns. */
 export function canonicalLocKey(loc: IReadLoc | IWriteLoc): string {
@@ -94,7 +105,8 @@ function diff(prev: Set<string>, next: Set<string>): [string[], string[]] {
 }
 
 function fmtSet(items: string[]): string {
-  return items.length ? items.join(', ') : 'nothing';
+  // Backtick-wrapped so notice renderers show the names as code.
+  return items.length ? items.map(i => '`' + i + '`').join(', ') : 'nothing';
 }
 
 /**
@@ -109,10 +121,12 @@ export function formatFootprintChange(change: IFootprintChange): string {
   );
 }
 
-/** A potential non-termination report from the rerun check. */
+/** A warning report from the rerun check. */
 export interface IRerunReport {
   /** Cells before the rerun cell that it marked stale, document order. */
   backwardStale: string[];
+  /** How many times the rerun cell has run this sweep. */
+  runCount: number;
   /** The footprint change, when tracking metadata allows spelling it out. */
   change: IFootprintChange | null;
 }
@@ -121,11 +135,12 @@ export interface IRerunReport {
  * Implements the RunToClean rerun check for one sweep.
  *
  * Call `noteRun` after every committed cell execution. The check
- * triggers — returning a report — exactly when a *re-executed* cell
- * (one already run this sweep) leaves a cell before itself stale: the
- * only way staleness moves backward is a run dropping a write owned by
- * an earlier cell, and when a rerun does that, the sweep may never
- * terminate.
+ * triggers — returning a warning report — exactly when a *re-executed*
+ * cell (one already run this sweep) leaves a cell before itself stale:
+ * the only way staleness moves backward is a run dropping a write owned
+ * by an earlier cell, and when a rerun does that, the sweep may never
+ * terminate. The caller warns and continues, stopping only when
+ * `capExceeded` becomes true.
  *
  * Footprints are remembered purely to explain a report; the trigger
  * never compares them. The caller must run cells first-stale-first, so
@@ -134,10 +149,21 @@ export interface IRerunReport {
  */
 export class RunToCleanGuard {
   private _executed = new Set<string>();
+  private _runCounts = new Map<string, number>();
   private _recorded = new Map<
     string,
     { reads: Set<string>; writes: Set<string> }
   >();
+
+  /** Number of times `noteRun` has seen `cellId` this sweep. */
+  runCount(cellId: string): number {
+    return this._runCounts.get(cellId) ?? 0;
+  }
+
+  /** True once `cellId` has run more than MAX_RERUNS_PER_CELL times. */
+  capExceeded(cellId: string): boolean {
+    return this.runCount(cellId) > MAX_RERUNS_PER_CELL;
+  }
 
   private _noteFootprint(
     cellId: string,
@@ -188,6 +214,7 @@ export class RunToCleanGuard {
   ): IRerunReport | null {
     const rerun = this._executed.has(cellId);
     this._executed.add(cellId);
+    this._runCounts.set(cellId, this.runCount(cellId) + 1);
     const change = this._noteFootprint(cellId, meta);
     if (!rerun || !meta) {
       return null;
@@ -205,6 +232,6 @@ export class RunToCleanGuard {
     if (!backwardStale.length) {
       return null;
     }
-    return { backwardStale, change };
+    return { backwardStale, runCount: this.runCount(cellId), change };
   }
 }

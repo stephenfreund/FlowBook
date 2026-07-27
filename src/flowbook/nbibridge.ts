@@ -25,7 +25,12 @@ import {
 import { aiTransact } from './aiattribution';
 import { indexToAlpha, getCodeCellOrder } from '../cellindexutils';
 import { StalenessManager } from './stalenessmanager';
-import { RunToCleanGuard, formatFootprintChange } from './rerunguard';
+import {
+  MAX_RERUNS_PER_CELL,
+  RunToCleanGuard,
+  formatFootprintChange
+} from './rerunguard';
+import { RerunWarningNoticeManager } from './rerunnotice';
 
 // ---------------------------------------------------------------------------
 // Command result types (returned by the commands defined below)
@@ -662,12 +667,12 @@ export function registerBridgeCommands(
   // flowbook:run-actionable-cells — the RunToClean loop
   //
   // Repeatedly executes the first stale-or-unexecuted cell in document
-  // order. If a cell is executed a second time and its read or write
-  // sets changed, the loop may never terminate (reruns keep marking
-  // earlier cells stale), so it stops and reports potential
-  // non-termination at that cell. Report-free executions finish within
-  // n(n+2) runs (Progress theorem); the iteration cap is a backstop for
-  // cells with no tracking metadata.
+  // order. If a cell is executed a second time and marks an earlier
+  // cell stale (its read or write sets changed), the loop shows an
+  // orange warning notice under that cell and continues; it stops with
+  // a potential non-termination error only once a cell has run more
+  // than MAX_RERUNS_PER_CELL times this sweep. The iteration cap is a
+  // backstop for many-cell rerun cycles.
   // ------------------------------------------------------------------
   app.commands.addCommand('flowbook:run-actionable-cells', {
     execute: async () => {
@@ -676,6 +681,10 @@ export function registerBridgeCommands(
       let totalRun = 0;
       let potentialNonTermination: any = null;
       const guard = new RunToCleanGuard();
+      const rerunNotice = new RerunWarningNoticeManager();
+      const rerunWarnings: any[] = [];
+      const warnedCells = new Set<string>();
+      rerunNotice.clearAll(panel);
       const nCodeCells = getCodeCellOrder(panel).length;
       const maxIterations = Math.max(25, nCodeCells * (nCodeCells + 3));
 
@@ -716,37 +725,73 @@ export function registerBridgeCommands(
             break;
           }
 
-          // RunToClean check: a re-executed cell must not mark an
-          // earlier cell stale, else the loop may never terminate.
+          // RunToClean check: a re-executed cell marking an earlier
+          // cell stale means the sweep may never terminate — warn and
+          // continue.
           const cellOrder = getCodeCellOrder(getPanel());
-          const report = runResult.cell_id
-            ? guard.noteRun(
-                runResult.cell_id,
-                runResult.flowbook_meta,
-                cellOrder
-              )
+          const runCellId = runResult.cell_id;
+          const report = runCellId
+            ? guard.noteRun(runCellId, runResult.flowbook_meta, cellOrder)
             : null;
-          if (report) {
+          if (report && runCellId) {
+            warnedCells.add(runCellId);
             const markedLabels = report.backwardStale
               .map(cid => indexToAlpha(cellOrder.indexOf(cid)))
               .join(', ');
             let message =
-              `Potential non-termination at ${label}: re-running this ` +
-              `cell marked earlier cell(s) ${markedLabels} stale again, ` +
-              'so repeatedly running stale cells may never make the ' +
-              'notebook clean.';
+              'Re-running this cell marked earlier cell(s) ' +
+              `${markedLabels} stale again (run ${report.runCount} of ` +
+              `at most ${MAX_RERUNS_PER_CELL} this sweep).`;
             if (report.change) {
               const detail = formatFootprintChange(report.change);
               message += ` ${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
             }
             message +=
               ' Varying values are fine, but the set of variables a ' +
-              'cell reads and writes must be the same on every run.';
+              'cell reads and writes must be the same on every run. ' +
+              'Run-all continues; it stops if this cell runs more ' +
+              `than ${MAX_RERUNS_PER_CELL} times.`;
+            const widget = getPanel().content.widgets.find(
+              w => w.model.id === runCellId
+            );
+            if (widget) {
+              rerunNotice.showWarning(widget, message);
+            }
+            rerunWarnings.push({
+              label,
+              cell_id: runCellId,
+              backward_stale: report.backwardStale,
+              run_count: report.runCount,
+              change: report.change,
+              message
+            });
+          }
+
+          // Per-cell run cap: the hard stop for potential
+          // non-termination.
+          if (runCellId && guard.capExceeded(runCellId)) {
+            const count = guard.runCount(runCellId);
+            const prefix =
+              `Potential non-termination at ${label}: this cell ran ` +
+              `${count} times in one sweep (limit ${MAX_RERUNS_PER_CELL})`;
+            const message = warnedCells.has(runCellId)
+              ? `${prefix} and its re-runs kept marking earlier cell(s) ` +
+                'stale, so repeatedly running stale cells may never make ' +
+                'the notebook clean. Varying values are fine, but the ' +
+                'set of variables a cell reads and writes must be the ' +
+                'same on every run.'
+              : warnedCells.size > 0
+                ? `${prefix} without the notebook reaching a clean ` +
+                  'state; the rerun warnings mark the cell(s) whose ' +
+                  're-runs kept marking earlier cells stale.'
+                : `${prefix} without the notebook reaching a clean ` +
+                  'state (possible untracked nondeterminism).';
             potentialNonTermination = {
               label,
-              cell_id: runResult.cell_id,
-              backward_stale: report.backwardStale,
-              change: report.change,
+              cell_id: runCellId,
+              backward_stale: report ? report.backwardStale : [],
+              run_count: count,
+              change: report ? report.change : null,
               message
             };
             results[results.length - 1].status = 'potential-non-termination';
@@ -764,6 +809,7 @@ export function registerBridgeCommands(
       return {
         results,
         cells_run: totalRun,
+        rerun_warnings: rerunWarnings,
         potential_non_termination: potentialNonTermination,
         summary: status
       };

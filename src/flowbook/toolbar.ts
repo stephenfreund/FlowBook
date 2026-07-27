@@ -12,7 +12,12 @@ import { stepIntoIcon } from '@jupyterlab/ui-components';
 import { ReproducibilityCellHighlighter } from './cellhighlighter';
 import { IReproducibilityMetadata, waitForFlowbookMetadata } from './types';
 import { KernelDetector } from '../shared/kerneldetection';
-import { RunToCleanGuard, formatFootprintChange } from './rerunguard';
+import {
+  MAX_RERUNS_PER_CELL,
+  RunToCleanGuard,
+  formatFootprintChange
+} from './rerunguard';
+import { RerunWarningNoticeManager } from './rerunnotice';
 import { indexToAlpha } from '../cellindexutils';
 
 /**
@@ -24,6 +29,7 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
 > {
   private _highlighter: ReproducibilityCellHighlighter | null = null;
   private _kernelDetector: KernelDetector;
+  private _rerunNotice = new RerunWarningNoticeManager();
 
   constructor(kernelDetector: KernelDetector) {
     this._kernelDetector = kernelDetector;
@@ -97,16 +103,18 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
    * Run all stale and unrun code cells in document order — the
    * RunToClean loop. Stops on hard error always. Stops on violation if
    * continue_after_violation is false. If a cell is executed a second
-   * time and its read or write sets changed, the loop may never
-   * terminate (reruns keep marking earlier cells stale), so it stops
-   * and reports potential non-termination at that cell. Report-free
-   * sweeps finish within n(n+2) runs (Progress theorem); the iteration
-   * cap is a backstop for cells with no tracking metadata.
+   * time and marks an earlier cell stale (its read or write sets
+   * changed), the loop shows an orange warning notice under that cell
+   * and continues; it stops with a potential non-termination error only
+   * once a cell has run more than MAX_RERUNS_PER_CELL times this sweep.
+   * The iteration cap is a backstop for many-cell rerun cycles.
    * User can cancel mid-loop via kernel interrupt.
    */
   private async _runAllActionable(panel: NotebookPanel): Promise<void> {
     const notebook = panel.content;
     const guard = new RunToCleanGuard();
+    const warnedCells = new Set<string>();
+    this._rerunNotice.clearAll(panel);
     let nCodeCells = 0;
     for (const w of notebook.widgets) {
       if (w.model.type === 'code') {
@@ -198,28 +206,53 @@ export class FlowbookToolbarExtension implements DocumentRegistry.IWidgetExtensi
         break;
       }
 
-      // RunToClean check: a re-executed cell must not mark an earlier
-      // cell stale, else the loop may never terminate.
+      // RunToClean check: a re-executed cell marking an earlier cell
+      // stale means the sweep may never terminate — warn and continue.
       const cellOrder = notebook.widgets
         .filter(w => w.model.type === 'code')
         .map(w => w.model.id);
       const report = guard.noteRun(targetModelId, meta ?? null, cellOrder);
       if (report) {
-        const label = indexToAlpha(targetCodeIdx);
+        warnedCells.add(targetModelId);
         const markedLabels = report.backwardStale
           .map(cid => indexToAlpha(cellOrder.indexOf(cid)))
           .join(', ');
         let message =
-          `Re-running cell ${label} marked earlier cell(s) ` +
-          `${markedLabels} stale again, so repeatedly running stale ` +
-          'cells may never make the notebook clean.';
+          `Re-running this cell marked earlier cell(s) ${markedLabels} ` +
+          `stale again (run ${report.runCount} of at most ` +
+          `${MAX_RERUNS_PER_CELL} this sweep).`;
         if (report.change) {
           const detail = formatFootprintChange(report.change);
           message += ` ${detail.charAt(0).toUpperCase()}${detail.slice(1)}.`;
         }
         message +=
           ' Varying values are fine, but the set of variables a cell ' +
-          'reads and writes must be the same on every run.';
+          'reads and writes must be the same on every run. Run-all ' +
+          'continues; it stops if this cell runs more than ' +
+          `${MAX_RERUNS_PER_CELL} times.`;
+        this._rerunNotice.showWarning(cell, message);
+      }
+
+      // Per-cell run cap: the hard stop for potential non-termination.
+      if (guard.capExceeded(targetModelId)) {
+        const label = indexToAlpha(targetCodeIdx);
+        const count = guard.runCount(targetModelId);
+        const prefix =
+          `Cell ${label} ran ${count} times in this sweep ` +
+          `(limit ${MAX_RERUNS_PER_CELL})`;
+        const message = warnedCells.has(targetModelId)
+          ? `${prefix}: its re-runs kept marking earlier cell(s) stale, ` +
+            'so repeatedly running stale cells may never make the ' +
+            'notebook clean. Varying values are fine, but the set of ' +
+            'variables a cell reads and writes must be the same on ' +
+            'every run. See the warning under the cell for the ' +
+            'footprint change.'
+          : warnedCells.size > 0
+            ? `${prefix} without the notebook reaching a clean state; ` +
+              'the orange warning notice(s) mark the cell(s) whose ' +
+              're-runs kept marking earlier cells stale.'
+            : `${prefix} without the notebook reaching a clean state ` +
+              '(possible untracked nondeterminism).';
         await showErrorMessage('FlowBook: Potential Non-Termination', message);
         break;
       }

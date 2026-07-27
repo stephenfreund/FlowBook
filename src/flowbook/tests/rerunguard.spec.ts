@@ -6,10 +6,13 @@
  * reports. Good programs must not be flagged (deterministic reruns,
  * random values written to fixed variables, DataFrame recreation,
  * footprint drift that marks nothing backward); reruns that re-mark
- * earlier cells must be.
+ * earlier cells must warn. The per-cell run counter is the hard stop:
+ * capExceeded flips once a cell runs more than MAX_RERUNS_PER_CELL
+ * times in one sweep.
  */
 
 import {
+  MAX_RERUNS_PER_CELL,
   RunToCleanGuard,
   canonicalFootprint,
   canonicalLocKey,
@@ -154,6 +157,33 @@ describe('RunToCleanGuard', () => {
       guard.noteRun('C', meta([], [varLoc('z')], ['A']), ORDER)
     ).toBeNull(); // first execution of C
   });
+
+  it('counts runs per cell, including metadata-less runs', () => {
+    const guard = new RunToCleanGuard();
+    expect(guard.runCount('A')).toBe(0);
+    guard.noteRun('A', null, ORDER);
+    guard.noteRun('A', meta([], []), ORDER);
+    expect(guard.runCount('A')).toBe(2);
+    expect(guard.runCount('B')).toBe(0);
+  });
+
+  it('includes the run count in reports', () => {
+    const guard = new RunToCleanGuard();
+    guard.noteRun('C', meta([], [varLoc('b')]), ORDER);
+    const report = guard.noteRun('C', meta([], [varLoc('a')], ['B']), ORDER);
+    expect(report!.runCount).toBe(2);
+  });
+
+  it('exceeds the cap only after MAX_RERUNS_PER_CELL + 1 runs', () => {
+    const guard = new RunToCleanGuard();
+    for (let i = 0; i < MAX_RERUNS_PER_CELL; i++) {
+      guard.noteRun('A', null, ORDER);
+    }
+    expect(guard.capExceeded('A')).toBe(false);
+    guard.noteRun('A', null, ORDER);
+    expect(guard.capExceeded('A')).toBe(true);
+    expect(guard.capExceeded('B')).toBe(false);
+  });
 });
 
 describe('formatFootprintChange', () => {
@@ -162,8 +192,8 @@ describe('formatFootprintChange', () => {
     guard.noteRun('C', meta([varLoc('x')], [varLoc('a')]), ORDER);
     const report = guard.noteRun('C', meta([], [varLoc('b')], ['B']), ORDER);
     expect(formatFootprintChange(report!.change!)).toBe(
-      'the previous run read x and wrote a, ' +
-        'but this run read nothing and wrote b'
+      'the previous run read `x` and wrote `a`, ' +
+        'but this run read nothing and wrote `b`'
     );
   });
 });

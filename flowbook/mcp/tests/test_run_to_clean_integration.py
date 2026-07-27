@@ -6,10 +6,11 @@ installable and take a few seconds each):
 
 - a notebook containing a cell whose write set flips across reruns —
   driven deterministically through untracked module state, standing in
-  for `if random() > 0.5:` — must be reported as potential
-  non-termination, with the loop stopping at the flipping cell;
+  for `if random() > 0.5:` — must warn at the flipping cell on every
+  recurrence and stop with a potential non-termination error at the
+  per-cell run cap;
 - value-nondeterministic notebooks with fixed footprints (random
-  numbers, DataFrame recreation) must rerun to clean with no report.
+  numbers, DataFrame recreation) must rerun to clean with no warning.
 """
 
 import json
@@ -70,7 +71,7 @@ FLIPPER = (
 
 # Cell B: an input-dependent footprint — writes {a} or {b} depending on
 # the value of flag. This is the cell whose recorded results cannot be
-# trusted to reproduce, and the one the report must name.
+# trusted to reproduce, and the one the warnings must name.
 BRANCHER = "if flag:\n    a = 10\nelse:\n    b = 20\n"
 
 
@@ -94,10 +95,11 @@ class TestRerunAssignmentCell:
 
 
 class TestRunToCleanEndToEnd:
-    def test_footprint_flip_reported_at_culprit(self, tmp_path, session):
+    def test_footprint_flip_warns_then_stops_at_cap(self, tmp_path, session):
         """The nonterminating pattern: B's rerun drops a write, which
-        backward-marks A; A's rerun re-marks B; B flips again. The loop
-        must stop with a report at B instead of cycling."""
+        backward-marks A; A's rerun re-marks B; B flips again. Each
+        recurrence warns at B and the sweep continues, alternating A, B
+        until A (which runs first each cycle) exceeds the per-cell cap."""
         path = _write_nb(tmp_path, [("A", FLIPPER), ("B", BRANCHER)])
         session.load(path)
 
@@ -113,13 +115,20 @@ class TestRunToCleanEndToEnd:
 
         result = run_actionable_cells(_ctx(session))
 
-        # Sweep: A (flag→True, marks B), B (writes {a}, drops b →
-        # backward-marks A), A again (same footprint: passes the check),
-        # B again (flag→False, writes {b}: FLIP) — then stop.
+        # Every B rerun flips its write set and backward-marks A, so B's
+        # reruns warn and the sweep keeps alternating A, B. A reaches 11
+        # runs first (run 21), tripping the per-cell cap; the error
+        # points at the warnings, which name B.
+        assert "warning:" in result
+        warning_line = next(
+            ln for ln in result.splitlines() if ln.startswith("warning:")
+        )
+        assert "@B" in warning_line
         assert "POTENTIAL NON-TERMINATION" in result
         tail = result.split("POTENTIAL NON-TERMINATION", 1)[1]
-        assert "@B" in tail
-        assert "Ran 4 cells" in result
+        assert "@A" in tail
+        assert "warnings above" in tail
+        assert "Ran 21 cells" in result
 
     def test_random_value_chain_reruns_clean(self, tmp_path, session):
         """Random values written to fixed variables: reruns cascade

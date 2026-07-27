@@ -7,7 +7,10 @@ executed. If it executes a cell in E a second time, the new run's read
 and write sets must match those recorded by the cell's previous run.
 If they do not, the loop may fail to terminate — a rerun that drops a
 write can mark an earlier cell stale (BackwardStale) again and again —
-so the loop reports potential non-termination at that cell.
+so the guard reports the rerun as a *warning* at that cell and the
+loop continues. The hard stop is the per-cell run counter: once a cell
+has run more than ``MAX_RERUNS_PER_CELL`` times in one sweep, the loop
+fails with a potential non-termination error.
 
 Deterministic cells never trigger the report, and neither do
 nondeterministic cells whose read and write sets are fixed while the
@@ -24,6 +27,12 @@ accessing variable name.
 """
 
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+
+# Maximum runs of a single cell within one run-until-clean sweep. The
+# paper's Progress theorem is qualitative (no run bound exists for
+# footprint-unstable cells), so this is a pragmatic limit: warnings are
+# issued while under it, and exceeding it stops the sweep.
+MAX_RERUNS_PER_CELL = 10
 
 # A name-level location key: (loc type, owning variable or None, name).
 FootprintKey = Tuple[Optional[str], Optional[str], Optional[str]]
@@ -72,11 +81,12 @@ class RunToCleanGuard:
     """Implements the RunToClean rerun check for one sweep.
 
     Call :meth:`note_run` after every committed cell execution. The
-    check triggers — returning a report — exactly when a *re-executed*
-    cell (one already run this sweep) leaves a cell before itself
-    stale: the only way staleness moves backward is a run dropping a
-    write owned by an earlier cell, and when a rerun does that, the
-    sweep may never terminate.
+    check triggers — returning a warning report — exactly when a
+    *re-executed* cell (one already run this sweep) leaves a cell
+    before itself stale: the only way staleness moves backward is a run
+    dropping a write owned by an earlier cell, and when a rerun does
+    that, the sweep may never terminate. The caller warns and
+    continues, stopping only when :meth:`cap_exceeded` becomes true.
 
     The guard also remembers each cell's name-level read/write
     footprint, purely to *explain* a report (the trigger never compares
@@ -87,6 +97,15 @@ class RunToCleanGuard:
     def __init__(self) -> None:
         self._executed: set = set()
         self._recorded: Dict[str, Tuple[FrozenSet, FrozenSet]] = {}
+        self._run_counts: Dict[str, int] = {}
+
+    def run_count(self, cell_id: str) -> int:
+        """Number of times ``note_run`` has seen ``cell_id`` this sweep."""
+        return self._run_counts.get(cell_id, 0)
+
+    def cap_exceeded(self, cell_id: str) -> bool:
+        """True once ``cell_id`` has run more than MAX_RERUNS_PER_CELL times."""
+        return self.run_count(cell_id) > MAX_RERUNS_PER_CELL
 
     def _note_footprint(
         self, cell_id: str, fb_meta: Optional[Dict[str, Any]]
@@ -133,12 +152,13 @@ class RunToCleanGuard:
         fb_meta: Optional[Dict[str, Any]],
         cell_order: List[str],
     ) -> Optional[Dict[str, Any]]:
-        """Note a committed run of ``cell_id``; report if it must stop.
+        """Note a committed run of ``cell_id``; report if it should warn.
 
         Returns None for first executions, and for re-executions that
         leave every cell before ``cell_id`` clean. Returns a report dict
         when a re-execution marked an earlier cell stale: key
-        ``backward_stale`` lists those cells (document order), and the
+        ``backward_stale`` lists those cells (document order),
+        ``run_count`` gives this cell's run count this sweep, and the
         footprint-change keys (``prev_reads`` etc.) are included when
         tracking metadata allows the change to be spelled out.
 
@@ -148,6 +168,7 @@ class RunToCleanGuard:
         """
         rerun = cell_id in self._executed
         self._executed.add(cell_id)
+        self._run_counts[cell_id] = self._run_counts.get(cell_id, 0) + 1
         change = self._note_footprint(cell_id, fb_meta)
         if not rerun or not fb_meta:
             return None
@@ -165,14 +186,18 @@ class RunToCleanGuard:
         )
         if not backward:
             return None
-        report: Dict[str, Any] = {"backward_stale": backward}
+        report: Dict[str, Any] = {
+            "backward_stale": backward,
+            "run_count": self._run_counts[cell_id],
+        }
         if change is not None:
             report.update(change)
         return report
 
 
 def _format_set(items: List[str]) -> str:
-    return ", ".join(items) if items else "nothing"
+    # Backtick-wrapped so notice renderers show the names as code.
+    return ", ".join(f"`{item}`" for item in items) if items else "nothing"
 
 
 def format_footprint_change(change: Dict[str, List[str]]) -> str:

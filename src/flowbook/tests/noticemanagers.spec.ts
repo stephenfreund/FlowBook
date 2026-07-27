@@ -171,3 +171,43 @@ describe('violation notice', () => {
     expect(cell.model.outputs.list).toEqual([STREAM]);
   });
 });
+
+describe('rerun warning coexistence', () => {
+  // The orange rerun warning notice is owned by the run-until-clean
+  // loop, not the highlighter — the other managers must preserve it
+  // when they rewrite outputs.
+  const RERUN_NOTICE = {
+    output_type: 'display_data',
+    data: { 'text/plain': 'unstable footprint' },
+    metadata: { flowbook_rerun_warning_notice: true }
+  };
+
+  function rerunNotices(cell: FakeCell): unknown[] {
+    return cell.model.outputs.list.filter(
+      o =>
+        (o.metadata as Record<string, unknown> | undefined)
+          ?.flowbook_rerun_warning_notice === true
+    );
+  }
+
+  it('survives a violation notice rewrite', () => {
+    const { cell } = setup();
+    const violations = new ViolationNoticeManager();
+    cell.model.outputs.fromJSON([RERUN_NOTICE]);
+    cell.model.setMetadata('flowbook', { errors: [violation('x')] });
+
+    violations.updateViolationNotice(asCell(cell), ORDER);
+
+    expect(rerunNotices(cell)).toHaveLength(1);
+  });
+
+  it('survives a staleness notice rewrite', () => {
+    const { manager, cell, notice } = setup();
+    cell.model.outputs.fromJSON([RERUN_NOTICE]);
+    setReason(manager, cell, ['x']);
+
+    notice.updateStalenessNotice(asCell(cell), true, manager, ORDER);
+
+    expect(rerunNotices(cell)).toHaveLength(1);
+  });
+});
