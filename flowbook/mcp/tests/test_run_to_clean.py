@@ -5,25 +5,29 @@ algorithm from the formal development: it executes the first stale cell in
 notebook order, and if it executes a cell a second time and that run marks
 an earlier cell stale (the only way staleness moves backward — a dropped
 write that the earlier cell must restore), the loop may never terminate,
-so it reports potential non-termination. Footprints are remembered only to
-explain the report; the trigger never compares them.
+so it warns at that cell and continues. The hard stop is the per-cell run
+counter: a cell running more than MAX_RERUNS_PER_CELL times in one sweep
+fails with a potential non-termination error. Footprints are remembered
+only to explain the warnings; the trigger never compares them.
 
 These tests validate both directions:
 - good programs are NOT rejected: deterministic chains, backward-mark
   repairs, cells writing varying values (random numbers) to fixed
   variables, DataFrame cells whose object identity (loc_id qualifier)
-  changes across reruns, and even footprint drift that marks nothing
-  backward;
+  changes across reruns, footprint drift that marks nothing backward,
+  and sweeps that warn once but then converge;
 - bad programs ARE caught: reruns that re-mark earlier cells (the
-  nonterminating counterexample), with the loop stopping in a bounded
-  number of runs and naming both the culprit and the re-marked cells.
+  nonterminating counterexample) warn on every recurrence and stop at
+  the per-cell cap, naming both the culprit and the re-marked cells.
 """
 
+from itertools import cycle
 from unittest.mock import MagicMock, patch
 
 from flowbook.mcp.server import run_actionable_cells
 from flowbook.mcp.session import NotebookSession
 from flowbook.util.footprint import (
+    MAX_RERUNS_PER_CELL,
     RunToCleanGuard,
     canonical_footprint,
     canonical_loc_key,
@@ -225,6 +229,31 @@ class TestRunToCleanGuard:
             is None  # first execution of C
         )
 
+    def test_run_counts_increment_including_missing_metadata(self):
+        guard = RunToCleanGuard()
+        assert guard.run_count("A") == 0
+        guard.note_run("A", None, ORDER)
+        guard.note_run("A", _meta([], []), ORDER)
+        assert guard.run_count("A") == 2
+        assert guard.run_count("B") == 0
+
+    def test_report_includes_run_count(self):
+        guard = RunToCleanGuard()
+        guard.note_run("C", _meta([], [_var("b")]), ORDER)
+        report = guard.note_run(
+            "C", _meta([], [_var("a")], stale_cells=["B"]), ORDER
+        )
+        assert report["run_count"] == 2
+
+    def test_cap_exceeded_only_after_max_runs(self):
+        guard = RunToCleanGuard()
+        for _ in range(MAX_RERUNS_PER_CELL):
+            guard.note_run("A", None, ORDER)
+        assert not guard.cap_exceeded("A")
+        guard.note_run("A", None, ORDER)
+        assert guard.cap_exceeded("A")
+        assert not guard.cap_exceeded("B")
+
     def test_format_change_spells_out_sets(self):
         guard = RunToCleanGuard()
         guard.note_run("C", _meta([_var("x")], [_var("a")]), ORDER)
@@ -323,6 +352,30 @@ class TestRunToCleanLoopAccepts:
         assert "POTENTIAL NON-TERMINATION" not in result
         assert "Ran 1 cell" in result
 
+    def test_single_warning_then_convergence_runs_clean(self):
+        """The core warn-and-continue semantics: a rerun that back-marks
+        an earlier cell warns, the sweep keeps going, and if it then
+        converges the notebook is clean (rerun consistency holds — the
+        guard only ever protected termination)."""
+        script = [
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
+            ("B", _meta([_var("x")], [_var("a"), _var("b")])),
+            # A reruns (e.g. after a random re-mark): forward mark only.
+            ("A", _meta([], [_var("x")], stale_cells=["B"])),
+            # B's rerun drops the write of b, re-marking A: WARNING.
+            ("B", _meta([_var("x")], [_var("a")], stale_cells=["A"])),
+            # A's repair restores b and re-marks B forward.
+            ("A", _meta([], [_var("x"), _var("b")], stale_cells=["B"])),
+            # B's next rerun marks nothing backward: converged.
+            ("B", _meta([_var("x")], [_var("a")])),
+        ]
+        session = _scripted_session(script, ["A", "B"])
+        result = run_actionable_cells(_make_ctx(session))
+        assert "warning:" in result
+        assert "All clean!" in result
+        assert "POTENTIAL NON-TERMINATION" not in result
+        assert session.run_cell.call_count == 6
+
 
 # ==================================================================
 # Loop scenario tests (bad programs must be caught)
@@ -330,43 +383,63 @@ class TestRunToCleanLoopAccepts:
 
 
 class TestRunToCleanLoopRejects:
-    def test_flip_flop_flagged_and_terminates(self):
+    def test_flip_flop_warns_then_stops_at_per_cell_cap(self):
         """The paper's nonterminating counterexample: a cell whose write
-        set alternates keeps backward-marking an earlier cell. The loop
-        must stop with a report at the flipping cell, naming the cell it
-        re-marked."""
-        script = [
-            ("C", _meta([], [_var("b")], stale_cells=["B"])),
-            ("B", _meta([], [_var("a"), _var("b")], stale_cells=["C"])),
-            ("C", _meta([], [_var("a")], stale_cells=["B"])),  # re-marks B
+        set alternates keeps backward-marking an earlier cell. Each
+        recurrence warns; the loop stops with the non-termination error
+        once the flipping cell exceeds the per-cell cap, naming the cell
+        it re-marked."""
+        flip = [
+            _meta([], [_var("b")], stale_cells=["B"]),
+            _meta([], [_var("a")], stale_cells=["B"]),
         ]
+        script = [("C", flip[0])]
+        for i in range(MAX_RERUNS_PER_CELL):
+            script.append(
+                ("B", _meta([], [_var("a"), _var("b")], stale_cells=["C"]))
+            )
+            script.append(("C", flip[(i + 1) % 2]))
         session = _scripted_session(script, ["A", "B", "C"])
-        session.get_next_run_target.side_effect = ["C", "B", "C", "B", "C"]
         result = run_actionable_cells(_make_ctx(session))
+        assert "warning:" in result
         assert "POTENTIAL NON-TERMINATION" in result
         tail = result.split("POTENTIAL NON-TERMINATION", 1)[1]
         assert "@C" in tail  # the culprit
         assert "@B" in tail  # the re-marked cell
-        # Stopped at the flip: exactly 3 runs, not the whole tail.
-        assert session.run_cell.call_count == 3
+        # Stopped when C exceeded the cap: C ran 11 times, B 10 times.
+        assert session.run_cell.call_count == 2 * MAX_RERUNS_PER_CELL + 1
+        assert f"ran {MAX_RERUNS_PER_CELL + 1} times" in tail
 
     def test_input_dependent_footprint_downstream_of_random_flagged(self):
         """Random values feeding a cell whose write set depends on its
-        input: the rerun that drops a write re-marks its owner."""
-        script = [
-            ("A", _meta([], [_var("x")], stale_cells=["B"])),
-            ("B", _meta([_var("x")], [_var("a")], stale_cells=["A"])),
-            ("A", _meta([], [_var("x")], stale_cells=["B"])),
-            ("B", _meta([_var("x")], [_var("b")], stale_cells=["A"])),
-        ]
+        input: every rerun of B that drops a write re-marks its owner A
+        and warns. The upstream cell A runs just as often, so A is the
+        first to exceed the per-cell cap — the error points at the
+        warnings for the actual unstable cell."""
+        script = []
+        for i in range(MAX_RERUNS_PER_CELL + 1):
+            script.append(("A", _meta([], [_var("x")], stale_cells=["B"])))
+            script.append(
+                ("B", _meta(
+                    [_var("x")],
+                    [_var("a" if i % 2 == 0 else "b")],
+                    stale_cells=["A"],
+                ))
+            )
         session = _scripted_session(script, ["A", "B"])
         result = run_actionable_cells(_make_ctx(session))
+        assert "warning:" in result
         assert "POTENTIAL NON-TERMINATION" in result
-        assert session.run_cell.call_count == 4
+        tail = result.split("POTENTIAL NON-TERMINATION", 1)[1]
+        assert "@A" in tail  # first cell to exceed the cap
+        assert "warnings above" in tail  # ...pointing at B's warnings
+        # A exceeds the cap on its 11th run, before B's 11th.
+        assert session.run_cell.call_count == 2 * MAX_RERUNS_PER_CELL + 1
 
-    def test_untracked_cells_hit_backstop_cap(self):
-        """Cells with no metadata at all cannot trigger the check; the
-        loop still terminates via the n(n+2) backstop."""
+    def test_untracked_single_cell_hits_per_cell_cap(self):
+        """Cells with no metadata cannot trigger the warning, but the
+        per-cell run counter still stops a forever-stale cell — with the
+        untracked-nondeterminism variant of the error."""
         session = _make_mock_session(cell_order=["A"])
         session.get_next_run_target.return_value = "A"  # forever stale
         session.run_cell.return_value = {
@@ -379,8 +452,33 @@ class TestRunToCleanLoopRejects:
             "total_code_cells": 1,
         }
         result = run_actionable_cells(_make_ctx(session))
-        assert "Stopped after" in result
-        assert session.run_cell.call_count == max(25, 1 * (1 + 3))
+        assert "POTENTIAL NON-TERMINATION" in result
+        assert "possible untracked nondeterminism" in result
+        assert "warning:" not in result
+        assert session.run_cell.call_count == MAX_RERUNS_PER_CELL + 1
+
+    def test_untracked_cycle_hits_global_backstop(self):
+        """A many-cell untracked rerun cycle spreads runs across cells,
+        so no single cell reaches the per-cell cap before the global
+        backstop fires."""
+        session = _make_mock_session(cell_order=["A", "B", "C"])
+        session.get_next_run_target.side_effect = cycle(["A", "B", "C"])
+
+        def mock_run_cell(cell_id, **kwargs):
+            return {"cell_id": cell_id, "status": "ok", "outputs_text": ""}
+
+        session.run_cell.side_effect = mock_run_cell
+        session.get_status.return_value = {
+            "stale_cells": {"A": []},
+            "violations": [],
+            "executed": 3,
+            "total_code_cells": 3,
+        }
+        result = run_actionable_cells(_make_ctx(session))
+        max_runs = max(25, 3 * (3 + 3))
+        assert f"Stopped after {max_runs} runs" in result
+        assert "POTENTIAL NON-TERMINATION" not in result
+        assert session.run_cell.call_count == max_runs
 
 
 # ==================================================================

@@ -317,6 +317,7 @@ export function formatReadLoc(loc: IReadLoc): string {
 export interface IFlowbookOutputMeta {
   flowbook_staleness_notice?: boolean;
   flowbook_violation_notice?: boolean;
+  flowbook_rerun_warning_notice?: boolean;
   predicate_violation?: Record<string, unknown>;
   [key: string]: unknown;
 }

@@ -294,6 +294,7 @@ class FlowbookActivationManager {
     const noticeKeys = [
       'flowbook_staleness_notice',
       'flowbook_violation_notice',
+      'flowbook_rerun_warning_notice',
       'flowbook_ai_fix_notice'
     ];
     const model = panel.model;

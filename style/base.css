@@ -297,6 +297,26 @@
 }
 
 /* ========================================
+   Rerun Warning Notice (inline cell output)
+   ======================================== */
+
+.flowbook-rerun-warning-notice {
+  background-color: #ffe5d0;
+  border: 1px solid #fd7e14;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 0.88em;
+  color: #7a3e00;
+}
+
+.flowbook-rerun-warning-notice code {
+  background-color: rgb(253 126 20 / 15%);
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-right: -2px;
+}
+
+/* ========================================
    AI fix suggester regions (inside violation notice)
    ======================================== */
 
