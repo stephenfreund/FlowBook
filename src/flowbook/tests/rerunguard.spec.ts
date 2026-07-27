@@ -192,8 +192,8 @@ describe('formatFootprintChange', () => {
     guard.noteRun('C', meta([varLoc('x')], [varLoc('a')]), ORDER);
     const report = guard.noteRun('C', meta([], [varLoc('b')], ['B']), ORDER);
     expect(formatFootprintChange(report!.change!)).toBe(
-      'the previous run read x and wrote a, ' +
-        'but this run read nothing and wrote b'
+      'the previous run read `x` and wrote `a`, ' +
+        'but this run read nothing and wrote `b`'
     );
   });
 });

@@ -262,8 +262,8 @@ class TestRunToCleanGuard:
         )
         text = format_footprint_change(report)
         assert text == (
-            "the previous run read x and wrote a, "
-            "but this run read nothing and wrote b"
+            "the previous run read `x` and wrote `a`, "
+            "but this run read nothing and wrote `b`"
         )
 
 

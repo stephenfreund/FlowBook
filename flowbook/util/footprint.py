@@ -196,7 +196,8 @@ class RunToCleanGuard:
 
 
 def _format_set(items: List[str]) -> str:
-    return ", ".join(items) if items else "nothing"
+    # Backtick-wrapped so notice renderers show the names as code.
+    return ", ".join(f"`{item}`" for item in items) if items else "nothing"
 
 
 def format_footprint_change(change: Dict[str, List[str]]) -> str:

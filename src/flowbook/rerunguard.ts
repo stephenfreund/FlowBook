@@ -105,7 +105,8 @@ function diff(prev: Set<string>, next: Set<string>): [string[], string[]] {
 }
 
 function fmtSet(items: string[]): string {
-  return items.length ? items.join(', ') : 'nothing';
+  // Backtick-wrapped so notice renderers show the names as code.
+  return items.length ? items.map(i => '`' + i + '`').join(', ') : 'nothing';
 }
 
 /**
