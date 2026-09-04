@@ -374,7 +374,10 @@ class VirtualFileSystem:
                 return _orig_open(resolved, mode, *args, **kwargs)
 
         def patched_remove(path, *args, **kwargs):
-            if isinstance(path, bytes):
+            # A dir_fd-relative name (as shutil.rmtree passes) must not be
+            # resolved against the cwd: that would virtualize deletions inside
+            # unrelated directories and leave the real files behind.
+            if isinstance(path, bytes) or kwargs.get("dir_fd") is not None:
                 return _orig_remove(path, *args, **kwargs)
             abs_path = os.path.abspath(path)
             if not vfs._should_overlay(abs_path):
@@ -387,7 +390,8 @@ class VirtualFileSystem:
                 _orig_remove(overlay, *args, **kwargs)
 
         def patched_rename(src, dst, *args, **kwargs):
-            if isinstance(src, bytes) or isinstance(dst, bytes):
+            if (isinstance(src, bytes) or isinstance(dst, bytes)
+                    or kwargs.get("src_dir_fd") is not None or kwargs.get("dst_dir_fd") is not None):
                 return _orig_rename(src, dst, *args, **kwargs)
             abs_src = os.path.abspath(src)
             abs_dst = os.path.abspath(dst)
@@ -446,7 +450,7 @@ class VirtualFileSystem:
                 os.mkdir = patched_mkdir
 
         def patched_rmdir(path, *args, **kwargs):
-            if isinstance(path, bytes):
+            if isinstance(path, bytes) or kwargs.get("dir_fd") is not None:
                 return _orig_rmdir(path, *args, **kwargs)
             abs_path = os.path.abspath(path)
             if not vfs._should_overlay(abs_path):
@@ -568,6 +572,8 @@ class VirtualFileSystem:
             if isinstance(path, bytes):
                 return _orig_os_open(path, flags, mode, dir_fd=dir_fd)
             str_path = str(path)
+            if dir_fd is not None:
+                return _orig_os_open(path, flags, mode, dir_fd=dir_fd)
             abs_path = os.path.abspath(str_path)
             is_write = _is_write_flags(flags)
             is_read = _is_read_flags(flags)
@@ -700,15 +706,18 @@ class VirtualFileSystem:
 
         # --- Write operations (delete) ---
         def patched_remove(path, *args, **kwargs):
-            vfs._track_write(path)
+            if kwargs.get("dir_fd") is None:
+                vfs._track_write(path)
             return _orig_remove(path, *args, **kwargs)
 
         def patched_unlink(path, *args, **kwargs):
-            vfs._track_write(path)
+            if kwargs.get("dir_fd") is None:
+                vfs._track_write(path)
             return _orig_unlink(path, *args, **kwargs)
 
         def patched_rmdir(path, *args, **kwargs):
-            vfs._track_write(path)
+            if kwargs.get("dir_fd") is None:
+                vfs._track_write(path)
             return _orig_rmdir(path, *args, **kwargs)
 
         def patched_shutil_rmtree(path, *args, **kwargs):

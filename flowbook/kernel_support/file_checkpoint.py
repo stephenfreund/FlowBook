@@ -90,6 +90,39 @@ def _unified_diff(path_a: str, path_b: str, label_a: str = "a", label_b: str = "
         return None
 
 
+def _remove_tree(path: str) -> None:
+    """Remove a checkpoint directory, robust to the kernel's patched os module.
+
+    shutil.rmtree deletes entries by dir_fd-relative name; if a patched
+    os.unlink/os.rmdir mishandles those, files survive and rmtree fails with
+    "Directory not empty". Fall back to a walk with absolute paths, and as a
+    last resort leave the directory renamed out of the way.
+    """
+    if not os.path.exists(path):
+        return
+    shutil.rmtree(path, ignore_errors=True)
+    if not os.path.exists(path):
+        return
+    for root, dirs, files in os.walk(path, topdown=False):
+        for f in files:
+            try:
+                os.remove(os.path.join(root, f))
+            except OSError:
+                pass
+        for d in dirs:
+            try:
+                os.rmdir(os.path.join(root, d))
+            except OSError:
+                pass
+    try:
+        os.rmdir(path)
+    except OSError:
+        try:
+            os.rename(path, f"{path}.stale-{os.getpid()}-{int(time.time() * 1000)}")
+        except OSError:
+            pass
+
+
 class FileCheckpoints:
     """Manager for file checkpoints — save, restore, and diff file snapshots."""
 
@@ -126,8 +159,7 @@ class FileCheckpoints:
             FileCheckpoint with snapshots of all written files
         """
         cp_dir = os.path.join(self._storage_dir, name)
-        if os.path.exists(cp_dir):
-            shutil.rmtree(cp_dir)
+        _remove_tree(cp_dir)
         os.makedirs(cp_dir, exist_ok=True)
 
         files = {}
@@ -318,8 +350,7 @@ class FileCheckpoints:
             cp = self.saved[name]
             # Clean up stored copies
             cp_dir = os.path.join(self._storage_dir, name)
-            if os.path.exists(cp_dir):
-                shutil.rmtree(cp_dir, ignore_errors=True)
+            _remove_tree(cp_dir)
             del self.saved[name]
 
     def list(self) -> List[str]:
