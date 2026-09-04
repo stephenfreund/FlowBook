@@ -357,9 +357,11 @@ class NotebookSession:
         self.cell_status = {}
         self._stale_cells = set()
         self._checkpoints = {}
-        self._event_log = []
-        self._trace = []
-        self._session_start = time.time()
+        # The event log and trace span the server session, not one notebook:
+        # a reload (e.g. to restart the kernel) must not erase history. A
+        # ``load`` trace record marks the boundary.
+        if not self._event_log and not self._trace:
+            self._session_start = time.time()
 
         # Reset Contents API state BEFORE kernel/contents setup. If setup for
         # this notebook fails partway, stale config from a previously loaded
@@ -403,6 +405,10 @@ class NotebookSession:
         cells = self.notebook.get("cells", [])
         code_cells = [c for c in cells if c.get("cell_type") == "code"]
         joined = " (joined existing kernel)" if discovery else ""
+        self._trace_event(
+            "load", path=abs_path, cell_ids=[c["id"] for c in code_cells],
+            joined_existing=discovery is not None, kernel_name=self.kernel_name,
+        )
 
         # Set up Contents API for live sync with JupyterLab
         contents_status = self._setup_contents_api(abs_path)

@@ -64,7 +64,7 @@ def test_run_records_one_per_execution(session, chain_notebook):
 
     runs = _runs(session)
     assert [e["cell_id"] for e in runs] == ["A", "B", "C"]
-    assert [e["seq"] for e in runs] == [0, 1, 2]
+    assert [e["seq"] for e in runs] == [1, 2, 3]  # seq 0 is the load record
     for e in runs:
         assert e["cell_order"] == ["A", "B", "C"]
         assert e["status"] == "ok"
@@ -160,15 +160,17 @@ def test_save_event_log_includes_trace(session, chain_notebook, tmp_path):
     out = tmp_path / "log.json"
     session.save_event_log(str(out))
     doc = json.loads(out.read_text())
-    assert [e["kind"] for e in doc["trace"]] == ["run", "edit"]
-    assert doc["trace"][0]["cell_id"] == "A"
+    assert [e["kind"] for e in doc["trace"]] == ["load", "run", "edit"]
+    assert doc["trace"][1]["cell_id"] == "A"
 
 
-def test_trace_resets_on_reload(session, chain_notebook, tmp_path):
+def test_trace_persists_across_reload(session, chain_notebook, tmp_path):
     session.load(chain_notebook)
     session.run_cell("A")
-    assert session._trace
-
     other = _write_notebook(tmp_path, ["a = 1"], name="other.ipynb")
     session.load(other)
-    assert session._trace == []
+    kinds = [e["kind"] for e in session._trace]
+    assert kinds == ["load", "run", "load"]
+    assert session._trace[0]["cell_ids"] == ["A", "B", "C"]
+    assert session._trace[2]["cell_ids"] == ["A"] and session._trace[2]["joined_existing"] is False
+    assert session._trace[2]["seq"] == 2
