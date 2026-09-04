@@ -1657,6 +1657,42 @@ class MemoryCheckpoint:
         self._id_to_paths: Dict[int, Dict[str, str]] = {}
         self._alias_index_built: bool = False
 
+    def materialized_ns(self, keys: "set[str] | None" = None) -> dict[str, Any]:
+        """user_ns plus DataFrame subsets reconstructed from their relations.
+
+        ``save`` stores subset DataFrames as relations to a parent instead of
+        copies, so ``user_ns`` lacks them. Comparing ``user_ns`` directly
+        against a live namespace reports every subset as different. This
+        returns a namespace with the subsets named in ``keys`` (all when None)
+        rebuilt, resolving parent chains first. Returns ``user_ns`` itself when
+        there are no relations.
+        """
+        if not self._df_subset_relations:
+            return self.user_ns
+        needed = None
+        if keys is not None:
+            needed = set(keys)
+            # pull in parents (transitively) of any wanted subset
+            grew = True
+            while grew:
+                grew = False
+                for r in self._df_subset_relations:
+                    if r.child_var in needed and r.parent_var not in needed:
+                        needed.add(r.parent_var)
+                        grew = True
+        ns = dict(self.user_ns)
+        for relation in topological_sort_relations(self._df_subset_relations):
+            if needed is not None and relation.child_var not in needed:
+                continue
+            parent_df = ns.get(relation.parent_var)
+            if parent_df is None:
+                continue
+            try:
+                ns[relation.child_var] = reconstruct_from_subset(parent_df, relation)
+            except Exception as e:  # pragma: no cover - defensive, mirrors restore()
+                log(f"WARNING: Failed to reconstruct subset '{relation.child_var}' for diff: {e}")
+        return ns
+
     def _build_alias_index(self) -> None:
         """
         Build the deep alias detection index.
@@ -1896,9 +1932,12 @@ class MemoryCheckpoint:
                 structural_mode=structural_mode,
             )
 
-        # Support both MemoryCheckpoint and raw dict for argument b
-        a_ns = a.user_ns
-        b_ns = b.user_ns if isinstance(b, MemoryCheckpoint) else b
+        # Support both MemoryCheckpoint and raw dict for argument b.
+        # Subset DataFrames are stored as relations, not in user_ns, so a
+        # checkpoint side must be materialized or every subset compares as
+        # missing against the live namespace (a phantom "changed" write).
+        a_ns = a.materialized_ns(keys_to_include)
+        b_ns = b.materialized_ns(keys_to_include) if isinstance(b, MemoryCheckpoint) else b
 
         with timer(key="checkpoint_diff:compare", message="[diff] Compare namespaces"):
             result = differ.diff(a_ns, b_ns, keys_to_include)
