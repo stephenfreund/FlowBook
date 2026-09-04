@@ -7,6 +7,7 @@ kernel, and accumulated reproducibility metadata from cell executions.
 
 import ast
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -209,7 +210,11 @@ def _truncate_dict(d: Dict[str, Any], max_str_len: int = 500) -> Dict[str, Any]:
 class NotebookSession:
     """Manages a single notebook + kernel pair."""
 
-    def __init__(self):
+    def __init__(self, kernel_name: str = "flowbook_kernel"):
+        # Kernel spec to start (or expect when joining). The bench harness
+        # passes a stock kernel such as "python3" to get the same session
+        # machinery without reproducibility enforcement.
+        self.kernel_name = kernel_name
         self.notebook: Optional[Dict[str, Any]] = None
         self.notebook_path: Optional[str] = None
         self.kernel_manager = None
@@ -226,6 +231,7 @@ class NotebookSession:
         self._continue_after_violation: bool = False
         self._checkpoints: Dict[str, Dict[str, Any]] = {}
         self._event_log: List[Dict[str, Any]] = []
+        self._trace: List[Dict[str, Any]] = []  # structured execution trace, see _trace_event
         self._session_start: float = time.time()
         self._last_known_api_sources: Dict[str, str] = {}  # cell_id -> source from last API refresh
         self._conflict_warnings: List[str] = []  # populated by _put_contents_api
@@ -272,6 +278,25 @@ class NotebookSession:
                 entry["result"] = str(result)[:2000]
         self._event_log.append(entry)
 
+    def _trace_event(self, kind: str, **fields: Any) -> Dict[str, Any]:
+        """Append a structured record to the execution trace.
+
+        The trace is the raw, untruncated companion to the event log: one
+        record per cell execution (``run``), per source edit (``edit``), and
+        per structural change (``structure``). ``save_event_log`` writes it
+        under ``"trace"``. It exists so an offline consumer can replay a
+        session (e.g. reconstruct the stale set at each point) without
+        parsing the truncated tool-result strings in ``events``.
+        """
+        entry: Dict[str, Any] = {
+            "kind": kind,
+            "seq": len(self._trace),
+            "t": time.time(),
+        }
+        entry.update(fields)
+        self._trace.append(entry)
+        return entry
+
     def get_event_log(self) -> List[Dict[str, Any]]:
         """Return the full event log."""
         return list(self._event_log)
@@ -293,6 +318,7 @@ class NotebookSession:
             "notebook_path": self.notebook_path,
             "total_events": len(self._event_log),
             "events": self._event_log,
+            "trace": self._trace,
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(log_doc, f, indent=2, default=str)
@@ -332,6 +358,7 @@ class NotebookSession:
         self._stale_cells = set()
         self._checkpoints = {}
         self._event_log = []
+        self._trace = []
         self._session_start = time.time()
 
         # Reset Contents API state BEFORE kernel/contents setup. If setup for
@@ -347,7 +374,7 @@ class NotebookSession:
             self._owns_kernel = False
             self.kernel_manager, self.kernel_client = setup_kernel(
                 connection_file=discovery["connection_file"],
-                kernel_name="flowbook_kernel",
+                kernel_name=self.kernel_name,
             )
         else:
             # Start fresh — normalize IDs and start our own kernel
@@ -355,7 +382,7 @@ class NotebookSession:
             notebook_dir = os.path.dirname(abs_path)
             self.kernel_manager, self.kernel_client = setup_kernel(
                 connection_file=None,
-                kernel_name="flowbook_kernel",
+                kernel_name=self.kernel_name,
                 cwd=notebook_dir,
             )
             self._owns_kernel = True
@@ -368,7 +395,7 @@ class NotebookSession:
                 write_discovery(
                     notebook_path=abs_path,
                     connection_file=self.kernel_manager.connection_file,
-                    kernel_name="flowbook_kernel",
+                    kernel_name=self.kernel_name,
                     pid=kernel_pid,
                     started_by="mcp",
                 )
@@ -905,6 +932,22 @@ class NotebookSession:
         else:
             self.cell_status[cell_id] = "ok"
 
+        # Structured trace record (raw, untruncated; see _trace_event)
+        errors = list(fb_meta.get("errors", [])) if fb_meta else []
+        self._trace_event(
+            "run",
+            cell_id=cell_id,
+            source=source,
+            source_sha1=hashlib.sha1(source.encode("utf-8")).hexdigest(),
+            cell_order=cell_order,
+            status=result["status"],
+            execution_count=result.get("execution_count"),
+            stale_cells=sorted(fb_meta.get("stale_cells", [])) if fb_meta else None,
+            stale_after=sorted(self._stale_cells),
+            errors=errors,
+            rejected=bool(errors) and not self._continue_after_violation,
+        )
+
         # Build response
         response = {
             "cell_id": cell_id,
@@ -1063,6 +1106,33 @@ class NotebookSession:
     # ------------------------------------------------------------------
 
     def _mark_cell_edited(self, cell_id: str, new_source: Optional[str] = None) -> None:
+        """Notify the kernel of a source edit and record it in the trace.
+
+        Every caller (``edit_cell`` and the refactoring tools via
+        ``KernelController.write_source``) has already updated the cell's
+        source in ``self.notebook``; ``_mark_cell_edited_impl`` holds the
+        kernel protocol, this wrapper only adds the ``edit`` trace record.
+        """
+        executed = cell_id in self.executed_cells
+        try:
+            self._mark_cell_edited_impl(cell_id, new_source)
+        finally:
+            source = new_source
+            try:
+                _, cell = self._find_cell(cell_id)
+                source = get_cell_source(cell)
+            except Exception:
+                pass
+            self._trace_event(
+                "edit",
+                cell_id=cell_id,
+                source=source,
+                source_sha1=hashlib.sha1((source or "").encode("utf-8")).hexdigest(),
+                executed=executed,
+                stale_after=sorted(self._stale_cells),
+            )
+
+    def _mark_cell_edited_impl(self, cell_id: str, new_source: Optional[str] = None) -> None:
         """Notify the kernel of a source edit ([Inst-Edit]), if previously executed.
 
         When ``new_source`` is provided, the kernel classifies the edit using the
@@ -1527,6 +1597,10 @@ class NotebookSession:
         ctrl = KernelController(self)
         result = _repro.merge_cells(ctrl, cell_ids=cell_ids)
         ctrl.flush()
+        self._trace_event(
+            "structure", op="merge_cells", cell_ids=list(cell_ids),
+            cell_order=self.get_cell_order(),
+        )
         return {
             "merged_cell_id": result["merged_cell_id"],
             "cells_removed": result["cells_removed"],
@@ -1541,6 +1615,10 @@ class NotebookSession:
         ctrl = KernelController(self)
         result = _repro.move_cell(ctrl, cell_id=cell_id, after_cell_id=after_cell_id)
         ctrl.flush()
+        self._trace_event(
+            "structure", op="move_cell", cell_id=cell_id, after_cell_id=after_cell_id,
+            cell_order=self.get_cell_order(),
+        )
         return {
             "cell_id": cell_id,
             "moved_after": after_cell_id,
@@ -1558,6 +1636,11 @@ class NotebookSession:
             ctrl, after_cell_id=after_cell_id, source=source, cell_type=cell_type
         )
         ctrl.flush()
+        self._trace_event(
+            "structure", op="insert_cell", cell_id=result.get("new_cell_id"),
+            after_cell_id=after_cell_id, cell_type=cell_type, source=source,
+            cell_order=self.get_cell_order(),
+        )
         return result
 
     def delete_cell(self, cell_id: str) -> Dict[str, Any]:
@@ -1567,4 +1650,8 @@ class NotebookSession:
         ctrl = KernelController(self)
         result = _repro.delete_cell(ctrl, cell_id=cell_id)
         ctrl.flush()
+        self._trace_event(
+            "structure", op="delete_cell", cell_id=cell_id,
+            cell_order=self.get_cell_order(),
+        )
         return result

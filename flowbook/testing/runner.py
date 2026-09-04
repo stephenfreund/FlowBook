@@ -17,14 +17,17 @@ from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
 from flowbook.util.output import log, timer
 from flowbook.kernel_support.models import TrackingData
 from flowbook.kernel_support.tracking import TrackingDict
-from flowbook.kernel.reproducibility_enforcer import (
-    ReproducibilityEnforcer,
-    PRE_CHECKPOINT_PREFIX,
-    POST_CHECKPOINT_PREFIX,
-)
+from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer
 from flowbook.kernel.models import ReproducibilityResult
 
 from flowbook.testing.notebook_loader import Cell
+
+# The enforcer garbage-collects its own ``_pre_<cell>`` checkpoint when the
+# next cell is checked (kernel parity: one live pre-checkpoint at a time).
+# The simulator keeps its own snapshots under these names so the correctness
+# and performance harnesses can restore any cell's pre/post state later.
+SIM_PRE_PREFIX = "_sim_pre_"
+SIM_POST_PREFIX = "_sim_post_"
 
 
 @dataclass
@@ -73,7 +76,10 @@ class ReproducibilitySimulator:
 
     def __init__(self):
         """Initialize the reproducibility simulator."""
-        self.checkpoints = Checkpoints(sanity_check=False, warn_classes=False)
+        self.checkpoints = Checkpoints()
+        # Mirrors the kernel's continue_after_violation: when False a
+        # violating execution is rolled back (namespace + enforcer state).
+        self.continue_on_violation: bool = True
         self.enforcer = ReproducibilityEnforcer(self.checkpoints)
         self.namespace: Dict[str, Any] = {}
         self.cell_records: Dict[str, CellRecord] = {}
@@ -136,6 +142,12 @@ plt.ioff()
         """
         Execute a single cell with full reproducibility tracking.
 
+        Mirrors the FlowBook kernel's execute path (``FlowbookKernel.do_execute``
+        in flowbook_kernel.py): pre-checkpoint, tracked exec, enforcer check
+        against the live namespace, and rollback on an exception or on a
+        rejected violation. No post-checkpoint is used by the check; one is
+        still saved because the correctness harness compares post states.
+
         Args:
             cell: Cell to execute
 
@@ -145,14 +157,21 @@ plt.ioff()
         if self._tracking_dict is None:
             self._tracking_dict = TrackingDict(self.namespace)
 
+        pre_name = f"{SIM_PRE_PREFIX}{cell.cell_id}"
+        post_name = f"{SIM_POST_PREFIX}{cell.cell_id}"
+
         with timer(key="sim:execute_cell", message=f"Execute cell {cell.cell_id}") as t_total:
             self._log("execute_start", cell.cell_id)
 
-            # 1. Save pre-checkpoint
+            # 1. Pre-checkpoint (deep copy), as the kernel's _take_checkpoint does.
+            #    Saved under the simulator's own name; the enforcer receives the
+            #    object and never needs it by name (its deferred delete of
+            #    ``_pre_<cell>`` is a no-op for a missing name).
             with timer(key="sim:pre_checkpoint") as t_pre:
-                pre_name = f"{PRE_CHECKPOINT_PREFIX}{cell.cell_id}"
-                self.checkpoints.save(pre_name, self.namespace, max_size_mb=None)
-                pre_checkpoint = self.checkpoints.saved[pre_name]
+                pre_checkpoint, _removed = self.checkpoints.save(
+                    pre_name, dict(self.namespace), max_size_mb=None
+                )
+            self._apply_memo()
 
             # 2. Set random seeds based on cell index for deterministic execution
             self._set_random_seeds(cell.index)
@@ -160,36 +179,44 @@ plt.ioff()
             # 3. Execute code with tracking
             with timer(key="sim:exec") as t_exec:
                 error = None
-                with self._tracking_dict.track_execution():
+                with self._tracking_dict.track_execution(cell_id=cell.cell_id):
                     try:
                         exec(cell.source, self._tracking_dict)
                     except Exception as e:
-                        error = str(e)
+                        error = f"{type(e).__name__}: {e}"
 
             exec_time = t_exec.duration()
 
             # 4. Get tracking data
             tracking = self._tracking_dict.get_tracking_data()
 
-            # 5. Save post-checkpoint
+            # 5. Post-checkpoint (for the correctness harness only)
             with timer(key="sim:post_checkpoint") as t_post:
-                post_name = f"{POST_CHECKPOINT_PREFIX}{cell.cell_id}"
-                self.checkpoints.save(post_name, self.namespace, max_size_mb=None)
-                post_checkpoint = self.checkpoints.saved[post_name]
+                self.checkpoints.save(post_name, dict(self.namespace), max_size_mb=None)
 
             checkpoint_time = t_pre.duration() + t_post.duration()
 
-            # 6. Run SDC check
-            with timer(key="sim:sdc_check") as t_check:
-                sdc_result = self.enforcer.check(
-                    cell_id=cell.cell_id,
-                    pre_checkpoint=pre_checkpoint,
-                    post_checkpoint=post_checkpoint,
-                    tracking=tracking,
-                    continue_on_violation=True,  # Continue to compute staleness
-                    namespace=self.namespace,
+            # 6. Check, or roll back on error exactly like the kernel
+            check_time = 0.0
+            if error is not None:
+                self._rollback(pre_name)
+                sdc_result = ReproducibilityResult(
+                    stale_cells=list(self.enforcer.get_stale_cells()),
+                    changed_variables=[],
                 )
-            check_time = t_check.duration()
+            else:
+                with timer(key="sim:sdc_check") as t_check:
+                    sdc_result = self.enforcer.check(
+                        cell_id=cell.cell_id,
+                        pre_checkpoint=pre_checkpoint,
+                        namespace=self.namespace,
+                        tracking=tracking,
+                        continue_on_violation=self.continue_on_violation,
+                    )
+                check_time = t_check.duration()
+                if sdc_result.has_errors() and not self.continue_on_violation:
+                    self._rollback(pre_name)
+                    self.enforcer.rollback_last_check()
 
         total_time = t_total.duration()
 
@@ -228,6 +255,18 @@ plt.ioff()
 
         return record
 
+    def _apply_memo(self) -> None:
+        """Transfer stable ids to freshly copied objects (kernel parity)."""
+        last_memo = getattr(getattr(self.checkpoints, "memory", None), "_last_memo", None)
+        if last_memo is not None:
+            self.enforcer._stable_map.apply_memo(last_memo)
+
+    def _rollback(self, checkpoint_name: str) -> None:
+        """Restore the namespace from a checkpoint and rebuild tracking."""
+        self.checkpoints.restore(checkpoint_name, self.namespace)
+        self._apply_memo()
+        self._tracking_dict = TrackingDict(self.namespace)
+
     def restore_pre_checkpoint(self, cell_id: str) -> None:
         """
         Restore namespace to the pre-checkpoint state for a cell.
@@ -235,8 +274,8 @@ plt.ioff()
         Args:
             cell_id: ID of the cell whose pre-checkpoint to restore
         """
-        pre_name = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
-        if pre_name not in self.checkpoints.saved:
+        pre_name = f"{SIM_PRE_PREFIX}{cell_id}"
+        if not self.checkpoints.exists(pre_name):
             raise ValueError(f"No pre-checkpoint for cell {cell_id}")
 
         self._log("restore_pre", cell_id)
@@ -252,8 +291,8 @@ plt.ioff()
         Args:
             cell_id: ID of the cell whose post-checkpoint to restore
         """
-        post_name = f"{POST_CHECKPOINT_PREFIX}{cell_id}"
-        if post_name not in self.checkpoints.saved:
+        post_name = f"{SIM_POST_PREFIX}{cell_id}"
+        if not self.checkpoints.exists(post_name):
             raise ValueError(f"No post-checkpoint for cell {cell_id}")
 
         self._log("restore_post", cell_id)
@@ -264,17 +303,17 @@ plt.ioff()
 
     def get_pre_checkpoint(self, cell_id: str) -> Checkpoint:
         """Get the pre-checkpoint for a cell."""
-        pre_name = f"{PRE_CHECKPOINT_PREFIX}{cell_id}"
-        if pre_name not in self.checkpoints.saved:
+        pre_name = f"{SIM_PRE_PREFIX}{cell_id}"
+        if not self.checkpoints.exists(pre_name):
             raise ValueError(f"No pre-checkpoint for cell {cell_id}")
-        return self.checkpoints.saved[pre_name]
+        return self.checkpoints.get(pre_name)
 
     def get_post_checkpoint(self, cell_id: str) -> Checkpoint:
         """Get the post-checkpoint for a cell."""
-        post_name = f"{POST_CHECKPOINT_PREFIX}{cell_id}"
-        if post_name not in self.checkpoints.saved:
+        post_name = f"{SIM_POST_PREFIX}{cell_id}"
+        if not self.checkpoints.exists(post_name):
             raise ValueError(f"No post-checkpoint for cell {cell_id}")
-        return self.checkpoints.saved[post_name]
+        return self.checkpoints.get(post_name)
 
     def get_cell_ids(self) -> List[str]:
         """Get list of executed cell IDs in order."""

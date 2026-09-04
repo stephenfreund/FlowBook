@@ -331,17 +331,16 @@ def _measure_sdc_check(
 
     with timer(key="perf:save_pre_checkpoint"):
         checkpoints.save(pre_name, namespace, max_size_mb=None)
-        pre_checkpoint = checkpoints.saved[pre_name]
+        pre_checkpoint = checkpoints.get(pre_name)
 
     with timer(key="perf:save_post_checkpoint"):
         checkpoints.save(post_name, namespace, max_size_mb=None)
-        post_checkpoint = checkpoints.saved[post_name]
+        post_checkpoint = checkpoints.get(post_name)
 
     with timer(key="perf:reproducibility_check", message=f"reproducibility check {cell_id}") as t:
         result = enforcer.check(
             cell_id=cell_id,
             pre_checkpoint=pre_checkpoint,
-            post_checkpoint=post_checkpoint,
             tracking=tracking,
             continue_on_violation=True,
             namespace=namespace,
@@ -448,7 +447,7 @@ def run_performance_test(
                 pre_mod_name = f"_perf_pre_mod_{cell_id}"
                 with timer(key="perf:save_pre_mod"):
                     simulator.checkpoints.save(pre_mod_name, namespace_copy, max_size_mb=None)
-                    pre_mod_checkpoint = simulator.checkpoints.saved[pre_mod_name]
+                    pre_mod_checkpoint = simulator.checkpoints.get(pre_mod_name)
 
                 with timer(key="perf:modify_namespace"):
                     modified_vars = _randomly_modify_namespace(
@@ -461,13 +460,12 @@ def run_performance_test(
                 post_mod_name = f"_perf_post_mod_{cell_id}"
                 with timer(key="perf:save_post_mod"):
                     simulator.checkpoints.save(post_mod_name, namespace_copy, max_size_mb=None)
-                    post_mod_checkpoint = simulator.checkpoints.saved[post_mod_name]
+                    post_mod_checkpoint = simulator.checkpoints.get(post_mod_name)
 
                 with timer(key="perf:reproducibility_check", message=f"reproducibility check {cell_id}") as t_check:
                     sdc_result = simulator.enforcer.check(
                         cell_id=cell_id,
                         pre_checkpoint=pre_mod_checkpoint,
-                        post_checkpoint=post_mod_checkpoint,
                         tracking=tracking,
                         continue_on_violation=True,
                         namespace=namespace_copy,

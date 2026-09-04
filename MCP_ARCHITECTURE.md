@@ -158,7 +158,14 @@ too: `KernelHelper.execute_code` passes IOPub messages from other executions
 | **Logging**     | `get_log`, `save_log`, `print_log`                                                                 |
 
 All tools are **synchronous** functions wrapped by `@_logged_tool` (captures name,
-args, result, duration, errors into `session._event_log`).
+args, result, duration, errors into `session._event_log`). Alongside the event log,
+`NotebookSession` keeps a structured **execution trace** (`session._trace`, written by
+`save_event_log` under `"trace"`): one raw record per cell execution (`run`: cell ID,
+full source, cell order, status, stale set, errors, rejected flag), per source edit
+(`edit`), and per structural change (`structure`). Unlike `events`, trace records are
+never truncated, so an offline consumer can replay a session. `NotebookSession` also
+accepts `kernel_name` (default `flowbook_kernel`) so the same session machinery can
+drive a stock kernel.
 
 ### NotebookSession Lifecycle
 
