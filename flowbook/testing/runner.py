@@ -80,6 +80,9 @@ class ReproducibilitySimulator:
         # Mirrors the kernel's continue_after_violation: when False a
         # violating execution is rolled back (namespace + enforcer state).
         self.continue_on_violation: bool = True
+        # The kernel restores the pre-state when a cell raises. A stock kernel
+        # does not; set False to replay a plain-kernel trace faithfully.
+        self.rollback_on_error: bool = True
         self.enforcer = ReproducibilityEnforcer(self.checkpoints)
         self.namespace: Dict[str, Any] = {}
         self.cell_records: Dict[str, CellRecord] = {}
@@ -199,7 +202,8 @@ plt.ioff()
             # 6. Check, or roll back on error exactly like the kernel
             check_time = 0.0
             if error is not None:
-                self._rollback(pre_name)
+                if self.rollback_on_error:
+                    self._rollback(pre_name)
                 sdc_result = ReproducibilityResult(
                     stale_cells=list(self.enforcer.get_stale_cells()),
                     changed_variables=[],
