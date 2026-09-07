@@ -26,6 +26,7 @@ from flowbook.cli.helpers import (
     setup_kernel,
 )
 from flowbook.kernel_discovery import read_discovery, write_discovery, remove_discovery
+from jupyter_core.paths import jupyter_runtime_dir
 import urllib.parse
 import urllib.request
 
@@ -207,6 +208,14 @@ def _truncate_dict(d: Dict[str, Any], max_str_len: int = 500) -> Dict[str, Any]:
 # NotebookSession
 # ---------------------------------------------------------------------------
 
+def default_cell_timeout() -> float:
+    """Per-execution timeout in seconds: FLOWBOOK_CELL_TIMEOUT_S, else 300."""
+    try:
+        return float(os.environ.get("FLOWBOOK_CELL_TIMEOUT_S", "300"))
+    except ValueError:
+        return 300.0
+
+
 class NotebookSession:
     """Manages a single notebook + kernel pair."""
 
@@ -215,6 +224,8 @@ class NotebookSession:
         # passes a stock kernel such as "python3" to get the same session
         # machinery without reproducibility enforcement.
         self.kernel_name = kernel_name
+        self.kernel_log_path: Optional[str] = None
+        self._kernel_log = None
         self.notebook: Optional[Dict[str, Any]] = None
         self.notebook_path: Optional[str] = None
         self.kernel_manager = None
@@ -382,10 +393,17 @@ class NotebookSession:
             # Start fresh — normalize IDs and start our own kernel
             self.notebook = normalize_notebook_alpha(raw_notebook)
             notebook_dir = os.path.dirname(abs_path)
+            # The kernel's fd-level output (FlowBook logs via sys.__stdout__)
+            # goes to a log file, never to this process's stdout: for the MCP
+            # server that is the JSON-RPC channel, and kernel output there
+            # corrupts tool responses.
+            self._open_kernel_log(abs_path)
             self.kernel_manager, self.kernel_client = setup_kernel(
                 connection_file=None,
                 kernel_name=self.kernel_name,
                 cwd=notebook_dir,
+                stdout=self._kernel_log,
+                stderr=self._kernel_log,
             )
             self._owns_kernel = True
 
@@ -475,6 +493,26 @@ class NotebookSession:
             logger.debug(f"Contents API not available: {e}")
             return ""
 
+    def _open_kernel_log(self, notebook_path: str) -> None:
+        self._close_kernel_log()
+        stem = os.path.splitext(os.path.basename(notebook_path))[0]
+        path = os.path.join(jupyter_runtime_dir(), f"flowbook-kernel-{os.getpid()}-{stem}.log")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self._kernel_log = open(path, "ab")
+            self.kernel_log_path = path
+        except OSError:
+            self._kernel_log = None
+            self.kernel_log_path = None
+
+    def _close_kernel_log(self) -> None:
+        if self._kernel_log is not None:
+            try:
+                self._kernel_log.close()
+            except Exception:
+                pass
+            self._kernel_log = None
+
     def close(self):
         """Shutdown kernel (if we own it), auto-save log, and clear state.
 
@@ -501,6 +539,7 @@ class NotebookSession:
                     self.kernel_client.stop_channels()
                 except Exception:
                     pass
+        self._close_kernel_log()
 
         self.kernel_client = None
         self.kernel_manager = None
@@ -890,8 +929,12 @@ class NotebookSession:
     # Execution
     # ------------------------------------------------------------------
 
-    def run_cell(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
-        """Execute a single cell and return outputs + flowbook metadata."""
+    def run_cell(self, cell_id: str, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """Execute a single cell and return outputs + flowbook metadata.
+
+        ``timeout`` defaults to FLOWBOOK_CELL_TIMEOUT_S (seconds) or 300.
+        """
+        timeout = default_cell_timeout() if timeout is None else timeout
         self._require_loaded()
         self._refresh_from_contents_api()
         _, cell = self._find_cell(cell_id)
@@ -967,7 +1010,7 @@ class NotebookSession:
 
         return response
 
-    def run_all(self, timeout: float = 300) -> Dict[str, Any]:
+    def run_all(self, timeout: Optional[float] = None) -> Dict[str, Any]:
         """Execute all code cells top-to-bottom.
 
         NOTE (audit A4): ExecuteCommand.process in
@@ -1041,7 +1084,7 @@ class NotebookSession:
             "cell_results": results,
         }
 
-    def run_from(self, cell_id: str, timeout: float = 300) -> Dict[str, Any]:
+    def run_from(self, cell_id: str, timeout: Optional[float] = None) -> Dict[str, Any]:
         """Run cell_id and subsequent cells that need execution, stopping on error.
 
         Refreshes from JupyterLab first to pick up any edits. Skips cells

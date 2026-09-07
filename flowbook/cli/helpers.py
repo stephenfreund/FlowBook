@@ -308,6 +308,8 @@ def setup_kernel(
     connection_file: Optional[str] = None,
     kernel_name: str = "flowbook_kernel",
     cwd: Optional[str] = None,
+    stdout=None,
+    stderr=None,
 ) -> Tuple[Optional[KernelManager], FlowbookKernelClient]:
     """
     Start a new kernel or connect to an existing one.
@@ -315,6 +317,11 @@ def setup_kernel(
     Args:
         connection_file: Path to kernel connection file (optional)
         kernel_name: Name of kernel to start if not connecting to existing
+        stdout, stderr: Where the kernel subprocess's fd-level output goes
+            (a file object, subprocess.DEVNULL, or None to inherit). FlowBook's
+            logger writes to sys.__stdout__, so a kernel that inherits the
+            parent's stdout writes its logs there; the MCP server's stdout is
+            its JSON-RPC channel and must never be shared.
 
     Returns:
         Tuple of (KernelManager or None, FlowbookKernelClient)
@@ -381,7 +388,14 @@ def setup_kernel(
 
                     # Start fresh kernel
                     kernel_manager = KernelManager(kernel_name=kernel_name)
-                    kernel_manager.start_kernel(**({"cwd": cwd} if cwd else {}))
+                    launch_kwargs = {}
+                    if cwd:
+                        launch_kwargs["cwd"] = cwd
+                    if stdout is not None:
+                        launch_kwargs["stdout"] = stdout
+                    if stderr is not None:
+                        launch_kwargs["stderr"] = stderr
+                    kernel_manager.start_kernel(**launch_kwargs)
 
                     kernel_client = FlowbookKernelClient(kernel_id=kernel_manager.kernel_id)
                     kernel_client.load_connection_info(kernel_manager.get_connection_info())
