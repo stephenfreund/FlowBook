@@ -1050,6 +1050,9 @@ class Diff:
         self.id_map_a = {}  # Maps id(obj_a) -> canonical_id
         self.id_map_b = {}  # Maps id(obj_b) -> canonical_id
         self.next_canonical_id = 0
+        # (id_a, id_b) pairs compared by value after an aliasing mismatch, so a
+        # cyclic structure reached through mismatched aliases still terminates.
+        self._compared_pairs = set()
         # Accumulated warnings for WARN mode
         self._warnings: List[str] = []
 
@@ -1136,6 +1139,7 @@ class Diff:
         self.id_map_a = {}
         self.id_map_b = {}
         self.next_canonical_id = 0
+        self._compared_pairs = set()
         self._warnings = []  # Reset warnings
 
         # Reset profiling stats if profiling is enabled
@@ -1331,45 +1335,32 @@ class Diff:
         registered_ids = False  # Track whether we registered these IDs
 
         if not both_immutable_atomic:
-            # Pointer tracking for mutable containers and complex objects
-
-            # If we've seen val_a before, check if pointer structure matches
-            if id_a in self.id_map_a:
-                canonical_a = self.id_map_a[id_a]
-                if id_b in self.id_map_b:
-                    canonical_b = self.id_map_b[id_b]
-                    if canonical_a != canonical_b:
-                        return ValueComparison(
-                            status="different",
-                            value1=val_a,
-                            value2=val_b,
-                            message=f"Pointer structure mismatch at {path}",
-                        )
-                else:
-                    return ValueComparison(
-                        status="different",
-                        value1=val_a,
-                        value2=val_b,
-                        message=f"Pointer structure mismatch at {path} (first namespace has reference to earlier object)",
-                    )
+            # Pointer tracking for mutable containers and complex objects.
+            # Objects already compared through another path are not compared
+            # again when both namespaces reach them the same way.
+            seen_a = id_a in self.id_map_a
+            seen_b = id_b in self.id_map_b
+            if seen_a and seen_b and self.id_map_a[id_a] == self.id_map_b[id_b]:
                 return None  # Already compared, and structure matches
-
-            # If we've seen val_b before but not val_a
-            if id_b in self.id_map_b:
-                return ValueComparison(
-                    status="different",
-                    value1=val_a,
-                    value2=val_b,
-                    message=f"Pointer structure mismatch at {path} (second namespace has reference to earlier object)",
-                )
-
-            # Register these objects with the same canonical ID
-            # We do this before comparing to handle circular references
-            canonical_id = self.next_canonical_id
-            self.next_canonical_id += 1
-            self.id_map_a[id_a] = canonical_id
-            self.id_map_b[id_b] = canonical_id
-            registered_ids = True  # Mark that we registered these IDs
+            if seen_a or seen_b:
+                # The two namespaces reach this object through different aliasing:
+                # a name that shared it was rebound to a new object (e.g. a cell
+                # re-ran `cols = [...]` while a fitted model still holds the old
+                # list). That is not a mutation of the object reached here, so it
+                # is compared by value rather than reported as a difference.
+                # The pair set stops a cycle from recursing forever.
+                pair = (id_a, id_b)
+                if pair in self._compared_pairs:
+                    return None
+                self._compared_pairs.add(pair)
+            else:
+                # Register these objects with the same canonical ID
+                # We do this before comparing to handle circular references
+                canonical_id = self.next_canonical_id
+                self.next_canonical_id += 1
+                self.id_map_a[id_a] = canonical_id
+                self.id_map_b[id_b] = canonical_id
+                registered_ids = True  # Mark that we registered these IDs
 
         # Type checking
         # For immutable atomics, use category-based type checking

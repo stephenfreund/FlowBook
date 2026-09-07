@@ -90,3 +90,19 @@ def test_exception_restores_namespace_and_skips_check():
     assert not rec.sdc_result.has_errors()
     # No check ran, so the enforcer's view is unchanged
     assert sim.enforcer.get_stale_cells() == stale_before
+
+
+def test_rebinding_a_shared_list_does_not_mutate_its_holders():
+    """A cell that re-runs `cols = [...]` must not be blamed for changing objects that hold the old list."""
+    cells = _cells([
+        ("A", "class H:\n    def __init__(self, c): self.c = c"),
+        ("B", "cols = ['x', 'y']"),
+        ("C", "holder = H(cols)"),
+    ])
+    sim = _sim(cells)
+    for c in cells:
+        sim.execute_cell(c)
+    rec = sim.execute_cell(cells[1])  # rebinds cols; holder still references the old list
+    assert not rec.sdc_result.has_errors(), [e.error_type.value for e in rec.sdc_result.errors]
+    assert "holder" not in rec.sdc_result.changed_variables
+    assert "C" in rec.sdc_result.stale_cells  # C read cols, so it is forward-stale: correct

@@ -991,8 +991,15 @@ class TestDiffPointerStructure:
         assert "a" not in result.differences
         assert "b" not in result.differences
 
-    def test_list_with_different_pointer_structure(self):
-        """Lists with different pointer structure should be detected."""
+    def test_list_with_different_pointer_structure_but_equal_values(self):
+        """Aliasing structure alone is not a change.
+
+        Two names sharing one list versus two equal, separate lists: the values
+        are the same, so neither variable changed. Reporting `b` as different
+        here made a cell that merely rebound `a` look like it mutated every
+        object that still held the old list (fitted models holding a column
+        list), which the enforcer turned into UNRECOVERABLE_MUTATION.
+        """
         differ = Diff()
         shared = [1, 2, 3]
         ns1 = {"a": shared, "b": shared}  # a and b point to same list
@@ -1000,8 +1007,18 @@ class TestDiffPointerStructure:
         ns2 = {"a": [1, 2, 3], "b": [1, 2, 3]}  # a and b are different lists
 
         result = differ.diff(ns1, ns2)
-        # The diff should detect pointer structure mismatch
-        assert "b" in result.differences
+        assert "a" not in result.differences
+        assert "b" not in result.differences
+
+    def test_mutation_through_shared_reference_is_detected(self):
+        """A change made through one alias is visible through the other."""
+        differ = Diff()
+        shared1 = [1, 2, 3]
+        ns1 = {"a": shared1, "b": shared1}
+        shared2 = [1, 2, 3, 4]
+        ns2 = {"a": shared2, "b": shared2}
+        result = differ.diff(ns1, ns2)
+        assert "a" in result.differences and "b" in result.differences
 
     def test_nested_shared_references_equal(self):
         """Nested structures with same pointer pattern should be equal."""
