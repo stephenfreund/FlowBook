@@ -16,7 +16,7 @@ import numpy as np
 from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
 from flowbook.util.output import log, timer
 from flowbook.kernel_support.models import TrackingData
-from flowbook.kernel_support.tracking import TrackingDict
+from flowbook.kernel_support.tracking import TrackingDict, rollback_module_bindings
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer
 from flowbook.kernel.models import ReproducibilityResult
 
@@ -219,6 +219,7 @@ plt.ioff()
                     )
                 check_time = t_check.duration()
                 if sdc_result.has_errors() and not self.continue_on_violation:
+                    rollback_module_bindings(self._tracking_dict)
                     self._rollback(pre_name)
                     self.enforcer.rollback_last_check()
 

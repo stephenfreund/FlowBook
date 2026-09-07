@@ -44,6 +44,8 @@ Usage:
 from contextlib import contextmanager
 from typing import Dict, Generator, Optional, Set
 
+import os
+import types
 import pandas as pd
 
 from flowbook.util.output import timer
@@ -99,6 +101,40 @@ def _is_ipython_result_var(key: str) -> bool:
     return False
 
 
+_UNBOUND = object()  # sentinel: the name had no binding before this cell
+
+
+def imports_tracked() -> bool:
+    """Module bindings participate in read/write tracking unless FLOWBOOK_TRACK_IMPORTS=0."""
+    return os.environ.get("FLOWBOOK_TRACK_IMPORTS", "1") != "0"
+
+
+def rollback_module_bindings(tracking_dict) -> list:
+    """Undo the module (re)bindings of the cell just executed through tracking_dict.
+
+    Modules are not checkpointed, so restoring the pre-execution checkpoint
+    cannot remove an import a rejected cell introduced; without this, a later
+    cell would read `json` as an ambient name although no committed cell
+    imports it. Uses the previous-binding snapshot taken on first write, so a
+    name that was unbound is deleted and a name that pointed at another module
+    is pointed back. Returns the names touched.
+    """
+    touched = []
+    real = tracking_dict._real_ns
+    for name, prev in list(tracking_dict._prev_bindings.items()):
+        now = real.get(name, _UNBOUND)
+        if not (isinstance(now, types.ModuleType) or isinstance(prev, types.ModuleType)):
+            continue
+        if now is prev:
+            continue
+        if prev is _UNBOUND:
+            real.pop(name, None)
+        else:
+            real[name] = prev
+        touched.append(name)
+    return touched
+
+
 class TrackingDict(dict):
     """
     A dict that delegates storage to an underlying namespace while tracking access.
@@ -133,6 +169,10 @@ class TrackingDict(dict):
         real_ns_actual = real_ns if real_ns is not None else {}
         object.__setattr__(self, '_real_ns', real_ns_actual)
         object.__setattr__(self, '_reads_before_writes', set())
+        # First-write-in-cell snapshot of a name's previous binding, so a
+        # rebinding to the identical object (re-running `import pandas as pd`)
+        # can be recognized as a no-op write. See get_tracking_data().
+        object.__setattr__(self, '_prev_bindings', {})
         object.__setattr__(self, '_writes', set())
         object.__setattr__(self, '_tracking_enabled', True)  # Track by default
         # Variables whose values could not be checkpointed (name -> type
@@ -185,6 +225,8 @@ class TrackingDict(dict):
         # Rebinding replaces the uncopyable value — lift the read block.
         self._blocked_reads.pop(key, None)
         if self._tracking_enabled:
+            if key not in self._prev_bindings:
+                self._prev_bindings[key] = self._real_ns.get(key, _UNBOUND)
             self._writes.add(key)
             # Lazy registration: register DataFrames/Series when assigned to namespace
             # This eliminates the need to walk the namespace at start/stop time
@@ -203,6 +245,8 @@ class TrackingDict(dict):
         self._real_ns[key] = value
 
     def __delitem__(self, key):
+        if self._tracking_enabled and key not in self._prev_bindings:
+            self._prev_bindings[key] = self._real_ns.get(key, _UNBOUND)
         del self._real_ns[key]
         self._blocked_reads.pop(key, None)
         if self._tracking_enabled:
@@ -338,6 +382,7 @@ class TrackingDict(dict):
         """Reset tracking state for a new cell execution."""
         self._reads_before_writes.clear()
         self._writes.clear()
+        self._prev_bindings.clear()
         self._column_tracker.reset()
         self._structural_tracker.reset()
 
@@ -484,6 +529,7 @@ class TrackingDict(dict):
             TrackingData model with reads_before_writes, writes, column data, and structural reads
         """
         from flowbook.kernel_support.checkpoint import is_valid_variable
+        from flowbook.kernel_support.memory_checkpoint import is_valid_variable_name
         from flowbook.kernel_support.models import TrackingData
 
         # Filter column reads: exclude DataFrames that were WRITTEN in this cell
@@ -523,17 +569,34 @@ class TrackingDict(dict):
             if k not in self._writes
         }
 
+        track_imports = imports_tracked()
+
+        def keep(name: str) -> bool:
+            value = self._real_ns.get(name)
+            if track_imports and isinstance(value, types.ModuleType):
+                # Module bindings are locations for the ordering predicates
+                # (a cell using `json` before the cell that imports it is a
+                # forward contamination), even though they are not checkpointed.
+                return is_valid_variable_name(name)
+            return is_valid_variable(name, value)
+
+        def is_noop_rebinding(name: str) -> bool:
+            # `import pandas as pd` re-executed rebinds pd to the very same
+            # module object. Reported in rebound_same; the enforcer classifies
+            # it against the notebook's recorded writers (see check()).
+            value = self._real_ns.get(name, _UNBOUND)
+            prev = self._prev_bindings.get(name, _UNBOUND)
+            return (
+                track_imports
+                and isinstance(value, types.ModuleType)
+                and prev is value
+            )
+
+        kept_writes = set(k for k in self._writes if keep(k))
         return TrackingData(
-            reads_before_writes=set(
-                k
-                for k in self._reads_before_writes
-                if is_valid_variable(k, self._real_ns.get(k))
-            ),
-            writes=set(
-                k
-                for k in self._writes
-                if is_valid_variable(k, self._real_ns.get(k))
-            ),
+            reads_before_writes=set(k for k in self._reads_before_writes if keep(k)),
+            writes=kept_writes,
+            rebound_same=set(k for k in kept_writes if is_noop_rebinding(k)),
             column_reads_before_writes=column_rbw,
             column_writes={k: set(v) for k, v in self.column_writes.items()},
             structural_reads=struct_reads,

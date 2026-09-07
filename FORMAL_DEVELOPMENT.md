@@ -525,6 +525,31 @@ NoReadAndWrite, NoWriteAfterRead, ForwardStale, and BackwardStale.
 
 **Storage:** `NotebookState.writes[cell_id]` stores the union of tracking-derived WriteLocs (Var, Col, Cols, Rows, File — from `tracking_to_writelocset()`, which converts structural mutations recorded at operation time by TrackingData) and diff-derived WriteLocs (Col, Rows — from `changes_to_write_locs()`), filtered to only include diff-derived locs for variables that tracking also considers writes (recoverable mutations). See `record_execution()` in `kernel/notebook_state.py`.
 
+**Module bindings.** `import m` (and `from m import f`) binds a name like any
+assignment, so `Var(m)` is a location: the importing cell writes it and a cell
+that uses `m` reads it. Modules are never checkpointed (they are not copyable),
+so `Var(m)` locs come only from tracking, never from the diff — every
+predicate must therefore use the canonical (tracking ∪ diff) Wᵢ, and cell
+rollback undoes module bindings separately (`rollback_module_bindings()`).
+Because modules are singletons, rebinding a name to the *identical* module
+object is observationally a no-op. Such a rebinding by cell i (reported by
+`TrackingData.rebound_same`) is classified in `check()`:
+
+- an earlier cell j < i already has `Var(m) ∈ Wⱼ` → not in W'ᵢ (j is the
+  importer; a re-executed `import pandas as pd` in a later cell changes nothing);
+- cell i itself was the recorded writer (`Var(m) ∈ Wᵢ`) → stays in W'ᵢ for
+  NoReadAndWrite / WriteBeforeRead / NoReadBeforeWrite (`TrackingData.idempotent_writes`),
+  but is dropped from Wᵢ ∪ W'ᵢ in ForwardStale and from Wᵢ in NoWriteAfterRead:
+  re-running the import cell marks no reader stale and mutates nothing;
+- otherwise (the name was ambient, or bound by a later cell) → an ordinary write.
+
+A first binding, a rebinding to a *different* module, and `del m` are ordinary
+writes. Consequences: a cell placed above its import cell that uses the module
+violates NoReadBeforeWrite; an import cell moved below a user violates
+NoWriteAfterRead; both would fail or change in a fresh top-to-bottom run.
+Set `FLOWBOOK_TRACK_IMPORTS=0` to exclude module bindings from tracking
+(the pre-2026-09 behaviour, in which any bound module was ambient).
+
 ### 8.3 The ▷ Conflict Relation
 
 `w ▷ r` means "writing w invalidates reading r".
@@ -888,11 +913,12 @@ W[i] : WriteLocSet    — locations that actually changed (Var, Col, Cols, Rows,
 NoReadAndWrite(R, W, i)    ≝  Wᵢ ▷ Rᵢ = ∅
 WriteBeforeRead(R, W, i)   ≝  ∀ r ∈ Rᵢ . r ∈ ambient ∨ ∃ j < i . Wⱼ ▷ {r} ≠ ∅
 NoReadBeforeWrite(R, W, i) ≝  W_{i+1..n} ▷ Rᵢ = ∅
-NoWriteAfterRead(R, W, i)  ≝  Wᵢ ▷ R_{1..i-1} = ∅  (clean cells only)
+NoWriteAfterRead(R, W, i)  ≝  (Wᵢ \ Idemᵢ) ▷ R_{1..i-1} = ∅  (clean cells only)
+                              Idemᵢ = idempotent module rebindings by cell i (§8.2)
 
 ForwardStale(R, W, W', i, j) ≝  j > i ∧ (
-    (Wᵢ ∪ W'ᵢ) ▷ Rⱼ ≠ ∅                   — write-read conflict
-    ∨ (Wᵢ ∪ W'ᵢ) ▷▷ Wⱼ ≠ ∅               — write-write overlap
+    ((Wᵢ ∪ W'ᵢ) \ Idemᵢ) ▷ Rⱼ ≠ ∅        — write-read conflict
+    ∨ ((Wᵢ ∪ W'ᵢ) \ Idemᵢ) ▷▷ Wⱼ ≠ ∅    — write-write overlap
 )
 ```
 
@@ -1109,6 +1135,7 @@ These are the same predicates from §10 — no additional `Σ` parameter is need
 | Provenance class                         | `DataFrameProvenance` in `kernel_support/column_provenance.py`                                                                     |
 | Provenance tracker                       | `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py`                                                              |
 | Provenance key                           | `PROVENANCE_KEY = '_flowbook_provenance'` in `kernel_support/column_provenance.py`                                                 |
+| Module binding tracking / idempotent re-import | `TrackingDict.get_tracking_data()` (`rebound_same`), `rollback_module_bindings()` in `kernel_support/tracking.py`; classification at the top of `ReproducibilityEnforcer.check()` |
 | Column write hook                        | `__setitem__` patch in `kernel_support/column_tracking.py`                                                                         |
 | Column insert hook                       | `insert` patch in `kernel_support/column_tracking.py`                                                                              |
 | Column delete hook                       | `__delitem__` patch in `kernel_support/column_tracking.py`                                                                         |

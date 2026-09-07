@@ -53,6 +53,14 @@ would crash with `NameError`.
 
 **Example violation**: cell @C uses `model` but no cell @A or @B ever assigns it.
 
+Imports count. `import json` binds the name `json` just as `x = 1` binds `x`,
+so the cell that imports a module is its writer and every cell that uses the
+module reads it. Re-executing an import that is already bound to the same
+module is not a new write: it never marks anything stale and never conflicts
+with a cell that already used the module. Putting an import cell _below_ a
+cell that uses the module is a genuine ordering violation (see predicates 3
+and 4): a top-to-bottom rerun would hit `NameError`.
+
 ### 3. NoReadBeforeWrite (forward contamination)
 
 > A cell must not read a location that is written by a _later_ cell:

@@ -48,6 +48,24 @@ class TrackingData(BaseModel):
     writes: Set[str] = Field(
         default_factory=set, description="All variables written during cell execution"
     )
+    rebound_same: Set[str] = Field(
+        default_factory=set,
+        description=(
+            "Subset of writes that rebound a name to the identical module object "
+            "it already held (a re-executed import). Recorded by TrackingDict; the "
+            "enforcer decides whether such a write is dropped (an earlier cell is "
+            "the importer), kept as idempotent (this cell re-ran), or real."
+        ),
+    )
+    idempotent_writes: Set[str] = Field(
+        default_factory=set,
+        description=(
+            "Writes classified by the enforcer as idempotent module rebindings by "
+            "this same cell: they stay in Wᵢ for the ordering predicates but do "
+            "not propagate staleness and are not backward mutations, because "
+            "module identity is exact value equality."
+        ),
+    )
     column_reads_before_writes: Dict[str, Set[str]] = Field(
         default_factory=dict,
         description="DataFrame columns read before written, keyed by variable path",
