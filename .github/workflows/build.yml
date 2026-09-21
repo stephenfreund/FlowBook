@@ -74,7 +74,9 @@ jobs:
       - name: Build extension
         run: |
           set -x
-          HATCH_BUILD_HOOKS_ENABLE=false pip install -e "." --no-build-isolation
+          # The jupyter-builder hook is enabled by default (HATCH_BUILD_HOOKS_ENABLE does not turn it off),
+          # so this builds the labextension for real; the checks below verify it.
+          pip install -e "." --no-build-isolation
           jupyter labextension list
           jupyter labextension list 2>&1 | grep -ie "flowbook.*OK"
           jupyter server extension list
@@ -133,10 +135,11 @@ jobs:
       - name: Install Node dependencies
         run: jlpm install --no-immutable
 
-      - name: Build extension
+      - name: Install FlowBook (Python only)
         run: |
           set -x
-          HATCH_BUILD_HOOKS_ENABLE=false pip install -e "." --no-build-isolation
+          # These tests need only the kernel: skip the labextension build (npm, JupyterLab core-meta lookups).
+          SKIP_JUPYTER_BUILDER=1 pip install -e "." --no-build-isolation
 
       - name: Pin pandas to ${{ matrix.pandas.lane }} (${{ matrix.pandas.spec }})
         run: |

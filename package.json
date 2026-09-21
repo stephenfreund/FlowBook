@@ -94,7 +94,7 @@
         "react-dom": "^18.2.0"
     },
     "devDependencies": {
-        "@jupyterlab/builder": "^4.0.0",
+        "@jupyterlab/builder": "^4.5.0",
         "@jupyterlab/testing": "^4",
         "@types/jest": "^29",
         "@types/json-schema": "^7.0.11",
