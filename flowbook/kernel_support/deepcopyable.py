@@ -79,9 +79,12 @@ def check_deepcopyable(obj: Any, _seen: Set[int] | None = None) -> str | None:
 
     # === 2. Never deepcopyable types ===
 
-    # Modules cannot be deepcopied
+    # A module itself cannot be copied. A module referenced from *inside* another object is fine:
+    # deepcopy shares it (modules are singletons; see the ModuleType rule in deepcopy.py), which is
+    # what scipy's result objects need (TtestResult._xp is the array namespace module).
+    # (_seen is non-empty only when we got here through a parent object.)
     if obj_type is types.ModuleType:
-        return "module objects cannot be deepcopied"
+        return None if _seen else "module objects cannot be deepcopied"
 
     # Generator/coroutine types
     if obj_type is types.GeneratorType:

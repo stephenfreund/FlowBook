@@ -1265,6 +1265,15 @@ d[types.BuiltinFunctionType] = _deepcopy_atomic
 # NOTE: FunctionType is NOT atomic - we override it below
 d[property] = _deepcopy_atomic
 
+# Modules are process-wide singletons: a copy of an object that refers to a module must refer to
+# the *same* module, so share it. Top-level module variables (`import numpy as np`) never reach
+# this code (filter_user_namespace drops them); this rule matters for modules nested *inside*
+# objects. scipy >= 1.15 stores the array namespace it computed with on its result objects
+# (e.g. TtestResult._xp is the numpy module, used later by confidence_interval()). Standard
+# copy.deepcopy fails on those with "cannot pickle 'module' object"; without this rule every
+# t-test result would be dropped from checkpoints and read-blocked afterwards.
+d[types.ModuleType] = _deepcopy_atomic
+
 # Logging handlers - loggers are effectively singletons (retrieved by name from global registry)
 # and contain unpicklable stream handlers, so return the same instance
 import logging

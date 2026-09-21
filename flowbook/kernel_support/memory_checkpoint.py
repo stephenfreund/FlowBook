@@ -273,6 +273,20 @@ These are excluded if they have matplotlib-like modules or fail deepcopy.
 No special handling - rely on deepcopy failures.
 
 
+7.9 Modules Referenced From Inside Objects (scipy result types)
+----------------------------------------------------------------
+Top-level module variables (`import numpy as np`) are filtered out of the
+namespace before checkpointing and are never copied. A module reached *through*
+an object is different: deepcopy.py registers types.ModuleType as atomic, so
+the copy shares the one module object. This is required for scipy >= 1.15,
+whose Array API support stores the array namespace on result objects:
+TtestResult (ttest_ind / ttest_1samp / ttest_rel) keeps `_xp` (the numpy
+module) for its confidence_interval() method. Standard copy.deepcopy raises
+"cannot pickle 'module' object" on these, which used to drop `result` from
+every checkpoint and read-block it in later cells. Sharing the module is
+correct: the copy must use the same array library as the original.
+
+
 8. KNOWN ISSUES & LIMITATIONS
 -----------------------------
 
