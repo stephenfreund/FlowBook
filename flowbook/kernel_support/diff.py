@@ -1324,6 +1324,21 @@ class Diff:
         if cudf_compat.are_both_cudf_same_type(val_a, val_b):
             return cudf_compat.diff_cudf(val_a, val_b, path, self)
 
+        # A cudf.pandas proxy whose data lives on the pandas side is
+        # checkpointed as the underlying pandas object, so the two sides
+        # differ in type (e.g. pandas Index vs proxy Index) although they
+        # hold the same data. Compare the underlying objects.
+        if cudf_compat.is_cudf_proxy(val_a) or cudf_compat.is_cudf_proxy(val_b):
+            unwrapped_a = cudf_compat.unwrap_cudf_proxy(val_a)
+            unwrapped_b = cudf_compat.unwrap_cudf_proxy(val_b)
+            if unwrapped_a is not val_a or unwrapped_b is not val_b:
+                # One side on the GPU (cudf), the other on the pandas side:
+                # compare both as pandas.
+                if type(unwrapped_a) is not type(unwrapped_b):
+                    unwrapped_a = cudf_compat.to_pandas(unwrapped_a)
+                    unwrapped_b = cudf_compat.to_pandas(unwrapped_b)
+                return self._compare_values(unwrapped_a, unwrapped_b, path)
+
         # Skip pointer tracking for immutable atomic values
         # For these types, only value equality matters, not object identity
         both_immutable_atomic = self._is_immutable_atomic(
@@ -1579,6 +1594,13 @@ class Diff:
                     # Handle dict subclasses (OrderedDict, Counter, defaultdict, etc.)
                     _DISPATCH_CACHE[t] = "_compare_dict"
                     result = self._compare_dict(val_a, val_b, path)
+                elif isinstance(val_a, tuple) and not hasattr(val_a, "__dict__"):
+                    # Tuple subclasses without instance attributes (namedtuples,
+                    # e.g. IterativeImputer's _ImputerTriplet): compare element-
+                    # wise. The object fallback's `val_a != val_b` raises on
+                    # array elements and reported every copy as different.
+                    _DISPATCH_CACHE[t] = "_compare_tuple"
+                    result = self._compare_tuple(val_a, val_b, path)
                 elif callable(val_a):
                     # Don't cache callables - too many different types
                     result = self._compare_callable(val_a, val_b, path)
@@ -3444,11 +3466,10 @@ class Diff:
         self, val_a, val_b, path: str
     ) -> Optional[DiffNode]:
         """
-        Compare sklearn StackingRegressor/Classifier using pointer comparison.
+        Compare sklearn StackingRegressor/Classifier.
 
-        Stacking estimators contain fitted base estimators that are immutable
-        after fit(). Our deepcopy shares these estimators, so we can use O(1)
-        pointer comparison first.
+        Fitted base estimators are compared by identity first (O(1) when the
+        same object is on both sides) and by value otherwise.
 
         Returns None if estimators are equal, CompoundDiff with differences otherwise.
         """
@@ -3487,15 +3508,13 @@ class Diff:
                     message=f"Stacking estimator parameters mismatch at {path}",
                 )
         else:
-            # Both fitted - use POINTER COMPARISON first (O(1))
-            # Since our deepcopy shares the immutable fitted estimators, same pointer = equal
+            # Both fitted. Identity is only a fast path: checkpoint copies do
+            # not share the fitted estimators (deepcopy.py copies them, since
+            # they are mutable), so a copy is compared by value, not reported
+            # as different because it is a different object.
 
             # Check estimators_ (list of fitted base estimators)
-            if val_a.estimators_ is val_b.estimators_:
-                # Same estimators reference - trivially equal for this key attribute
-                pass
-            else:
-                # Different estimators list - check each estimator by identity
+            if val_a.estimators_ is not val_b.estimators_:
                 if len(val_a.estimators_) != len(val_b.estimators_):
                     children["estimators_"] = ValueComparison(
                         status="different",
@@ -3504,24 +3523,20 @@ class Diff:
                         message=f"Stacking estimator count mismatch at {path}",
                     )
                 else:
-                    # Compare each estimator by identity (O(1) per estimator)
                     for i, (est_a, est_b) in enumerate(zip(val_a.estimators_, val_b.estimators_)):
-                        if est_a is not est_b:
-                            children[f"estimators_[{i}]"] = ValueComparison(
-                                status="different",
-                                value1=f"<{type(est_a).__name__} id={id(est_a)}>",
-                                value2=f"<{type(est_b).__name__} id={id(est_b)}>",
-                                message=f"Base estimator differs at {path}[{i}]",
-                            )
+                        if est_a is est_b:
+                            continue
+                        est_diff = self._compare_values(est_a, est_b, f"{path}.estimators_[{i}]")
+                        if est_diff is not None:
+                            children[f"estimators_[{i}]"] = est_diff
 
             # Check final_estimator_
             if val_a.final_estimator_ is not val_b.final_estimator_:
-                children["final_estimator_"] = ValueComparison(
-                    status="different",
-                    value1=f"<{type(val_a.final_estimator_).__name__}>",
-                    value2=f"<{type(val_b.final_estimator_).__name__}>",
-                    message=f"Final estimator differs at {path}",
+                final_diff = self._compare_values(
+                    val_a.final_estimator_, val_b.final_estimator_, f"{path}.final_estimator_"
                 )
+                if final_diff is not None:
+                    children["final_estimator_"] = final_diff
 
         if children:
             return CompoundDiff(source_type="stacking_estimator", children=children, truncated=False)

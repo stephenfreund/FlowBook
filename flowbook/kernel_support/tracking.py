@@ -49,7 +49,9 @@ import types
 import pandas as pd
 
 from flowbook.util.output import timer
-from flowbook.kernel_support.column_tracking import ColumnAccessTracker, walk_dataframes, walk_pandas_objects
+from flowbook.kernel_support.column_tracking import (
+    ColumnAccessTracker, walk_dataframes, walk_pandas_objects, _is_dataframe, _is_series,
+)
 from flowbook.kernel_support.structural_tracking import StructuralAccessTracker, StructuralTrackingMode
 
 
@@ -208,10 +210,10 @@ class TrackingDict(dict):
             self._reads_before_writes.add(key)
         # Lazy registration: register DataFrames/Series when accessed from
         # namespace. This eliminates namespace walking at start/stop time.
-        if isinstance(value, pd.DataFrame):
+        if _is_dataframe(value):
             self._column_tracker.register_df(value, key)
             self._structural_tracker.register(value, key)
-        elif isinstance(value, pd.Series):
+        elif _is_series(value):
             self._structural_tracker.register(value, key)
 
     def __getitem__(self, key):
@@ -231,7 +233,7 @@ class TrackingDict(dict):
             # Lazy registration: register DataFrames/Series when assigned to namespace
             # This eliminates the need to walk the namespace at start/stop time
             # Skip IPython result variables (_1, _2, etc.) to avoid overwriting real paths
-            if isinstance(value, pd.DataFrame):
+            if _is_dataframe(value):
                 if not _is_ipython_result_var(key):
                     self._column_tracker.register_df(value, key)
                     self._structural_tracker.register(value, key)
@@ -239,7 +241,7 @@ class TrackingDict(dict):
                     if self._column_tracker._cell_id is not None:
                         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                         DataFrameProvenanceTracker.record_var_write(value, self._column_tracker._cell_id)
-            elif isinstance(value, pd.Series):
+            elif _is_series(value):
                 if not _is_ipython_result_var(key):
                     self._structural_tracker.register(value, key)
         self._real_ns[key] = value

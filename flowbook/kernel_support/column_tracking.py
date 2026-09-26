@@ -27,10 +27,26 @@ from typing import Dict, Set, Iterable, Tuple, Optional, Generator, Any
 from collections import defaultdict
 
 from flowbook.util.output import log, error, timer
+from flowbook.kernel_support import cudf_compat
 
 # Threshold for skipping large primitive lists/tuples during dataframe walks.
 # Below this size, the overhead of checking isn't worth it.
 _LARGE_CONTAINER_THRESHOLD = 1000
+
+def _is_dataframe(obj) -> bool:
+    """A pandas DataFrame, including a cudf.pandas proxy DataFrame.
+
+    Proxy DataFrames are not instances of the real ``pd.DataFrame`` (the one
+    imported before ``cudf.pandas.install()``), so isinstance alone misses
+    them and their column reads and writes were never resolved to a name.
+    """
+    return isinstance(obj, pd.DataFrame) or cudf_compat._is_proxy_dataframe(obj)
+
+
+def _is_series(obj) -> bool:
+    """A pandas Series, including a cudf.pandas proxy Series."""
+    return isinstance(obj, pd.Series) or cudf_compat._is_proxy_series(obj)
+
 
 def _column_label_strings(key) -> list:
     """Normalize a column-label key to a list of string column names.
@@ -61,6 +77,80 @@ def _column_label_strings_from_iterable(keys) -> list:
     for k in keys:
         out.extend(_column_label_strings(k))
     return out
+
+
+def _key_label_strings(key) -> list:
+    """String column names selected by a ``df[key]`` key.
+
+    Lists and Indexes (including cudf.pandas proxy Indexes, which are not
+    instances of the real ``pd.Index``) are flattened; anything else goes
+    through ``_column_label_strings``.
+    """
+    if isinstance(key, str):
+        return [key]
+    if isinstance(key, (list, pd.Index)):
+        return _column_label_strings_from_iterable(key)
+    if cudf_compat._is_proxy_index(key):
+        return _column_label_strings_from_iterable(list(key))
+    return _column_label_strings(key)
+
+
+# Recording logic shared by the pandas DataFrame patches below and the
+# cudf.pandas proxy DataFrame patches in cudf_compat, so both record the same
+# reads, writes, dtype changes, deletions and provenance.
+
+def _record_df_getitem(tracker: "ColumnAccessTracker", df, key) -> None:
+    """Record the column reads of ``df[key]``."""
+    str_keys = _key_label_strings(key)
+    if str_keys:
+        tracker.record_read(id(df), str_keys)
+
+
+def _record_df_setitem_before(tracker: "ColumnAccessTracker", df, key) -> dict:
+    """Record the column writes of ``df[key] = ...``; returns pre-write dtypes.
+
+    Uses df.dtypes[key] instead of df[key].dtype to avoid triggering the
+    __getitem__ patch (which would record a spurious column read).
+    """
+    old_dtypes = {}
+    if tracker._cell_id is not None:
+        dtypes = df.dtypes
+        if isinstance(key, str) and key in df.columns:
+            old_dtypes[key] = dtypes[key]
+        elif isinstance(key, list):
+            for k in key:
+                if isinstance(k, str) and k in df.columns:
+                    old_dtypes[k] = dtypes[k]
+    # Labels normalized via str, matching the diff's column naming
+    str_keys = _key_label_strings(key)
+    if str_keys:
+        tracker.record_write(id(df), str_keys)
+        # Record column provenance (first writer wins)
+        if tracker._cell_id is not None:
+            from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+            for k in str_keys:
+                DataFrameProvenanceTracker.record_column_write(df, k, tracker._cell_id)
+    return old_dtypes
+
+
+def _record_df_setitem_after(tracker: "ColumnAccessTracker", df, old_dtypes: dict) -> None:
+    """Record dtype changes made by ``df[key] = ...``."""
+    if tracker._cell_id is None or not old_dtypes:
+        return
+    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+    new_dtypes = df.dtypes
+    for col, old_dt in old_dtypes.items():
+        if col in df.columns and new_dtypes[col] != old_dt:
+            DataFrameProvenanceTracker.record_dtype_change(df, col, tracker._cell_id)
+            tracker.record_dtype_change(id(df), col)
+
+
+def _record_df_delitem(tracker: "ColumnAccessTracker", df, key) -> None:
+    """Record the column deletion of ``del df[key]``."""
+    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+    for k in _column_label_strings(key):
+        DataFrameProvenanceTracker.record_column_delete(df, k, tracker._cell_id)
+        tracker.record_column_deletion(id(df), k)
 
 
 # DataFrame methods that read the data of EVERY column. Each is patched with
@@ -199,6 +289,10 @@ class ColumnAccessTracker:
         """
         self._cell_id = cell_id
         self._ensure_patches_installed()
+        # cudf.pandas may be loaded after the patches were installed (e.g.
+        # `%load_ext cudf.pandas` in a cell); its proxy classes are patched
+        # the first time they exist.
+        cudf_compat.ensure_cudf_pandas_proxy_tracking()
         ColumnAccessTracker._set_active_tracker(self)
 
     def deactivate(self) -> None:
@@ -420,14 +514,7 @@ class ColumnAccessTracker:
         def tracked_df_getitem(df: pd.DataFrame, key):
             tracker = ColumnAccessTracker._get_active_tracker()
             if tracker is not None:
-                # Track column access (labels normalized via str, matching
-                # the diff's column naming — see _column_label_strings)
-                if isinstance(key, (list, pd.Index)):
-                    str_keys = _column_label_strings_from_iterable(key)
-                else:
-                    str_keys = _column_label_strings(key)
-                if str_keys:
-                    tracker.record_read(id(df), str_keys)
+                _record_df_getitem(tracker, df, key)
             return original_df_getitem(df, key)
 
         pd.DataFrame.__getitem__ = tracked_df_getitem
@@ -438,44 +525,12 @@ class ColumnAccessTracker:
 
         def tracked_df_setitem(df: pd.DataFrame, key, value):
             tracker = ColumnAccessTracker._get_active_tracker()
+            old_dtypes = None
             if tracker is not None:
-                # Snapshot dtype before write for dtype-change provenance.
-                # Use df.dtypes[key] instead of df[key].dtype to avoid
-                # triggering tracked_df_getitem (which would record a
-                # spurious column read).
-                old_dtypes = {}
-                if tracker._cell_id is not None:
-                    dtypes = df.dtypes
-                    if isinstance(key, str) and key in df.columns:
-                        old_dtypes[key] = dtypes[key]
-                    elif isinstance(key, list):
-                        for k in key:
-                            if isinstance(k, str) and k in df.columns:
-                                old_dtypes[k] = dtypes[k]
-                # Track column writes (labels normalized via str, matching
-                # the diff's column naming — see _column_label_strings)
-                if isinstance(key, (list, pd.Index)):
-                    str_keys = _column_label_strings_from_iterable(key)
-                else:
-                    str_keys = _column_label_strings(key)
-                if str_keys:
-                    tracker.record_write(id(df), str_keys)
-                    # Record column provenance (first writer wins)
-                    if tracker._cell_id is not None:
-                        from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
-                        for k in str_keys:
-                            DataFrameProvenanceTracker.record_column_write(df, k, tracker._cell_id)
+                old_dtypes = _record_df_setitem_before(tracker, df, key)
             result = original_df_setitem(df, key, value)
-            # Check for dtype changes after write.
-            # Use df.dtypes[col] instead of df[col].dtype to avoid triggering
-            # tracked_df_getitem (which would record a spurious column read).
-            if tracker is not None and tracker._cell_id is not None and old_dtypes:
-                from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
-                new_dtypes = df.dtypes
-                for col, old_dt in old_dtypes.items():
-                    if col in df.columns and new_dtypes[col] != old_dt:
-                        DataFrameProvenanceTracker.record_dtype_change(df, col, tracker._cell_id)
-                        tracker.record_dtype_change(id(df), col)
+            if tracker is not None:
+                _record_df_setitem_after(tracker, df, old_dtypes)
             return result
 
         pd.DataFrame.__setitem__ = tracked_df_setitem
@@ -487,10 +542,7 @@ class ColumnAccessTracker:
         def tracked_df_delitem(df: pd.DataFrame, key):
             tracker = ColumnAccessTracker._get_active_tracker()
             if tracker is not None:
-                for k in _column_label_strings(key):
-                    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
-                    DataFrameProvenanceTracker.record_column_delete(df, k, tracker._cell_id)
-                    tracker.record_column_deletion(id(df), k)
+                _record_df_delitem(tracker, df, key)
             return original_df_delitem(df, key)
 
         pd.DataFrame.__delitem__ = tracked_df_delitem
@@ -1151,7 +1203,7 @@ def walk_dataframes(
         if isinstance(val, types.ModuleType):
             continue
 
-        if isinstance(val, pd.DataFrame):
+        if _is_dataframe(val):
             yield path, val
         elif isinstance(val, dict):
             yield from walk_dataframes(val, path, visited)
@@ -1172,7 +1224,7 @@ def walk_dataframes(
                 if isinstance(item, types.ModuleType):
                     continue
                 item_path = f"{path}[{i}]"
-                if isinstance(item, pd.DataFrame):
+                if _is_dataframe(item):
                     yield item_path, item
                 elif isinstance(item, dict):
                     yield from walk_dataframes(item, item_path, visited)
@@ -1221,7 +1273,7 @@ def _walk_object_attrs(
 
         path = f"{prefix}.{attr_name}"
 
-        if isinstance(attr_val, pd.DataFrame):
+        if _is_dataframe(attr_val):
             yield path, attr_val
         elif isinstance(attr_val, dict):
             yield from walk_dataframes(attr_val, path, visited)
@@ -1241,7 +1293,7 @@ def _walk_object_attrs(
                 if isinstance(item, types.ModuleType):
                     continue
                 item_path = f"{path}[{i}]"
-                if isinstance(item, pd.DataFrame):
+                if _is_dataframe(item):
                     yield item_path, item
                 elif hasattr(item, '__dict__') and not callable(item):
                     yield from _walk_object_attrs(item, item_path, visited)
@@ -1301,9 +1353,9 @@ def walk_pandas_objects(
         if isinstance(val, types.ModuleType):
             continue
 
-        if isinstance(val, pd.DataFrame):
+        if _is_dataframe(val):
             yield path, val
-        elif isinstance(val, pd.Series):
+        elif _is_series(val):
             yield path, val
         elif isinstance(val, dict):
             yield from walk_pandas_objects(val, path, visited)
@@ -1324,9 +1376,9 @@ def walk_pandas_objects(
                 if isinstance(item, types.ModuleType):
                     continue
                 item_path = f"{path}[{i}]"
-                if isinstance(item, pd.DataFrame):
+                if _is_dataframe(item):
                     yield item_path, item
-                elif isinstance(item, pd.Series):
+                elif _is_series(item):
                     yield item_path, item
                 elif isinstance(item, dict):
                     yield from walk_pandas_objects(item, item_path, visited)
@@ -1375,9 +1427,9 @@ def _walk_object_attrs_pandas(
 
         path = f"{prefix}.{attr_name}"
 
-        if isinstance(attr_val, pd.DataFrame):
+        if _is_dataframe(attr_val):
             yield path, attr_val
-        elif isinstance(attr_val, pd.Series):
+        elif _is_series(attr_val):
             yield path, attr_val
         elif isinstance(attr_val, dict):
             yield from walk_pandas_objects(attr_val, path, visited)
@@ -1397,9 +1449,9 @@ def _walk_object_attrs_pandas(
                 if isinstance(item, types.ModuleType):
                     continue
                 item_path = f"{path}[{i}]"
-                if isinstance(item, pd.DataFrame):
+                if _is_dataframe(item):
                     yield item_path, item
-                elif isinstance(item, pd.Series):
+                elif _is_series(item):
                     yield item_path, item
                 elif hasattr(item, '__dict__') and not callable(item):
                     yield from _walk_object_attrs_pandas(item, item_path, visited)

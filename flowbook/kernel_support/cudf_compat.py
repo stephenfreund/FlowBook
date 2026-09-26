@@ -169,6 +169,8 @@ In deepcopy:
 
 from __future__ import annotations
 
+import sys
+import types
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from flowbook.util.output import timer
@@ -360,9 +362,13 @@ _cudf_tracker: Optional['ColumnAccessTracker'] = None
 # Mapping from cudf GroupBy id -> source DataFrame id
 _cudf_groupby_to_df: Dict[int, int] = {}
 
-# Storage for cudf.pandas proxy patches (separate from native cudf patches)
+# Storage for cudf.pandas proxy patches (separate from native cudf patches).
+# _requested: a tracker asked for proxy tracking; _installed: the proxy
+# classes are patched (possible only once cudf.pandas is installed).
+_cudf_pandas_proxy_tracking_requested: bool = False
 _cudf_pandas_proxy_patches_installed: bool = False
 _cudf_pandas_original_methods: Dict[str, Any] = {}
+_CUDF_PANDAS_WRAPPERS_MODULE = 'cudf.pandas._wrappers.pandas'
 
 
 def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
@@ -523,78 +529,110 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
 
 def install_cudf_pandas_proxy_tracking(tracker: 'ColumnAccessTracker') -> None:
     """
-    Install column tracking patches on cudf.pandas proxy objects.
+    Install column tracking patches on cudf.pandas proxy DataFrames.
 
-    This is needed because cudf.pandas wraps DataFrames in _FastSlowProxy,
-    which intercepts __setitem__/__getitem__ before they reach pandas/cudf.
-    Without this, column writes like `df['col'] = value` are not tracked
-    when using cudf.pandas mode.
+    cudf.pandas generates a proxy class per pandas type (``pd.DataFrame`` is
+    such a class once cudf.pandas is installed), and each defines its own
+    ``__getitem__``/``__setitem__``/``__delitem__``, so the patches have to go
+    on the generated DataFrame class itself; patching the ``_FastSlowProxy``
+    base class has no effect. The class exists only after
+    ``cudf.pandas.install()``, which in a notebook usually runs after the
+    tracker is set up (``%load_ext cudf.pandas`` in a cell), so this records
+    the request and ``ensure_cudf_pandas_proxy_tracking`` (called on every
+    tracker activation) applies the patches as soon as the class exists.
     """
-    global _cudf_pandas_proxy_patches_installed, _cudf_pandas_original_methods, _cudf_tracker
-
-    _init_cudf_pandas_detection()
-    if not _HAS_CUDF_PANDAS or _cudf_pandas_proxy_type is None:
-        return
-
-    if _cudf_pandas_proxy_patches_installed:
-        return
+    global _cudf_pandas_proxy_tracking_requested, _cudf_tracker
 
     _cudf_tracker = tracker
+    _cudf_pandas_proxy_tracking_requested = True
+    ensure_cudf_pandas_proxy_tracking()
 
-    # Patch _FastSlowProxy.__setitem__
-    if hasattr(_cudf_pandas_proxy_type, '__setitem__'):
-        _cudf_pandas_original_methods['__setitem__'] = _cudf_pandas_proxy_type.__setitem__
-        original_setitem = _cudf_pandas_original_methods['__setitem__']
 
-        def tracked_proxy_setitem(proxy_self, key, value):
-            # Only track if this is a DataFrame proxy
-            if _cudf_tracker is not None and _is_proxy_dataframe(proxy_self):
-                if isinstance(key, str):
-                    _cudf_tracker.record_write(id(proxy_self), [key])
-                elif isinstance(key, list):
-                    str_keys = [k for k in key if isinstance(k, str)]
-                    if str_keys:
-                        _cudf_tracker.record_write(id(proxy_self), str_keys)
-            return original_setitem(proxy_self, key, value)
+def ensure_cudf_pandas_proxy_tracking() -> None:
+    """Patch the cudf.pandas proxy DataFrame class once cudf.pandas is installed.
 
-        _cudf_pandas_proxy_type.__setitem__ = tracked_proxy_setitem
+    Cheap when there is nothing to do (a flag check and a sys.modules lookup),
+    since it runs on every tracker activation.
+    """
+    global _cudf_pandas_proxy_patches_installed
 
-    # Patch _FastSlowProxy.__getitem__
-    if hasattr(_cudf_pandas_proxy_type, '__getitem__'):
-        _cudf_pandas_original_methods['__getitem__'] = _cudf_pandas_proxy_type.__getitem__
-        original_getitem = _cudf_pandas_original_methods['__getitem__']
+    if _cudf_pandas_proxy_patches_installed or not _cudf_pandas_proxy_tracking_requested:
+        return
+    wrappers = sys.modules.get(_CUDF_PANDAS_WRAPPERS_MODULE)
+    if wrappers is None:
+        return
+    proxy_df = getattr(wrappers, 'DataFrame', None)
+    if proxy_df is None:
+        return
 
-        def tracked_proxy_getitem(proxy_self, key):
-            # Only track if this is a DataFrame proxy
-            if _cudf_tracker is not None and _is_proxy_dataframe(proxy_self):
-                if isinstance(key, str):
-                    _cudf_tracker.record_read(id(proxy_self), [key])
-                elif isinstance(key, list):
-                    str_keys = [k for k in key if isinstance(k, str)]
-                    if str_keys:
-                        _cudf_tracker.record_read(id(proxy_self), str_keys)
-            return original_getitem(proxy_self, key)
+    from flowbook.kernel_support.column_tracking import (
+        ColumnAccessTracker,
+        _record_df_getitem,
+        _record_df_setitem_before,
+        _record_df_setitem_after,
+        _record_df_delitem,
+    )
 
-        _cudf_pandas_proxy_type.__getitem__ = tracked_proxy_getitem
+    def _original(name):
+        """The class's own attribute, or None if it is already a Python
+        function (the pandas patches got there first because cudf.pandas was
+        installed before them, and they already record everything)."""
+        attr = proxy_df.__dict__.get(name)
+        if attr is None or isinstance(attr, types.FunctionType):
+            return None
+        _cudf_pandas_original_methods[name] = attr
+        return attr
+
+    original_getitem = _original('__getitem__')
+    if original_getitem is not None:
+        def tracked_proxy_getitem(df, key):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None:
+                _record_df_getitem(tracker, df, key)
+            return original_getitem.__get__(df, type(df))(key)
+
+        proxy_df.__getitem__ = tracked_proxy_getitem
+
+    original_setitem = _original('__setitem__')
+    if original_setitem is not None:
+        def tracked_proxy_setitem(df, key, value):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            old_dtypes = None
+            if tracker is not None:
+                old_dtypes = _record_df_setitem_before(tracker, df, key)
+            result = original_setitem.__get__(df, type(df))(key, value)
+            if tracker is not None:
+                _record_df_setitem_after(tracker, df, old_dtypes)
+            return result
+
+        proxy_df.__setitem__ = tracked_proxy_setitem
+
+    original_delitem = _original('__delitem__')
+    if original_delitem is not None:
+        def tracked_proxy_delitem(df, key):
+            tracker = ColumnAccessTracker._get_active_tracker()
+            if tracker is not None:
+                _record_df_delitem(tracker, df, key)
+            return original_delitem.__get__(df, type(df))(key)
+
+        proxy_df.__delitem__ = tracked_proxy_delitem
 
     _cudf_pandas_proxy_patches_installed = True
 
 
 def uninstall_cudf_pandas_proxy_tracking() -> None:
     """Restore original cudf.pandas proxy methods."""
-    global _cudf_pandas_proxy_patches_installed
+    global _cudf_pandas_proxy_patches_installed, _cudf_pandas_proxy_tracking_requested
 
+    _cudf_pandas_proxy_tracking_requested = False
     if not _cudf_pandas_proxy_patches_installed:
         return
 
-    _init_cudf_pandas_detection()
-    if _cudf_pandas_proxy_type is None:
-        return
-
-    if '__setitem__' in _cudf_pandas_original_methods:
-        _cudf_pandas_proxy_type.__setitem__ = _cudf_pandas_original_methods['__setitem__']
-    if '__getitem__' in _cudf_pandas_original_methods:
-        _cudf_pandas_proxy_type.__getitem__ = _cudf_pandas_original_methods['__getitem__']
+    wrappers = sys.modules.get(_CUDF_PANDAS_WRAPPERS_MODULE)
+    proxy_df = getattr(wrappers, 'DataFrame', None) if wrappers is not None else None
+    if proxy_df is not None:
+        for name, attr in _cudf_pandas_original_methods.items():
+            setattr(proxy_df, name, attr)
 
     _cudf_pandas_original_methods.clear()
     _cudf_pandas_proxy_patches_installed = False
@@ -1509,6 +1547,36 @@ def are_both_cudf_same_type(obj1: Any, obj2: Any) -> bool:
     return False
 
 
+def _cudf_values_equal(s1: Any, s2: Any, ignore_index: bool = False) -> bool:
+    """
+    Value equality of two cudf Series with pandas semantics for missing data.
+
+    cudf's ``Series.equals`` treats NaN as unequal to NaN (pandas' ``equals``
+    treats them as equal), so a float column holding NaN never equals its own
+    copy and every diff of it reported a change. Here nulls and NaN are both
+    missing values and compare equal to each other. With ``ignore_index`` the
+    values are compared by position.
+    """
+    if ignore_index:
+        s1 = s1.reset_index(drop=True)
+        s2 = s2.reset_index(drop=True)
+    if len(s1) != len(s2) or str(s1.dtype) != str(s2.dtype):
+        return False
+    try:
+        if s1.equals(s2):
+            return True
+    except Exception:
+        pass
+    if getattr(s1.dtype, 'kind', None) != 'f':
+        return False
+    # Missing positions must agree; everywhere else values are equal or both NaN
+    # (nulls propagate through the comparisons and are filled as equal).
+    if not bool((s1.isnull() == s2.isnull()).all()):
+        return False
+    same = (s1 == s2) | ((s1 != s1) & (s2 != s2))
+    return bool(same.fillna(True).all())
+
+
 def _diff_cudf_gpu_dataframe(obj1: Any, obj2: Any, path: str, differ: Any) -> Optional[Any]:
     """
     GPU-native DataFrame diff. Compares cudf DataFrames entirely on GPU.
@@ -1518,7 +1586,10 @@ def _diff_cudf_gpu_dataframe(obj1: Any, obj2: Any, path: str, differ: Any) -> Op
 
     Slow path: for changed DataFrames, compares column-by-column on GPU
     using cudf operations, producing the same CompoundDiff output as the
-    pandas path.
+    pandas path (Diff._compare_dataframe): added/removed columns as
+    "only in second/first DataFrame" column entries, ``_structural_columns``
+    (added names only) through the differ's structural-mode check, and
+    ``_index`` for an index change.
     """
     from flowbook.kernel_support.types import CompoundDiff, ValueComparison
 
@@ -1528,6 +1599,7 @@ def _diff_cudf_gpu_dataframe(obj1: Any, obj2: Any, path: str, differ: Any) -> Op
     len1, len2 = len(obj1), len(obj2)
     cols1 = list(obj1.columns)
     cols2 = list(obj2.columns)
+    cols1_set, cols2_set = set(cols1), set(cols2)
 
     if len1 != len2:
         children['_structural_rows'] = ValueComparison(
@@ -1535,19 +1607,26 @@ def _diff_cudf_gpu_dataframe(obj1: Any, obj2: Any, path: str, differ: Any) -> Op
             message=f"from {len1} to {len2}",
         )
 
-    if cols1 != cols2:
-        added = set(cols2) - set(cols1)
-        removed = set(cols1) - set(cols2)
-        if added or removed:
-            parts = []
-            if added:
-                parts.append(f"added {sorted(added)}")
-            if removed:
-                parts.append(f"removed {sorted(removed)}")
-            children['_structural_columns'] = ValueComparison(
-                status="different", value1=cols1, value2=cols2,
-                message="; ".join(parts),
-            )
+    added = [c for c in cols2 if c not in cols1_set]
+    removed = [c for c in cols1 if c not in cols2_set]
+    if added:
+        added_names = sorted(str(c) for c in added)
+        structural_diff = differ._check_structural_change(
+            path, 'columns', f"Columns added: {added_names}",
+            value1=[], value2=added_names,
+        )
+        if structural_diff:
+            children['_structural_columns'] = structural_diff
+    for col in sorted(removed, key=str):
+        children[f"['{col}']"] = ValueComparison(
+            status="different", value1="<cudf column>", value2=None,
+            message=f"Column '{col}' only in first DataFrame",
+        )
+    for col in sorted(added, key=str):
+        children[f"['{col}']"] = ValueComparison(
+            status="different", value1=None, value2="<cudf column>",
+            message=f"Column '{col}' only in second DataFrame",
+        )
 
     # If row count changed, return early (can't compare column values)
     if len1 != len2:
@@ -1565,8 +1644,19 @@ def _diff_cudf_gpu_dataframe(obj1: Any, obj2: Any, path: str, differ: Any) -> Op
     except Exception:
         pass  # Fall through to per-column comparison
 
+    # Index change: record it and compare the columns by position
+    try:
+        index_equal = obj1.index.equals(obj2.index)
+    except Exception:
+        index_equal = False
+    if not index_equal:
+        children['_index'] = ValueComparison(
+            status="different", value1="<cudf index>", value2="<cudf index (changed)>",
+            message=f"DataFrame index mismatch at {path}",
+        )
+
     # Determine which columns to compare (respect column_rbw filter)
-    common_cols = [c for c in cols1 if c in set(cols2)]
+    common_cols = [c for c in cols1 if c in cols2_set]
     if hasattr(differ, 'column_rbw') and differ.column_rbw:
         # Only compare columns that were read-before-write
         rbw_cols = differ.column_rbw.get(path, None)
@@ -1587,12 +1677,8 @@ def _diff_cudf_gpu_dataframe(obj1: Any, obj2: Any, path: str, differ: Any) -> Op
                 )
                 continue
 
-            # Value equality on GPU
-            try:
-                if col1.equals(col2):
-                    continue
-            except Exception:
-                pass
+            if _cudf_values_equal(col1, col2, ignore_index=not index_equal):
+                continue
 
             # Not equal — record as changed (don't need element-level detail
             # for conflict resolution, just that the column changed)
@@ -1626,7 +1712,7 @@ def _diff_cudf_gpu_series(obj1: Any, obj2: Any, path: str) -> Optional[Any]:
         return CompoundDiff(source_type="series", children=children)
 
     try:
-        if obj1.equals(obj2):
+        if obj1.index.equals(obj2.index) and _cudf_values_equal(obj1, obj2):
             return None
     except Exception:
         pass
