@@ -1272,6 +1272,10 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             # recorded as user reads
             self._patch_transform_cell(tracking_dict)
 
+            # Patch var_expand so the namespace copy behind `!cmd` lines and
+            # magic arguments is neither recorded nor read-blocked
+            self._patch_var_expand(tracking_dict)
+
             # Save initial state checkpoint (σ_0) for EXEC-RESTORE on the first cell
             # Uncopyable vars in the initial namespace are read-blocked, same
             # as during normal execution (paper semantics: warn + block reads).
@@ -1301,6 +1305,30 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                 return original_transform_cell(raw_cell)
 
         shell.transform_cell = transform_cell_untracked
+
+    def _patch_var_expand(self, tracking_dict: TrackingDict) -> None:
+        """
+        Patch shell.var_expand to run with tracking suspended.
+
+        IPython expands ``{x}``/``$x`` in a ``!cmd`` line and in magic
+        arguments with var_expand, which copies the caller's frame locals
+        (``ns.update(frame.f_locals)``). At cell level those locals are the
+        TrackingDict, so the copy reads every variable: each one is recorded
+        as a read, and a read-blocked uncopyable variable raises
+        UncopyableReadError, failing a cell as plain as ``!ls``. Shell
+        commands are already outside FlowBook's guarantees (the cell is
+        reported as untracked), so the expansion runs untracked too.
+        """
+        shell = self.shell
+        original_var_expand = shell.var_expand
+
+        def var_expand_untracked(cmd, depth=0, **kwargs):
+            # depth + 1: skip this wrapper's frame so IPython still expands
+            # against the caller's locals
+            with tracking_dict.suspended():
+                return original_var_expand(cmd, depth + 1, **kwargs)
+
+        shell.var_expand = var_expand_untracked
 
     def _patch_run_code(self, tracking_dict: TrackingDict) -> None:
         """
