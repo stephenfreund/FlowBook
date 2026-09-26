@@ -2044,23 +2044,28 @@ except ImportError:
     pass  # CatBoost not installed
 
 
-# CatBoost model handler - delegates to copy.deepcopy which handles these correctly
+# CatBoost model handler - copy.deepcopy plus the wrapper attributes it drops
 try:
-    from catboost import CatBoostRegressor, CatBoostClassifier, CatBoostRanker
+    from catboost import CatBoost, CatBoostRegressor, CatBoostClassifier, CatBoostRanker
     import copy as _copy
 
     def _deepcopy_catboost_model(model, memo: dict[int, Any]):
         """
         Deep copy a CatBoost model using Python's copy.deepcopy.
 
-        CatBoost models implement __reduce__ for proper pickling/deepcopy support.
-        This works correctly for both CPU and GPU-trained models.
+        CatBoost models implement __reduce__ for pickling/deepcopy, which
+        works for both CPU and GPU-trained models, but their __setstate__
+        restores only the model blob and a few named attributes: others set
+        on the Python wrapper, such as ``_n_features_in``, come back reset
+        (0 instead of the fitted feature count), so every checkpoint copy
+        differed from its model. Those attributes are copied over from the
+        original.
 
         Note: CatBoost 1.2+ no longer accepts BytesIO in save_model(), so we use
         copy.deepcopy instead of save_model/load_model serialization.
 
         Args:
-            model: CatBoostRegressor, CatBoostClassifier, or CatBoostRanker
+            model: CatBoost, CatBoostRegressor, CatBoostClassifier, or CatBoostRanker
             memo: Shared memo dict for tracking copied objects
 
         Returns:
@@ -2070,11 +2075,15 @@ try:
         if obj_id in memo:
             return memo[obj_id]
 
-        # Use standard deepcopy - CatBoost implements __reduce__ correctly
         model_copy = _copy.deepcopy(model, memo)
+        # _object (the C++ model) is rebuilt from the blob by __setstate__
+        for name, value in model.__dict__.items():
+            if name != '_object':
+                model_copy.__dict__[name] = _copy.deepcopy(value, memo)
         memo[obj_id] = model_copy
         return model_copy
 
+    d[CatBoost] = _deepcopy_catboost_model
     d[CatBoostRegressor] = _deepcopy_catboost_model
     d[CatBoostClassifier] = _deepcopy_catboost_model
     d[CatBoostRanker] = _deepcopy_catboost_model

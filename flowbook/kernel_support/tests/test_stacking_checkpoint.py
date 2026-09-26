@@ -2,7 +2,7 @@
 
 NOTE: Unlike SHAP/TargetEncoder, Stacking estimators do NOT have a custom deepcopy
 handler because fitted model objects are mutable (partial_fit, attribute modification).
-We only optimize the diff comparison using identity checks.
+The diff compares estimators by identity first and by value otherwise.
 """
 
 import pytest
@@ -259,16 +259,16 @@ class TestStackingDiff:
 
         assert 'stacking' not in result.differences
 
-    def test_diff_copied_estimators_different(self, fitted_stacking_regressor):
-        """Copied estimators should be detected as different (different objects)."""
+    def test_diff_copied_estimators_equal(self, fitted_stacking_regressor):
+        """A deep copy compares equal: estimators are compared by value when
+        they are different objects (checkpoint copies never share them)."""
         stacking, _ = fitted_stacking_regressor
         copy = flowbook_deepcopy(stacking)
 
         diff = Diff()
         result = diff.diff({'stacking': stacking}, {'stacking': copy})
 
-        # Since they're different objects, they should be detected as different
-        assert 'stacking' in result.differences
+        assert 'stacking' not in result.differences
 
     def test_diff_different_estimators(self, regression_data):
         """Different stacking estimators should be detected."""

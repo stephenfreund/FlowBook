@@ -285,7 +285,12 @@ class DataFrameSubsetDetector:
         # 3. Check index subset (required for row_indices)
         with timer(key="subset:03_get_indexer"):
             try:
-                row_indices = parent_df.index.get_indexer(child_df.index)
+                # np.asarray: under cudf.pandas get_indexer returns a proxy
+                # ndarray, which iloc on the checkpointed (native cudf)
+                # parent cannot index with when the subset is rebuilt.
+                row_indices = np.asarray(
+                    parent_df.index.get_indexer(child_df.index), dtype=np.intp
+                )
                 if -1 in row_indices:
                     return _cache_none()
             except Exception:
@@ -402,7 +407,8 @@ def reconstruct_from_subset(
         Reconstructed child DataFrame
     """
     # 1. Select rows from parent using integer positions
-    child_df = parent_df.iloc[relation.row_indices][relation.common_columns].copy()
+    row_indices = np.asarray(relation.row_indices, dtype=np.intp)
+    child_df = parent_df.iloc[row_indices][relation.common_columns].copy()
 
     # 2. Add extra columns if any
     if relation.extra_columns and relation.extra_data is not None:
