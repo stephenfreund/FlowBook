@@ -844,7 +844,11 @@ variable). Reads that bypass the namespace mapping entirely (aliases
 created before the variable became uncopyable, `keys()`/name-only
 iteration) are not blocked. Shell lines (`!cmd`) run untracked and emit
 a visible warning that their file/environment effects are outside the
-guarantees.
+guarantees. That includes IPython's expansion of `{x}`/`$x` in a shell
+line or a magic's arguments (`var_expand`): it copies the whole namespace,
+so it runs with tracking suspended and neither records reads nor raises
+`UncopyableReadError` — a variable used only in such an expansion is not
+in Rᵢ.
 
 **Code:**
 
@@ -854,7 +858,10 @@ guarantees.
   `kernel_support/base_kernel.py`
 - Policy selection: uncopyable handling in `do_execute` and
   `_uncopyable_as_write` in `kernel/flowbook_kernel.py`
-- Tests: `kernel/tests/test_uncopyable_as_write.py`
+- Untracked shell/magic expansion: `_patch_var_expand()` in
+  `kernel/flowbook_kernel.py`
+- Tests: `kernel/tests/test_uncopyable_as_write.py`,
+  `kernel/tests/test_var_expand_untracked.py`
 
 ---
 
