@@ -21,6 +21,8 @@ Design:
     - record_var_write resets ALL provenance (DataFrame was replaced/created).
     - Provenance travels with the object via df.attrs, surviving
       copy(deep=False), aliasing, and checkpoint/restore.
+    - cudf.pandas proxy DataFrames keep it in a private attribute on the proxy
+      instead (see _provenance_store), which does not travel to copies.
 """
 
 import copy as copy_module
@@ -28,7 +30,32 @@ from typing import Dict, Optional, Set
 
 import pandas as pd
 
+from flowbook.kernel_support import cudf_compat
+
 PROVENANCE_KEY = '_flowbook_provenance'
+
+# Attribute holding the provenance dict on a cudf.pandas proxy DataFrame.
+_PROXY_STORE_ATTR = '_flowbook_provenance_store'
+
+
+def _provenance_store(df) -> dict:
+    """The dict that holds a DataFrame's provenance.
+
+    For a pandas DataFrame this is ``df.attrs``. A cudf.pandas proxy DataFrame
+    must not touch ``attrs``: cudf.DataFrame has none, so cudf.pandas converts
+    a GPU-backed proxy to pandas to serve it and keeps it on the CPU from then
+    on, and every later operation on the frame runs in pandas (it made the
+    evaluation's RAPIDS notebooks several times slower). The proxy keeps the
+    dict in a private attribute instead; cudf.pandas stores underscore
+    attributes on the proxy itself without converting it.
+    """
+    if cudf_compat.is_cudf_proxy(df):
+        store = df.__dict__.get(_PROXY_STORE_ATTR)
+        if store is None:
+            store = {}
+            object.__setattr__(df, _PROXY_STORE_ATTR, store)
+        return store
+    return df.attrs
 
 
 class DataFrameProvenance:
@@ -72,10 +99,10 @@ class DataFrameProvenanceTracker:
     @staticmethod
     def _get_or_create(df: pd.DataFrame) -> DataFrameProvenance:
         """Get existing provenance or create a fresh one."""
-        prov = df.attrs.get(PROVENANCE_KEY)
+        prov = _provenance_store(df).get(PROVENANCE_KEY)
         if prov is None:
             prov = DataFrameProvenance()
-            df.attrs[PROVENANCE_KEY] = prov
+            _provenance_store(df)[PROVENANCE_KEY] = prov
         return prov
 
     # ── Recording methods ──────────────────────────────────────────────
@@ -90,7 +117,7 @@ class DataFrameProvenanceTracker:
         """
         prov = DataFrameProvenance()
         prov.col_origins = {str(col): cell_id for col in df.columns}
-        df.attrs[PROVENANCE_KEY] = prov
+        _provenance_store(df)[PROVENANCE_KEY] = prov
 
     @staticmethod
     def record_column_write(
@@ -141,12 +168,12 @@ class DataFrameProvenanceTracker:
     @staticmethod
     def get_provenance(df: pd.DataFrame) -> Optional[DataFrameProvenance]:
         """Get the provenance object, or None if not set."""
-        return df.attrs.get(PROVENANCE_KEY)
+        return _provenance_store(df).get(PROVENANCE_KEY)
 
     @staticmethod
     def get_origins(df: pd.DataFrame) -> Dict[str, str]:
         """Read the column origins dict."""
-        prov = df.attrs.get(PROVENANCE_KEY)
+        prov = _provenance_store(df).get(PROVENANCE_KEY)
         return prov.col_origins if prov is not None else {}
 
     @staticmethod
@@ -154,7 +181,7 @@ class DataFrameProvenanceTracker:
         df: pd.DataFrame, cell_id: str
     ) -> Set[str]:
         """Return the set of columns whose origin is the given cell_id."""
-        prov = df.attrs.get(PROVENANCE_KEY)
+        prov = _provenance_store(df).get(PROVENANCE_KEY)
         if prov is None:
             return set()
         return {col for col, cid in prov.col_origins.items() if cid == cell_id}
@@ -164,7 +191,7 @@ class DataFrameProvenanceTracker:
         df: pd.DataFrame, col_name: str, cell_id: str
     ) -> bool:
         """Check if a column was first created by the given cell."""
-        prov = df.attrs.get(PROVENANCE_KEY)
+        prov = _provenance_store(df).get(PROVENANCE_KEY)
         return prov is not None and prov.col_origins.get(col_name) == cell_id
 
     @staticmethod
@@ -172,7 +199,7 @@ class DataFrameProvenanceTracker:
         df: pd.DataFrame, col_name: str, cell_id: str
     ) -> bool:
         """Check if a column was first deleted by the given cell."""
-        prov = df.attrs.get(PROVENANCE_KEY)
+        prov = _provenance_store(df).get(PROVENANCE_KEY)
         return prov is not None and prov.col_deletions.get(col_name) == cell_id
 
     @staticmethod
@@ -180,17 +207,17 @@ class DataFrameProvenanceTracker:
         df: pd.DataFrame, col_name: str, cell_id: str
     ) -> bool:
         """Check if a column's dtype was first changed by the given cell."""
-        prov = df.attrs.get(PROVENANCE_KEY)
+        prov = _provenance_store(df).get(PROVENANCE_KEY)
         return prov is not None and prov.dtype_origins.get(col_name) == cell_id
 
     @staticmethod
     def is_row_mutator(df: pd.DataFrame, cell_id: str) -> bool:
         """Check if the given cell mutated rows."""
-        prov = df.attrs.get(PROVENANCE_KEY)
+        prov = _provenance_store(df).get(PROVENANCE_KEY)
         return prov is not None and cell_id in prov.row_mutators
 
     @staticmethod
     def is_index_mutator(df: pd.DataFrame, cell_id: str) -> bool:
         """Check if the given cell mutated the index."""
-        prov = df.attrs.get(PROVENANCE_KEY)
+        prov = _provenance_store(df).get(PROVENANCE_KEY)
         return prov is not None and cell_id in prov.index_mutators

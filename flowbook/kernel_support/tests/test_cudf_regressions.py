@@ -15,6 +15,9 @@ evaluation's two RAPIDS notebooks.
   from its checkpoint relation (proxy ndarray row indices), so it vanished from
   the checkpoint and its mutations went undetected. This needs cudf.pandas to
   be installed before FlowBook is imported.
+- Provenance recording read and wrote `df.attrs` on proxy DataFrames; cudf has
+  no attrs, so each frame the notebook named was moved to the CPU for good and
+  every later operation on it ran in pandas.
 """
 
 import os
@@ -232,10 +235,14 @@ _KERNEL_ORDER_SCRIPT = textwrap.dedent(
         del df["c"]
     data = ns.get_tracking_data()
 
+    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
     print("RESULT " + json.dumps({
         "writes": {k: sorted(v) for k, v in data.column_writes.items()},
         "reads": {k: sorted(v) for k, v in data.column_reads_before_writes.items()},
         "deletions": {k: sorted(v) for k, v in data.column_deletions.items()},
+        "state": df._fsproxy_state.name,
+        "origins": DataFrameProvenanceTracker.get_origins(df),
+        "c_deleted_by_c2": DataFrameProvenanceTracker.is_column_deleted_by(df, "c", "c2"),
     }))
     """
 )
@@ -258,6 +265,10 @@ def test_proxy_column_tracking_when_cudf_pandas_installed_after_tracker():
     assert data["writes"] == {"df": ["b"]}
     assert data["reads"] == {"df": ["a"]}
     assert data["deletions"] == {"df": ["c"]}
+    # Provenance is recorded without moving the frame off the GPU
+    assert data["state"] == "FAST"
+    assert data["origins"] == {"a": "c1", "b": "c1"}  # first writer wins
+    assert data["c_deleted_by_c2"]
 
 
 _SUBSET_SCRIPT = textwrap.dedent(
@@ -322,3 +333,44 @@ def test_is_dataframe_recognizes_proxy_dataframes(cudf_pandas):
     assert _is_series(df["a"])
     assert not _is_dataframe(df["a"])
     assert not _is_series(df)
+
+
+def test_provenance_keeps_proxy_dataframe_on_gpu(cudf_pandas):
+    """Recording and reading provenance must not move a proxy to pandas."""
+    from cudf.pandas.fast_slow_proxy import _State
+    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+
+    pd = cudf_pandas
+    df = pd.DataFrame({"a": [1, 2], "b": [3.0, 4.0]})
+    assert df._fsproxy_state is _State.FAST
+
+    DataFrameProvenanceTracker.record_var_write(df, "c1")
+    DataFrameProvenanceTracker.record_column_write(df, "c", "c2")
+    DataFrameProvenanceTracker.record_dtype_change(df, "a", "c3")
+    DataFrameProvenanceTracker.record_column_delete(df, "b", "c4")
+
+    assert df._fsproxy_state is _State.FAST
+    assert DataFrameProvenanceTracker.get_origins(df) == {"a": "c1", "c": "c2"}
+    assert DataFrameProvenanceTracker.is_dtype_changed_by(df, "a", "c3")
+    assert DataFrameProvenanceTracker.is_column_deleted_by(df, "b", "c4")
+    assert df._fsproxy_state is _State.FAST
+
+
+def test_namespace_assignment_keeps_proxy_dataframe_on_gpu(cudf_pandas):
+    """Assigning a proxy in a tracked cell records provenance on the GPU frame.
+
+    Column writes are checked in the kernel-order subprocess test, since the
+    proxy patches depend on when cudf.pandas was installed.
+    """
+    from cudf.pandas.fast_slow_proxy import _State
+    from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
+    from flowbook.kernel_support.tracking import TrackingDict
+
+    pd = cudf_pandas
+    ns = TrackingDict()
+    with ns.track_execution("c1"):
+        ns["df"] = pd.DataFrame({"a": [1, 2, 3]})
+
+    df = ns["df"]
+    assert df._fsproxy_state is _State.FAST
+    assert DataFrameProvenanceTracker.get_origins(df) == {"a": "c1"}
