@@ -42,11 +42,16 @@ def _get_session(ctx: Context) -> NotebookSession:
 
 
 def _cell_label(session: NotebookSession, cell_id: str) -> str:
-    """Convert cell_id to @A label using code cell order."""
+    """Position label for display: ``#12`` (1-based place in code-cell order).
+
+    IDs are alpha (``A``, ``AX``) and positions used to be alpha too (``@AY``),
+    which drift apart by one after every insert and look alike; agents passed
+    the label where an ID was required and overwrote the wrong cell. A numeric
+    position cannot be mistaken for an ID.
+    """
     order = session.get_cell_order()
     try:
-        idx = order.index(cell_id)
-        return index_to_alpha(idx)
+        return f"#{order.index(cell_id) + 1}"
     except ValueError:
         return cell_id
 
@@ -266,8 +271,8 @@ def list_cells(ctx: Context) -> str:
 def get_all_cell_sources(ctx: Context) -> str:
     """Return the source code of all code cells in one response.
 
-    Each cell is shown with its @-label, 4-char ID, and status, separated
-    by clear boundary markers. This is much cheaper than calling get_cell
+    Each cell is shown with its position (#n), its ID in brackets, and status,
+    separated by clear boundary markers. Tools take the ID, never the position. This is much cheaper than calling get_cell
     for each cell individually when you need to see the full notebook.
     """
     session = _get_session(ctx)
@@ -279,7 +284,7 @@ def get_all_cell_sources(ctx: Context) -> str:
 
     parts = []
     for idx, cid in enumerate(cell_order):
-        label = index_to_alpha(idx)
+        label = f"#{idx + 1}"
         _, cell = session._find_cell(cid)
         source = cell.get("source", "")
         if isinstance(source, list):

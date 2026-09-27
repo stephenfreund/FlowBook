@@ -981,8 +981,12 @@ class NotebookSession:
         else:
             self.cell_status[cell_id] = "ok"
 
-        # Structured trace record (raw, untruncated; see _trace_event)
+        # Structured trace record (raw, untruncated; see _trace_event). ``stdout``
+        # is what the cell printed (stream outputs, capped) so an offline consumer
+        # can see the values a cell showed at that execution.
         errors = list(fb_meta.get("errors", [])) if fb_meta else []
+        stdout = "".join(o.get("text", "") for o in result["outputs"]
+                         if o.get("output_type") == "stream" and o.get("name") == "stdout")
         self._trace_event(
             "run",
             cell_id=cell_id,
@@ -991,6 +995,7 @@ class NotebookSession:
             cell_order=cell_order,
             status=result["status"],
             execution_count=result.get("execution_count"),
+            stdout=stdout[:4096],
             stale_cells=sorted(fb_meta.get("stale_cells", [])) if fb_meta else None,
             stale_after=sorted(self._stale_cells),
             errors=errors,
@@ -1278,7 +1283,22 @@ class NotebookSession:
             if result:
                 return result
 
-        return cli_save_notebook(self.notebook, output_path=save_path)
+        return cli_save_notebook(self._notebook_for_save(), output_path=save_path)
+
+    def _notebook_for_save(self) -> Dict[str, Any]:
+        """The notebook as written to disk. With FLOWBOOK_STALE_OUTPUTS_ON_SAVE=clear
+        (opt-in), cells FlowBook considers stale are saved *without* outputs and
+        execution count: an out-of-date output must never read as current. The
+        session's own copy keeps the outputs, so nothing changes in the kernel."""
+        mode = os.environ.get("FLOWBOOK_STALE_OUTPUTS_ON_SAVE", "").strip().lower()
+        if mode != "clear" or not self._stale_cells:
+            return self.notebook
+        nb = copy.deepcopy(self.notebook)
+        for cell in nb.get("cells", []):
+            if cell.get("cell_type") == "code" and cell.get("id") in self._stale_cells:
+                cell["outputs"] = []
+                cell["execution_count"] = None
+        return nb
 
     def _put_contents_api(self) -> Optional[str]:
         """Push the current notebook to JupyterLab via Contents API PUT.

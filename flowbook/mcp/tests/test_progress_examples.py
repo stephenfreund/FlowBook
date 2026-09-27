@@ -114,10 +114,10 @@ class TestUnstableWrites:
         warning_line = next(
             ln for ln in result2.splitlines() if ln.startswith("warning:")
         )
-        assert "@B" in warning_line
+        assert "#2" in warning_line
         assert "POTENTIAL NON-TERMINATION" in result2
         tail = result2.split("POTENTIAL NON-TERMINATION", 1)[1]
-        assert "@A" in tail
+        assert "#1" in tail
         assert "warnings above" in tail
         assert "Ran 21 cells" in result2
 
@@ -149,7 +149,7 @@ class TestRandomBranch:
                     for ln in result.splitlines()
                     if ln.startswith("warning:")
                 )
-                assert "@B" in warning_line
+                assert "#2" in warning_line
                 # The sweep warns and continues: it ends clean unless
                 # the branch flipped 10+ times in a row (p ≈ 2^-10).
                 assert (

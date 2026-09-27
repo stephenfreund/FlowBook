@@ -217,6 +217,11 @@ export class ViolationNoticeManager {
         case 'unrecoverable_mutation':
           message = `${htmlLocs} was modified in place, which violates rerun consistency`;
           break;
+        case 'stale_read':
+          message = causersStr
+            ? `Reads ${htmlLocs} from ${causersStr}, which is stale; re-run it first`
+            : `Reads ${htmlLocs} from a stale cell; re-run it first`;
+          break;
         default:
           message = `Violation on ${htmlLocs}`;
       }

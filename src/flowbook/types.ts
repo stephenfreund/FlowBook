@@ -88,7 +88,8 @@ export type BackendReasonType =
   | 'no_write_after_read' // Cell wrote to location read by earlier cell (was backward_mutation)
   | 'no_read_and_write' // Cell reads and writes the same location (violation-derived)
   | 'write_before_read' // Cell reads a location no cell above writes (violation-derived)
-  | 'unrecoverable_mutation'; // Cell mutated state in place without rebinding (violation-derived)
+  | 'unrecoverable_mutation' // Cell mutated state in place without rebinding (violation-derived)
+  | 'stale_read'; // Cell read a location whose last writer is stale (opt-in violation, FLOWBOOK_REJECT_STALE_READS)
 
 /**
  * Frontend-computed reason types with human-readable formatting.

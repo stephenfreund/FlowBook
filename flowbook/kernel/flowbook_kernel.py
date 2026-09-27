@@ -346,6 +346,7 @@ See checkpoint.py sections 13-14 for implementation details.
 ================================================================================
 """
 
+import inspect
 import ast
 import os
 import re
@@ -1334,41 +1335,70 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         """
         Patch shell.run_code to use TrackingDict for both globals and locals.
 
-        This enables tracking of variable reads inside list comprehensions
-        and nested functions, which would otherwise bypass our TrackingDict.
+        IPython's ``run_code`` executes ``exec(code, self.user_global_ns,
+        self.user_ns)``. Top-level names go through the locals mapping
+        (``user_ns``, already the TrackingDict), but reads inside nested
+        scopes (function bodies, comprehensions, generator expressions,
+        lambdas) compile to LOAD_GLOBAL and go through the globals mapping,
+        so that must be the TrackingDict too or those reads are invisible.
+
+        ``user_global_ns`` is a *property* on InteractiveShell (returning
+        ``user_module.__dict__``). A property is a data descriptor, so an
+        entry in the instance ``__dict__`` does not shadow it; the override
+        has to live on the class. This installs a property on the shell's
+        own class that returns the TrackingDict while a cell is running
+        (flagged per instance) and the original value otherwise.
         """
         shell = self.shell
         original_run_code = shell.run_code
+        cls = type(shell)
+        base_prop = None
+        for klass in cls.__mro__:
+            if "user_global_ns" in klass.__dict__:
+                base_prop = klass.__dict__["user_global_ns"]
+                break
+        if base_prop is not None and not getattr(cls, "_flowbook_globals_patched", False):
+            base_fget = base_prop.fget if isinstance(base_prop, property) else None
 
-        def patched_run_code(code_obj, result=None, *, async_=False):
-            """
-            Execute code using TrackingDict for both globals and locals.
+            def _user_global_ns(self_):
+                override = self_.__dict__.get("_flowbook_globals_override")
+                if override is not None:
+                    return override
+                if base_fget is not None:
+                    return base_fget(self_)
+                return self_.user_module.__dict__
 
-            This ensures all variable access is tracked, including reads
-            inside list comprehensions which use LOAD_GLOBAL.
-            """
-            # Temporarily replace both user_ns and inject tracking_dict
-            # as the globals dict for exec. We do this by temporarily
-            # swapping what user_global_ns returns.
+            cls.user_global_ns = property(_user_global_ns)
+            cls._flowbook_globals_patched = True
 
-            # Store original
-            old_user_ns = shell.user_ns
+        # IPython's run_code is a coroutine function: the override must stay in
+        # place while the coroutine *runs* (under run_ast_nodes' await), not just
+        # while it is created, so the wrapper is a coroutine function too.
+        if inspect.iscoroutinefunction(original_run_code):
 
-            try:
-                # Set both to tracking_dict so exec sees it as globals
-                shell.user_ns = tracking_dict
-                # user_global_ns is a property, but we shadow it in __dict__
-                shell.__dict__["user_global_ns"] = tracking_dict
+            async def patched_run_code(code_obj, result=None, *, async_=False):
+                """Execute code with the TrackingDict as both globals and locals."""
+                old_user_ns = shell.user_ns
+                try:
+                    shell.user_ns = tracking_dict
+                    shell.__dict__["_flowbook_globals_override"] = tracking_dict
+                    return await original_run_code(code_obj, result, async_=async_)
+                finally:
+                    shell.user_ns = old_user_ns
+                    shell.__dict__.pop("_flowbook_globals_override", None)
 
-                # Call original run_code - it will use our tracking_dict
-                return original_run_code(code_obj, result, async_=async_)
+        else:
 
-            finally:
-                # Restore
-                shell.user_ns = old_user_ns
-                # Remove the shadow
-                if "user_global_ns" in shell.__dict__:
-                    del shell.__dict__["user_global_ns"]
+            def patched_run_code(code_obj, result=None, *, async_=False):
+                """Execute code with the TrackingDict as both globals and locals."""
+                old_user_ns = shell.user_ns
+                try:
+                    shell.user_ns = tracking_dict
+                    shell.__dict__["_flowbook_globals_override"] = tracking_dict
+                    return original_run_code(code_obj, result, async_=async_)
+                finally:
+                    shell.user_ns = old_user_ns
+                    shell.__dict__.pop("_flowbook_globals_override", None)
 
         # Replace the method
         shell.run_code = patched_run_code

@@ -44,6 +44,7 @@ class ReasonType(str, Enum):
     ORDER_CHANGED = "order_changed"
     NO_WRITE_AFTER_READ = "no_write_after_read"  # was BACKWARD_MUTATION - cell wrote to location read by earlier cell
     UNRECOVERABLE_MUTATION = "unrecoverable_mutation"  # in-place mutation without rebinding
+    STALE_READ = "stale_read"  # reads a location whose last writer is stale (opt-in, FLOWBOOK_REJECT_STALE_READS)
 
 
 # =============================================================================
@@ -73,6 +74,7 @@ class ErrorType(str, Enum):
     NO_READ_BEFORE_WRITE = "no_read_before_write"  # forward contamination
     NO_WRITE_AFTER_READ = "no_write_after_read"    # backward mutation
     UNRECOVERABLE_MUTATION = "unrecoverable_mutation"  # in-place mutation without rebinding
+    STALE_READ = "stale_read"  # reads a location whose last writer is stale (opt-in, FLOWBOOK_REJECT_STALE_READS)
 
 
 @dataclass

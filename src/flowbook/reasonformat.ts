@@ -172,6 +172,21 @@ function buildReasonView(
           : 'State was modified in place, which violates rerun consistency'
       };
 
+    case 'stale_read':
+      // NoReadOfStale failed (opt-in): read a location whose last writer is stale.
+      if (loc && ref) {
+        return {
+          type: 'unknown',
+          message: `Reads \`${loc}\` from ${ref}, which is stale; re-run ${ref} first`
+        };
+      }
+      return {
+        type: 'unknown',
+        message: loc
+          ? `Reads \`${loc}\` from a stale cell; re-run it first`
+          : 'Reads a value from a stale cell; re-run it first'
+      };
+
     case 'no_write_after_read':
       // NoWriteAfterRead failed — wrote a location read by an earlier cell
       // (backward mutation).

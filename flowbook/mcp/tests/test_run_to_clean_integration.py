@@ -123,10 +123,10 @@ class TestRunToCleanEndToEnd:
         warning_line = next(
             ln for ln in result.splitlines() if ln.startswith("warning:")
         )
-        assert "@B" in warning_line
+        assert "#2" in warning_line
         assert "POTENTIAL NON-TERMINATION" in result
         tail = result.split("POTENTIAL NON-TERMINATION", 1)[1]
-        assert "@A" in tail
+        assert "#1" in tail
         assert "warnings above" in tail
         assert "Ran 21 cells" in result
 
