@@ -910,7 +910,7 @@ def insert_deepcopy(cell_id: str, variable: str, ctx: Context) -> str:
 
     Inserts `import copy; {var}_copy = copy.deepcopy({var})` and renames
     all uses of the variable in the target cell and all downstream cells.
-    Useful for in-place reassignment and sequential transformation chains.
+    Useful for in-place variable reassignment.
 
     Args:
         cell_id: Cell ID where the copy should be inserted.
@@ -954,7 +954,7 @@ def merge_cells(cell_ids: list[str], ctx: Context) -> str:
 
     Concatenates the source code of all specified cells into the first cell
     and removes the rest from the notebook. Useful for consolidating
-    tightly coupled transformation steps that form a sequential chain.
+    tightly coupled steps that transform the same variable in turn.
 
     Args:
         cell_ids: List of cell IDs to merge (in notebook order).
