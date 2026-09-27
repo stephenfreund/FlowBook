@@ -36,27 +36,26 @@ Analyze reproducibility errors from a FlowBook error report or directly from a p
 
 ### Error Categories
 
-| Category                                    | Description                                                            | Example                                 | Fix Strategy               |
-| ------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------- | -------------------------- |
-| **In-place variable reassignment**          | Cell reads and overwrites same variable                                | `train = pd.concat([train, extra])`     | Deep-copy + alpha-rename   |
-| **Sequential transformation chain**         | Downstream depends on upstream transformation                          | Imputation then feature engineering     | Deep-copy + alpha-rename   |
-| **Diagnostic inspection before mutation**   | Read-only cell captures pre-transformation state                       | `df.info()` before `df["col"] = ...`    | Cell split + `%diagnostic` |
-| **Visualization before mutation**           | Plot accesses all columns before column added                          | `sns.heatmap(df.corr())` before new col | Cell split + `%diagnostic` |
-| **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code | `model` reused for different model      | Alpha-rename downstream    |
-| **Unrecoverable in-place mutation**         | Cell mutates object without rebinding                                  | `model.fit()`, `df.drop(inplace=True)`  | See sub-types below        |
+| Category                                    | Description                                                                   | Example                                                  | Fix Strategy               |
+| ------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------- |
+| **In-place variable reassignment**          | Cell reads and overwrites the same variable, re-applying its change on rerun  | `train = pd.concat([train, extra])`                      | Deep-copy + alpha-rename   |
+| **Invalid mutation**                        | Cell mutates existing state without rebinding, which location tracking misses | `model.fit()`, `df.drop(inplace=True)`                   | See fix hints below        |
+| **Reusing variable for different purposes** | Variable reused for different purposes in disjoint regions of the code        | `model` reused for different model                       | Alpha-rename downstream    |
+| **Diagnostic inspection before mutation**   | Read-only cell (printing, `.info()`, plots) captures pre-transformation state | `df.info()` or `sns.heatmap(df.corr())` before a new col | Cell split + `%diagnostic` |
 
-### Unrecoverable Mutation Sub-types
+### Invalid Mutation: Fix Hints
 
-When the predicate is `"unrecoverable_mutation"`, identify the sub-type from the cell source:
+For an invalid mutation (usually predicate `"unrecoverable_mutation"`), pick the FIX_TYPE from the cell source.
+These kinds only choose the fix; the CATEGORY is always `Invalid mutation`:
 
-| Sub-type                  | Detection Pattern                                          | Fix Type           | Example                      |
+| Kind                      | Detection Pattern                                          | Fix Type           | Example                      |
 | ------------------------- | ---------------------------------------------------------- | ------------------ | ---------------------------- |
 | **ML model mutation**     | `.fit()`, `.fit_transform()`, `.predict()` on model/scaler | `model-copy`       | `model.fit(X, y)`            |
 | **DataFrame inplace**     | `inplace=True` argument                                    | `inplace-to-copy`  | `df.drop(col, inplace=True)` |
 | **Structural assignment** | `.columns = ...`, `.index = ...`                           | `struct-copy`      | `df.columns = ['a', 'b']`    |
 | **Container mutation**    | `.append()`, `[i] = ...` on list/dict/array                | `inplace-reassign` | `arr[5] = 99`                |
 
-**Why these are unrecoverable:** Re-executing the cell cannot restore the full value of the variable. For example, `model.fit()` only trains the model — it cannot "un-train" changes from a deleted cell. Similarly, `arr[5] = 99` sets one element but cannot restore what a deleted cell wrote to `arr[3]`.
+**Why rerunning cannot repair these:** Re-executing the cell cannot restore the full value of the variable. For example, `model.fit()` only trains the model — it cannot "un-train" changes from a deleted cell. Similarly, `arr[5] = 99` sets one element but cannot restore what a deleted cell wrote to `arr[3]`.
 
 ## Important Notes
 
@@ -76,25 +75,25 @@ After categorization, apply fixes using `flowbook/scripts/fix_repro_errors.py`.
 ### High-level fix types (single command):
 
 ```bash
-# For in-place reassignment or sequential chain:
+# For in-place variable reassignment:
 python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type inplace-reassign --variable VAR
 
 # For variable reuse:
 python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type variable-reuse --variable VAR
 
-# For ML model mutation (unrecoverable):
+# For invalid mutation of an ML model:
 python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type model-copy --variable VAR
 
-# For DataFrame inplace=True (unrecoverable):
+# For invalid mutation by DataFrame inplace=True:
 python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type inplace-to-copy --variable VAR
 
-# For structural assignment (unrecoverable):
+# For invalid mutation by structural assignment:
 python flowbook/scripts/fix_repro_errors.py NOTEBOOK @CODE_INDEX --fix-type struct-copy --variable VAR
 ```
 
-### Diagnostic/Visualization fixes (agent-driven cell splitting):
+### Diagnostic inspection fixes (agent-driven cell splitting):
 
-For diagnostic and visualization errors, the agent must analyze the cell and split it using primitive operations. **Do NOT blindly add `%diagnostic` to cells that contain mutations.**
+For diagnostic inspection errors (including plots), the agent must analyze the cell and split it using primitive operations. **Do NOT blindly add `%diagnostic` to cells that contain mutations.**
 
 The fix script provides three primitive operations:
 
@@ -109,9 +108,9 @@ python flowbook/scripts/fix_repro_errors.py NOTEBOOK @N --fix-type insert-cell-a
 python flowbook/scripts/fix_repro_errors.py NOTEBOOK @N --fix-type add-diagnostic
 ```
 
-**Index safety:** `insert-cell-after` shifts all subsequent code cell indices by 1. When applying multiple fixes to the same notebook, process diagnostic/visualization fixes from **highest code cell index to lowest** to avoid index invalidation. Other fix types (inplace-reassign, model-copy, etc.) don't insert cells and are safe in any order.
+**Index safety:** `insert-cell-after` shifts all subsequent code cell indices by 1. When applying multiple fixes to the same notebook, process diagnostic inspection fixes from **highest code cell index to lowest** to avoid index invalidation. Other fix types (inplace-reassign, model-copy, etc.) don't insert cells and are safe in any order.
 
-#### How to fix diagnostic/visualization errors:
+#### How to fix diagnostic inspection errors:
 
 1. **Read the cell source** at the error's code cell index
 2. **Classify each line** as either mutation (writes variables, assigns, calls .fit(), etc.) or diagnostic (print, display, .info(), .head(), plotting, etc.)
@@ -123,7 +122,7 @@ python flowbook/scripts/fix_repro_errors.py NOTEBOOK @N --fix-type add-diagnosti
      c. Use `set-source` to replace the original cell with mutation-only code
      d. Use `insert-cell-after` to add the diagnostic code as a new cell
      e. Use `add-diagnostic` on the new cell (which is now at @N+1)
-   - **If the cell is purely mutation** (no diagnostic code): This was miscategorized. Do NOT add `%diagnostic`. Instead, recategorize as `inplace-reassign` or `sequential-chain` and apply the appropriate deep-copy fix.
+   - **If the cell is purely mutation** (no diagnostic code): This was miscategorized. Do NOT add `%diagnostic`. Instead, recategorize it (usually In-place variable reassignment) and apply the `inplace-reassign` deep-copy fix.
 4. **Add `# [FLOWBOOK FIX]` comments** to both the mutation and diagnostic cells explaining what was done
 
 The script creates `<notebook>-fixed.ipynb` with:
@@ -261,7 +260,7 @@ First, determine which mode to use:
    - Categorize each error according to the taxonomy
    - Identify the primary variable involved
    - **Always reference cells by code cell index (`@N`), never by cell ID**
-   - For diagnostic/visualization errors: read the cell source, determine which lines are mutation vs diagnostic, and note the split plan
+   - For diagnostic inspection errors: read the cell source, determine which lines are mutation vs diagnostic, and note the split plan
    - Produce a short, coherent explanation for the categorization
    - Output TSV lines
 
@@ -286,8 +285,8 @@ First, determine which mode to use:
 
 6. If `--fix` flag is provided:
    - For each notebook, initialize the fixed copy with `--init --force`
-   - Apply non-inserting fixes (inplace-reassign, sequential-chain, model-copy, inplace-to-copy, struct-copy, variable-reuse) in any order
-   - Apply diagnostic/visualization splits from **highest code cell index to lowest** (to avoid index shifts from cell insertions):
+   - Apply non-inserting fixes (inplace-reassign, model-copy, inplace-to-copy, struct-copy, variable-reuse) in any order
+   - Apply diagnostic inspection splits from **highest code cell index to lowest** (to avoid index shifts from cell insertions):
      - Read the cell source
      - Determine mutation vs diagnostic lines
      - If purely diagnostic: use `add-diagnostic`
@@ -302,9 +301,9 @@ First, determine which mode to use:
 ```
 [1/23] backpack-pred-baseline-ensemble-eda.ipynb (4 errors)
   - Error 1 (@3): Diagnostic inspection before mutation → train_data [split: 4 mutation + 2 diagnostic lines]
-  - Error 2 (@5): Sequential transformation chain → test_data
-  - Error 3 (@8): Visualization before mutation → train_data [pure diagnostic, add %diagnostic]
-  - Error 4 (@12): Sequential transformation chain → train_data
+  - Error 2 (@5): In-place variable reassignment → test_data
+  - Error 3 (@8): Diagnostic inspection before mutation → train_data [pure diagnostic, add %diagnostic]
+  - Error 4 (@12): Invalid mutation → model [model-copy]
 ```
 
 When applying fixes (with `--fix`):
@@ -312,8 +311,8 @@ When applying fixes (with `--fix`):
 ```
 [1/23] backpack-pred-baseline-ensemble-eda.ipynb
   Initializing: backpack-pred-baseline-ensemble-eda-fixed.ipynb
-  - Fixing @5: sequential-chain --variable test_data
-  - Fixing @12: sequential-chain --variable train_data
+  - Fixing @5: inplace-reassign --variable test_data
+  - Fixing @12: model-copy --variable model
   - Fixing @8: add-diagnostic (pure diagnostic cell)
   - Fixing @3: set-source + insert-cell-after + add-diagnostic (split mixed cell)
   ✓ Fixed 4 errors → backpack-pred-baseline-ensemble-eda-fixed.ipynb
@@ -324,15 +323,11 @@ At the end, print a summary:
 ```
 === Summary ===
 Notebooks processed: 23
-Total errors categorized: 116
-  - In-place variable reassignment: 41
-  - Sequential transformation chain: 51
-  - Diagnostic inspection before mutation: 17
-  - Visualization before mutation: 2
+Total errors categorized: 139
+  - In-place variable reassignment: 92
+  - Invalid mutation: 23 (ML model 12, DataFrame inplace 8, structural 3)
   - Reusing variable for different purposes: 5
-  - Unrecoverable mutation (ML model): 12
-  - Unrecoverable mutation (inplace): 8
-  - Unrecoverable mutation (structural): 3
+  - Diagnostic inspection before mutation: 19
 
 Fixed notebooks saved to:
   - .../backpack-pred-baseline-ensemble-eda-fixed.ipynb

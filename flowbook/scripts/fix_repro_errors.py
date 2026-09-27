@@ -13,7 +13,6 @@ IDs in processed notebooks may not match the original notebooks.
 
 Fix types (high-level):
     inplace-reassign    - Deep-copy variable and alpha-rename downstream
-    sequential-chain    - Same as inplace-reassign
     variable-reuse      - Alpha-rename reused variable downstream
     model-copy          - Copy ML model before mutation (fit/predict)
     inplace-to-copy     - Convert df.method(inplace=True) to df = df.method()
@@ -326,9 +325,7 @@ def add_deepcopy_and_rename(
     """
     Add a deep copy of variable and rename all downstream uses.
 
-    This fix pattern works for:
-    - In-place variable reassignment
-    - Sequential transformation chains
+    This fix pattern works for in-place variable reassignment.
 
     If the variable was already renamed by a previous fix (e.g., df_flow_1234),
     this function will find that renamed version, deep copy it to a new name
@@ -826,7 +823,7 @@ def apply_fix(
     suffix = clean_id[-4:] if len(clean_id) >= 4 else clean_id
 
     # Apply the appropriate fix
-    if fix_type in ("inplace-reassign", "sequential-chain"):
+    if fix_type == "inplace-reassign":
         if not variable:
             raise ValueError(f"--variable required for {fix_type}")
         add_deepcopy_and_rename(notebook, cell_idx, variable, suffix)
@@ -888,7 +885,6 @@ def main():
         "--fix-type",
         choices=[
             "inplace-reassign",
-            "sequential-chain",
             "variable-reuse",
             "model-copy",
             "inplace-to-copy",

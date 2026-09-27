@@ -110,12 +110,31 @@ Followed by a diagnosis blockquote for each fix:
 **Error type**: `NO_READ_AND_WRITE`
 **Example**: `train = pd.concat([train, extra_data])`
 
-**Fix**: Alpha-rename the variable.
+**Fix A**: Alpha-rename the variable.
 
 ```
 checkpoint()
 read_cell("B")
 alpha_rename("B", "train", "train_combined")
+run_from(cell_id)
+```
+
+**Several cells transforming the same variable in sequence** is the same problem (error type also
+`NO_WRITE_AFTER_READ`), e.g. @B does `df = df.fillna(0)` and @C does `df = df.assign(feature=...)`.
+
+**Fix B** — Merge tightly coupled steps:
+
+```
+checkpoint()
+merge_cells(["B", "C"])
+run_from(cell_id)
+```
+
+**Fix C** — Give each step its own output name:
+
+```
+checkpoint()
+alpha_rename("C", "df", "df_featured")
 run_from(cell_id)
 ```
 
@@ -159,29 +178,7 @@ run_from(cell_id)
 
 This converts `df.method(inplace=True)` to `df = df.method()`, making the mutation explicit and trackable.
 
-### 3. Sequential Transformation Chain
-
-**What it looks like**: Multiple cells transform the same variable in sequence.
-**Error type**: `NO_WRITE_AFTER_READ` (backward mutation)
-**Example**: Cell @B does `df = df.fillna(0)`, Cell @C does `df = df.assign(feature=...)`.
-
-**Fix A** — Merge tightly coupled steps:
-
-```
-checkpoint()
-merge_cells(["B", "C"])
-run_from(cell_id)
-```
-
-**Fix B** — Give each step its own output name:
-
-```
-checkpoint()
-alpha_rename("C", "df", "df_featured")
-run_from(cell_id)
-```
-
-### 4. Reusing Variable for Different Purposes
+### 3. Reusing Variable for Different Purposes
 
 **What it looks like**: A variable holds different data at different points.
 **Error type**: `NO_WRITE_AFTER_READ`
@@ -197,7 +194,7 @@ run_from(cell_id)
 
 Choose semantically meaningful names when possible (e.g., `lr_model` / `rf_model` rather than `model_v2`).
 
-### 5. Diagnostic Inspection Before Mutation
+### 4. Diagnostic Inspection Before Mutation
 
 **What it looks like**: A read-only cell (df.info(), df.head(), print()) sits above a cell that modifies the variable.
 **Error type**: `NO_WRITE_AFTER_READ`
