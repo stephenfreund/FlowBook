@@ -197,6 +197,26 @@ RecoverableMutation(W, i)  ≝  diff(preᵢ, Σ) ⊆ Wᵢ ∪ ColWᵢ
 
 - **RecoverableMutation**: All mutations detected by the diff must be recoverable — either the variable was rebound (in Wᵢ) or the column was tracked (in ColWᵢ). In-place mutations not in either set are unrecoverable errors.
 
+#### 3.2.1 Optional predicate: NoReadOfStale
+
+```
+StaleDerived(S, j)         ≝  j ∈ S  ∨  ∃ r ∈ Rⱼ. StaleDerived(S, LastWriter(W, j, r))
+NoReadOfStale(R, W, S, i)  ≝  ∀ r ∈ Rᵢ. ¬ StaleDerived(S, LastWriter(W, i, r))
+```
+
+where S is the current stale set. A cell may not read a location whose last writer
+(in document order) is stale or, transitively, was computed from a stale writer: its
+result would be derived from state a serial execution would not produce, and
+[Inst-Run] would record it clean, since forward staleness marks a reader only when
+its writer *re-executes*. The transitive clause is needed: a cell that executed while
+its input's writer was stale is clean by the staleness rules (nothing it read has
+changed) yet carries a value a serial run would not produce. Off by default
+(`FLOWBOOK_REJECT_STALE_READS=1` enables it); implemented as
+`_check_stale_reads()` in `check()`, walking earlier cells from i-1 downward so a
+clean later writer settles a location before a stale earlier one is considered.
+Motivated by the FlowBook-Comparison chain study (2026-09-12), where agents that
+left a listed stale cell alone later reported values computed below it.
+
 ### 3.3 Staleness Predicates
 
 These predicates determine when cells become stale:

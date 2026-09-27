@@ -161,7 +161,7 @@ All tools are **synchronous** functions wrapped by `@_logged_tool` (captures nam
 args, result, duration, errors into `session._event_log`). Alongside the event log,
 `NotebookSession` keeps a structured **execution trace** (`session._trace`, written by
 `save_event_log` under `"trace"`): one raw record per cell execution (`run`: cell ID,
-full source, cell order, status, stale set, errors, rejected flag), per source edit
+full source, cell order, status, stale set, errors, rejected flag, printed stdout capped at 4 kB), per source edit
 (`edit`), and per structural change (`structure`). Unlike `events`, trace records are
 never truncated, so an offline consumer can replay a session. `NotebookSession` also
 accepts `kernel_name` (default `flowbook_kernel`) so the same session machinery can
@@ -313,3 +313,13 @@ propagate via the comm channel (inherently session-safe). No code change needed.
 Rate limit threshold reduced from 0.5s to 0.2s. The Contents API call to
 localhost takes ~10ms, so 0.2s is still a safe rate limit while being responsive
 enough that back-to-back tool calls both see fresh data.
+
+### Cell labels and stale outputs on save (2026-09-13)
+
+Tool output shows each cell as `#n [ID]`: `#n` is the 1-based position in code-cell order,
+the bracketed alpha string is the ID every tool takes. Positions used to be alpha too
+(`@AY`) and drifted one place from the IDs after an insert; agents passed the label as the
+ID and overwrote the wrong cell. With `FLOWBOOK_STALE_OUTPUTS_ON_SAVE=clear` (opt-in) the
+notebook written by `save_notebook` carries no outputs for cells the session considers
+stale, so an out-of-date value is never shown as current; the session keeps its own copy.
+
