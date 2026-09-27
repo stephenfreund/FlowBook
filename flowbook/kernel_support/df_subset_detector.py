@@ -231,7 +231,12 @@ class DataFrameSubsetDetector:
         """
         from flowbook.util.output import timer
 
-        # 0. Check cache first
+        # 0. Check cache first. A hit reuses the row indices (the expensive
+        # part) but never the *values*: the child may have been modified in
+        # place since (a column rewritten with the same shape), so the common
+        # columns are re-validated against the parent and the extra columns
+        # are re-extracted. Returning stale extra_data would make a checkpoint
+        # restore old values and make read-only cells look like mutations.
         with timer(key="subset:00a_cache_check"):
             cache_key = (id(parent_df), id(child_df))
             shapes = (parent_df.shape, child_df.shape)
@@ -239,19 +244,23 @@ class DataFrameSubsetDetector:
                 # Validate shapes haven't changed (DataFrame was modified in place)
                 if self._cache_shapes.get(cache_key) == shapes:
                     cached = self._cache[cache_key]
-                    if cached is not None:
-                        # Update variable names in case they changed
+                    if cached is not None and list(child_df.columns) == cached.child_columns:
+                        if not self._values_match(child_df, parent_df, cached.common_columns, cached.row_indices):
+                            self._cache[cache_key] = None
+                            return None
+                        extra_data = child_df[cached.extra_columns].copy() if cached.extra_columns else None
                         return SubsetRelation(
                             child_var=child_name,
                             parent_var=parent_name,
                             row_indices=cached.row_indices,
                             common_columns=cached.common_columns,
                             extra_columns=cached.extra_columns,
-                            extra_data=cached.extra_data,
+                            extra_data=extra_data,
                             estimated_savings_bytes=cached.estimated_savings_bytes,
                             child_columns=cached.child_columns,
                         )
-                    return None
+                    if cached is None:
+                        return None
 
         # Helper to cache and return None
         def _cache_none():
@@ -299,39 +308,8 @@ class DataFrameSubsetDetector:
         # 4. Validate ALL values in ALL common columns (vectorized, fast)
         # This guarantees zero false positives - critical for data integrity on restore
         with timer(key="subset:04_full_validation"):
-            for col in common_columns:
-                try:
-                    child_arr = child_df[col].values
-                    parent_arr = parent_df[col].values
-                    parent_subset = parent_arr[row_indices]
-
-                    # Handle different dtypes appropriately:
-                    # - Floating point: use equal_nan=True to handle NaN correctly
-                    # - Object/string: use pandas isna + element comparison
-                    # - Other (int, bool, etc.): basic array_equal works
-                    if isinstance(child_arr.dtype, np.dtype) and np.issubdtype(child_arr.dtype, np.floating):
-                        if not np.array_equal(child_arr, parent_subset, equal_nan=True):
-                            return _cache_none()
-                    elif child_arr.dtype == object or (hasattr(child_arr.dtype, 'kind') and child_arr.dtype.kind in ('U', 'S')) or pd.api.types.is_string_dtype(child_arr.dtype):
-                        # For object/string dtypes, handle NaN specially
-                        # Use pandas isna which handles None, NaN, NaT correctly
-                        child_na = pd.isna(child_arr)
-                        parent_na = pd.isna(parent_subset)
-                        if not np.array_equal(child_na, parent_na):
-                            return _cache_none()
-                        # Compare non-NA values
-                        non_na_mask = ~child_na
-                        if non_na_mask.any():
-                            if not np.array_equal(
-                                child_arr[non_na_mask], parent_subset[non_na_mask]
-                            ):
-                                return _cache_none()
-                    else:
-                        # For non-float, non-object types (int, bool, etc.)
-                        if not np.array_equal(child_arr, parent_subset):
-                            return _cache_none()
-                except Exception:
-                    return _cache_none()
+            if not self._values_match(child_df, parent_df, common_columns, row_indices):
+                return _cache_none()
 
         # 5. Passed full validation - confirmed valid subset
         with timer(key="subset:05_extra_cols"):
@@ -363,6 +341,49 @@ class DataFrameSubsetDetector:
         self._cache_shapes[cache_key] = shapes
 
         return result
+
+    @staticmethod
+    def _values_match(
+        child_df: pd.DataFrame,
+        parent_df: pd.DataFrame,
+        common_columns: list[str],
+        row_indices: np.ndarray,
+    ) -> bool:
+        """Every common column of the child equals the parent's rows at row_indices."""
+        for col in common_columns:
+            try:
+                child_arr = child_df[col].values
+                parent_arr = parent_df[col].values
+                parent_subset = parent_arr[row_indices]
+
+                # Handle different dtypes appropriately:
+                # - Floating point: use equal_nan=True to handle NaN correctly
+                # - Object/string: use pandas isna + element comparison
+                # - Other (int, bool, etc.): basic array_equal works
+                if isinstance(child_arr.dtype, np.dtype) and np.issubdtype(child_arr.dtype, np.floating):
+                    if not np.array_equal(child_arr, parent_subset, equal_nan=True):
+                        return False
+                elif child_arr.dtype == object or (hasattr(child_arr.dtype, 'kind') and child_arr.dtype.kind in ('U', 'S')) or pd.api.types.is_string_dtype(child_arr.dtype):
+                    # For object/string dtypes, handle NaN specially
+                    # Use pandas isna which handles None, NaN, NaT correctly
+                    child_na = pd.isna(child_arr)
+                    parent_na = pd.isna(parent_subset)
+                    if not np.array_equal(child_na, parent_na):
+                        return False
+                    # Compare non-NA values
+                    non_na_mask = ~child_na
+                    if non_na_mask.any():
+                        if not np.array_equal(
+                            child_arr[non_na_mask], parent_subset[non_na_mask]
+                        ):
+                            return False
+                else:
+                    # For non-float, non-object types (int, bool, etc.)
+                    if not np.array_equal(child_arr, parent_subset):
+                        return False
+            except Exception:
+                return False
+        return True
 
     def _estimate_savings(
         self,

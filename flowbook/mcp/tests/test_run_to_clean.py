@@ -404,8 +404,8 @@ class TestRunToCleanLoopRejects:
         assert "warning:" in result
         assert "POTENTIAL NON-TERMINATION" in result
         tail = result.split("POTENTIAL NON-TERMINATION", 1)[1]
-        assert "@C" in tail  # the culprit
-        assert "@B" in tail  # the re-marked cell
+        assert "#3" in tail  # the culprit
+        assert "#2" in tail  # the re-marked cell
         # Stopped when C exceeded the cap: C ran 11 times, B 10 times.
         assert session.run_cell.call_count == 2 * MAX_RERUNS_PER_CELL + 1
         assert f"ran {MAX_RERUNS_PER_CELL + 1} times" in tail
@@ -431,7 +431,7 @@ class TestRunToCleanLoopRejects:
         assert "warning:" in result
         assert "POTENTIAL NON-TERMINATION" in result
         tail = result.split("POTENTIAL NON-TERMINATION", 1)[1]
-        assert "@A" in tail  # first cell to exceed the cap
+        assert "#1" in tail  # first cell to exceed the cap
         assert "warnings above" in tail  # ...pointing at B's warnings
         # A exceeds the cap on its 11th run, before B's 11th.
         assert session.run_cell.call_count == 2 * MAX_RERUNS_PER_CELL + 1

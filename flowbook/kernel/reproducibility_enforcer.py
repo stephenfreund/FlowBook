@@ -296,6 +296,14 @@ def _env_flag(name: str, default: bool = True) -> bool:
         return False
     return default
 
+# REJECT_STALE_READS: NoReadOfStale predicate (opt-in, default off). A cell that reads
+# a location whose last writer (in document order) is stale is rejected: its result
+# would be derived from state a top-to-bottom run would not produce. Without it, such
+# a cell executes and is recorded clean, and nothing marks it later unless the stale
+# writer re-executes (forward staleness is one hop per execution).
+REJECT_STALE_READS = _env_flag("FLOWBOOK_REJECT_STALE_READS", default=False) or \
+    os.environ.get("FLOWBOOK_REJECT_STALE_READS", "").lower() in ("1", "true", "yes", "on")
+
 # OPT_CONFLICT_LOOP_SKIP: Skip the O(n) conflict detection loop when there's
 # no variable-level overlap between changed variables and prior reads.
 OPT_CONFLICT_LOOP_SKIP = _env_flag("FLOWBOOK_OPT_CONFLICT_LOOP_SKIP", default=True)
@@ -1207,6 +1215,13 @@ class ReproducibilityEnforcer:
             forward_error = self._check_forward_contamination(cell_id, my_position, tracking, namespace)
         if forward_error:
             errors.append(forward_error)
+
+        # NoReadOfStale (opt-in): Rᵢ must not read a location whose last writer is stale
+        if REJECT_STALE_READS:
+            stale_read_error = self._check_stale_reads(cell_id, my_position, tracking, namespace)
+            if stale_read_error:
+                errors.append(stale_read_error)
+            log(f"[Inst-Run] {cell_id}: NoReadOfStale={'fail' if stale_read_error else 'pass'}")
         log(f"[Inst-Run] {cell_id}: NoReadBeforeWrite={'fail' if forward_error else 'pass'}")
 
         # ================================================================
@@ -1541,6 +1556,98 @@ class ReproducibilityEnforcer:
                 )
 
         return None
+
+    def _writes_of(self, cell_id: str, namespace: Optional[dict]) -> frozenset:
+        """A cell's write locations as NoReadBeforeWrite derives them: diff-based typed
+        changes when available (column precision), plus module bindings, else tracking."""
+        W_stored = self._notebook_state.writes.get(cell_id, frozenset())
+        changes = self._notebook_state.get_typed_changes(cell_id)
+        if not changes:
+            return W_stored
+        W = changes_to_write_locs(changes, namespace, self._stable_map)
+        if namespace is not None:
+            module_locs = {
+                w for w in W_stored
+                if w.type == WriteLocType.VAR
+                and isinstance(_ns_get(namespace, w.name), types.ModuleType)
+            }
+            if module_locs:
+                W = frozenset(W | module_locs)
+        return W
+
+    def _stale_writer_of(self, reads, my_position: int, stale_derived: set, namespace: Optional[dict]):
+        """For a read set, the first (nearest-above) writer that is stale-derived and is the
+        last writer of some read location; a clean writer settles its locations first.
+        Returns (writer_cell_id, conflicting read locs) or None."""
+        remaining = set(reads)
+        for earlier_cell_id in reversed(self._cell_order[:my_position]):
+            if not remaining:
+                break
+            if not self._notebook_state.has_record(earlier_cell_id):
+                continue
+            W_earlier = self._writes_of(earlier_cell_id, namespace)
+            if not W_earlier:
+                continue
+            hit = {r for r in remaining if wlocs_conflict_rlocs(W_earlier, frozenset([r]))}
+            if not hit:
+                continue
+            if earlier_cell_id in stale_derived:
+                return earlier_cell_id, hit
+            remaining -= hit
+        return None
+
+    def _stale_derived_cells(self, upto_position: int, namespace: Optional[dict]) -> set:
+        """Stale cells plus, transitively, every executed cell above ``upto_position`` whose
+        recorded reads have a stale-derived last writer. One forward pass in document
+        order (a cell's writers are above it)."""
+        derived = set(self._notebook_state.get_stale_cells())
+        for pos, cid in enumerate(self._cell_order[:upto_position]):
+            if cid in derived or not self._notebook_state.has_record(cid):
+                continue
+            R = self._notebook_state.reads.get(cid) or frozenset()
+            if R and self._stale_writer_of(R, pos, derived, namespace) is not None:
+                derived.add(cid)
+        return derived
+
+    def _check_stale_reads(
+        self,
+        cell_id: str,
+        my_position: int,
+        tracking: TrackingData,
+        namespace: Optional[dict] = None,
+    ) -> Optional[ReproducibilityError]:
+        """
+        Check NoReadOfStale (opt-in): no read location of cell i may have a
+        stale-derived cell as its last writer in document order.
+
+        Stale-derived = stale, or (transitively) an executed cell whose own
+        reads have a stale-derived last writer. The transitive part matters:
+        FlowBook marks a reader stale only when its writer *re-executes*, so a
+        cell that ran while its input's writer was stale is clean by the
+        staleness rules yet carries a value a serial run would not produce.
+        """
+        R_i = tracking_to_readlocset(tracking, namespace, self._stable_map)
+        if not R_i:
+            return None
+        if not self._notebook_state.get_stale_cells():
+            return None
+        derived = self._stale_derived_cells(my_position, namespace)
+        found = self._stale_writer_of(R_i, my_position, derived, namespace)
+        if found is None:
+            return None
+        writer, hit = found
+        conflicts = sorted(r.display_name() for r in hit)
+        reading_alpha = self._cell_id_to_alpha(cell_id)
+        writing_alpha = self._cell_id_to_alpha(writer)
+        direct = writer in set(self._notebook_state.get_stale_cells())
+        message = format_stale_read_message(reading_alpha, writing_alpha, conflicts, direct=direct)
+        return ReproducibilityError(
+            error_type=ErrorType.STALE_READ,
+            cell_id=cell_id,
+            locations=conflicts,
+            message=message,
+            causer_cell=writer,
+        )
 
     def _check_backward_mutation_new(
         self,
@@ -2732,6 +2839,25 @@ def format_structural_violation(
 
     return "\n".join(lines)
 
+
+
+def format_stale_read_message(
+    reading_cell_alpha: str,
+    writing_cell_alpha: str,
+    variables: List[str],
+    direct: bool = True,
+) -> str:
+    """Format a NoReadOfStale error: the cell read state whose writer is stale (direct)
+    or was itself computed from stale state (derived)."""
+    vars_str = format_variable_list(variables)
+    what = "which is stale" if direct else "which was computed from a stale cell"
+    lines = [
+        "❌ Stale Read",
+        f"Cell {reading_cell_alpha} reads {vars_str}, last written by cell {writing_cell_alpha}, {what}.",
+        "A top-to-bottom run would give that value a different result, so this cell's",
+        f"result would be derived from out-of-date state. Re-run the stale cells above {writing_cell_alpha} first.",
+    ]
+    return "\n".join(lines)
 
 
 def format_forward_dependency_message(

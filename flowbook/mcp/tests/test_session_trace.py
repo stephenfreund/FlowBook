@@ -174,3 +174,19 @@ def test_trace_persists_across_reload(session, chain_notebook, tmp_path):
     assert session._trace[0]["cell_ids"] == ["A", "B", "C"]
     assert session._trace[2]["cell_ids"] == ["A"] and session._trace[2]["joined_existing"] is False
     assert session._trace[2]["seq"] == 2
+
+
+def test_run_records_carry_stdout(session, chain_notebook):
+    """Each run record holds what the cell printed, so a consumer can read the values a
+    cell showed at that execution without the truncated tool-result strings."""
+    session.load(chain_notebook)
+    for cid in ("A", "B", "C"):
+        session.run_cell(cid)
+    runs = _runs(session)
+    assert runs[0]["stdout"] == ""            # x = 1 prints nothing
+    assert runs[2]["stdout"].strip() == "2"   # print(y)
+    session.edit_cell("A", "x = 41")
+    session.run_cell("A")
+    session.run_cell("B")
+    session.run_cell("C")
+    assert _runs(session)[-1]["stdout"].strip() == "42"

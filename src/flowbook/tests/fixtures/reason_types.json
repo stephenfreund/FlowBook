@@ -9,6 +9,7 @@
     "no_read_before_write",
     "no_write_after_read",
     "order_changed",
+    "stale_read",
     "unrecoverable_mutation",
     "write_before_read",
     "write_overlap"

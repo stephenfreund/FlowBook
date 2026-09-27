@@ -112,7 +112,8 @@ describe('specific wordings', () => {
     [
       'unrecoverable_mutation',
       '`x` was modified in place, which violates rerun consistency'
-    ]
+    ],
+    ['stale_read', 'Reads `x` from @A, which is stale; re-run @A first']
   ];
 
   it.each(cases)('%s', (type, expected) => {

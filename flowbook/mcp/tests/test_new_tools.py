@@ -66,15 +66,15 @@ def _make_ctx(session):
 class TestCellLabel:
     def test_known_id_first(self):
         session = _make_mock_session(cell_order=["abc1", "def2", "ghi3"])
-        assert _cell_label(session, "abc1") == "@A"
+        assert _cell_label(session, "abc1") == "#1"
 
     def test_known_id_second(self):
         session = _make_mock_session(cell_order=["abc1", "def2", "ghi3"])
-        assert _cell_label(session, "def2") == "@B"
+        assert _cell_label(session, "def2") == "#2"
 
     def test_known_id_third(self):
         session = _make_mock_session(cell_order=["abc1", "def2", "ghi3"])
-        assert _cell_label(session, "ghi3") == "@C"
+        assert _cell_label(session, "ghi3") == "#3"
 
     def test_unknown_id_returns_raw(self):
         session = _make_mock_session(cell_order=["abc1"])
@@ -168,7 +168,7 @@ class TestReadCell:
         }
         ctx = _make_ctx(session)
         result = read_cell("abc1", ctx)
-        assert "@A" in result
+        assert "#1" in result
         assert "abc1" in result
         assert "x = 1" in result
         session.get_cell.assert_called_once_with("abc1")
@@ -215,7 +215,7 @@ class TestEditCellSource:
         }
         ctx = _make_ctx(session)
         result = edit_cell_source("abc1", "x = 99", ctx)
-        assert "@A" in result
+        assert "#1" in result
         assert "abc1" in result
         assert "marked stale" in result
         assert "x = 99" in result
@@ -256,7 +256,7 @@ class TestGetFlowbookMetadata:
         )
         ctx = _make_ctx(session)
         result = get_flowbook_metadata("abc1", ctx)
-        assert "@A" in result
+        assert "#1" in result
         assert "abc1" in result
         # format_flowbook_meta produces "Reads:" and "Writes:" lines
         assert "Reads:" in result
@@ -270,7 +270,7 @@ class TestGetFlowbookMetadata:
         ctx = _make_ctx(session)
         result = get_flowbook_metadata("abc1", ctx)
         assert "not been executed" in result
-        assert "@A" in result
+        assert "#1" in result
 
     def test_unknown_cell_shows_raw_id(self):
         session = _make_mock_session(
@@ -300,7 +300,7 @@ class TestRunActionableCell:
         ctx = _make_ctx(session)
         result = run_actionable_cell(ctx)
         assert "Ran" in result
-        assert "@B" in result
+        assert "#2" in result
         assert "def2" in result
         session.run_cell.assert_called_once_with("def2")
 
