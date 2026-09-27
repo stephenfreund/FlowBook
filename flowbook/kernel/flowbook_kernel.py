@@ -361,7 +361,7 @@ from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
 from flowbook.kernel_support.checkpoint import filter_user_namespace
 from flowbook.kernel_support.deepcopyable import check_deepcopyable
 from flowbook.kernel_support.timeout_handler import CellTimeoutHandler
-from flowbook.kernel_support.tracking import TrackingDict
+from flowbook.kernel_support.tracking import TrackingDict, rollback_module_bindings
 from flowbook.util.cell_index import index_to_alpha
 from flowbook.util.output import error, log, timer, output
 
@@ -1581,6 +1581,11 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
                     # When continue_after_violation=True: continue, cell stays CLEAN (accepted)
                     if sdc_result and sdc_result.has_errors():
                         if not self._continue_after_violation:
+                            # Modules are not checkpointed, so undo the imports
+                            # this rejected execution introduced.
+                            if isinstance(user_ns, TrackingDict):
+                                rollback_module_bindings(user_ns)
+
                             # ROLLBACK: Restore pre-execution state (namespace)
                             self._restore_checkpoint(f"{PRE_CHECKPOINT_PREFIX}{self._cell_id}")
                             self._apply_restore_memo()

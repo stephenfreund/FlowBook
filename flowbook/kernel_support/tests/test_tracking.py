@@ -259,20 +259,31 @@ class TestGetTrackingData:
         assert "public" in data.reads_before_writes
         assert "another_public" in data.writes
 
-    def test_get_tracking_data_filters_modules(self):
-        """get_tracking_data filters module objects."""
+    def test_get_tracking_data_tracks_modules(self):
+        """Module bindings are locations too: using `sys` reads it."""
         import sys
 
         td = TrackingDict({"sys": sys, "x": 1})
         td.reset_tracking()
-        # Access both
         _ = td["sys"]
         _ = td["x"]
 
         data = td.get_tracking_data()
-        # Module should be filtered
+        assert "sys" in data.reads_before_writes
+        assert "x" in data.reads_before_writes
+
+    def test_get_tracking_data_filters_modules_when_disabled(self, monkeypatch):
+        """FLOWBOOK_TRACK_IMPORTS=0 restores the old behaviour (modules are ambient)."""
+        import sys
+
+        monkeypatch.setenv("FLOWBOOK_TRACK_IMPORTS", "0")
+        td = TrackingDict({"sys": sys, "x": 1})
+        td.reset_tracking()
+        _ = td["sys"]
+        _ = td["x"]
+
+        data = td.get_tracking_data()
         assert "sys" not in data.reads_before_writes
-        # Regular var should be included
         assert "x" in data.reads_before_writes
 
 

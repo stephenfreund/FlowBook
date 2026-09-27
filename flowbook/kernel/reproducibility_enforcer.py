@@ -236,6 +236,7 @@ import os
 import pprint
 import re
 import time
+import types
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from flowbook.kernel_support.checkpoint import Checkpoint, CheckpointDiffResult
@@ -354,6 +355,17 @@ def _writes_in_range(
 # ============================================================================
 # ALIAS EXPANSION
 # ============================================================================
+
+
+def _ns_get(namespace, name):
+    """namespace.get that works for dicts and TrackingDict alike."""
+    try:
+        return namespace.get(name)
+    except Exception:
+        try:
+            return namespace[name]
+        except Exception:
+            return None
 
 
 def _expand_with_deep_aliases(
@@ -960,10 +972,36 @@ class ReproducibilityEnforcer:
             pre_checkpoint,
         )
 
+        # Module rebindings to the identical object (a re-executed import):
+        #   - an earlier cell already writes the name → not a write of this
+        #     cell at all (that cell is the importer; nothing changed);
+        #   - this cell was the recorded writer → still its write for the
+        #     ordering predicates, but idempotent: no staleness, no backward
+        #     mutation (module identity is exact value equality);
+        #   - otherwise (ambient, or bound by a later cell) → an ordinary write.
+        # FORMAL_DEVELOPMENT.md §8.1.
+        writes = set(tracking.writes)
+        idempotent_writes: Set[str] = set()
+        for name in (tracking.rebound_same or set()):
+            if name not in writes:
+                continue
+            loc = WriteLoc.var(name)
+            earlier_writer = any(
+                loc in self._notebook_state.writes.get(j, frozenset())
+                for j in self._cell_order[:my_position]
+                if j != cell_id and self._notebook_state.has_record(j)
+            )
+            if earlier_writer:
+                writes.discard(name)
+            elif loc in self._notebook_state.writes.get(cell_id, frozenset()):
+                idempotent_writes.add(name)
+
         # Replace tracking with expanded version for use throughout
         tracking = TrackingData(
             reads_before_writes=tracking.reads_before_writes,
-            writes=tracking.writes,
+            writes=writes,
+            rebound_same=tracking.rebound_same,
+            idempotent_writes=idempotent_writes,
             column_reads_before_writes=expanded_column_reads,
             column_writes=expanded_column_writes,
             structural_reads=expanded_structural_reads,
@@ -1370,6 +1408,14 @@ class ReproducibilityEnforcer:
         keys_to_include: Optional[Set[str]] = None
         if OPT_ACCESSED_VARS_ONLY:
             accessed_vars = set(tracking.reads_before_writes) | set(tracking.writes)
+            # Module bindings are tracked for the ordering predicates but are
+            # not checkpointed; diffing them would compare a missing checkpoint
+            # entry against a live object and report a phantom change.
+            if namespace is not None:
+                accessed_vars = {
+                    v for v in accessed_vars
+                    if not isinstance(_ns_get(namespace, v), types.ModuleType)
+                }
             keys_to_include = _expand_with_deep_aliases(accessed_vars, pre_checkpoint)
 
             # Safety-net logging: check if aliases are already unified by StableIdMap
@@ -1456,12 +1502,25 @@ class ReproducibilityEnforcer:
             if not self._notebook_state.has_record(later_cell_id):
                 continue
 
-            # Prefer diff-based writes for column-level precision
+            # Prefer diff-based writes for column-level precision (tracking
+            # may say Var(df) where the diff says Col(df, qty)). Module
+            # bindings are never in a checkpoint diff, so their tracking-only
+            # Var locs are added back: otherwise a cell placed above the
+            # import cell could use the module unnoticed.
+            W_stored = self._notebook_state.writes.get(later_cell_id, frozenset())
             later_changes = self._notebook_state.get_typed_changes(later_cell_id)
             if later_changes:
                 W_later = changes_to_write_locs(later_changes, namespace, self._stable_map)
+                if namespace is not None:
+                    module_locs = {
+                        w for w in W_stored
+                        if w.type == WriteLocType.VAR
+                        and isinstance(_ns_get(namespace, w.name), types.ModuleType)
+                    }
+                    if module_locs:
+                        W_later = frozenset(W_later | module_locs)
             else:
-                W_later = self._notebook_state.writes.get(later_cell_id, frozenset())
+                W_later = W_stored
 
             if not W_later:
                 continue
@@ -1507,6 +1566,13 @@ class ReproducibilityEnforcer:
         an earlier reader (previously these were skipped entirely).
         """
         W_i = compute_cell_write_locs(tracking, typed_changes, namespace, self._stable_map)
+        idempotent = getattr(tracking, "idempotent_writes", None) or set()
+        if idempotent:
+            # A re-executed import by the same cell changes nothing an earlier
+            # reader could observe. FORMAL_DEVELOPMENT.md §8.1.
+            W_i = frozenset(
+                w for w in W_i if not (w.type == WriteLocType.VAR and w.name in idempotent)
+            )
 
         if not W_i:
             return None
@@ -1580,8 +1646,11 @@ class ReproducibilityEnforcer:
         All reads should come from writes by earlier cells.
         Excludes:
         - Builtins (print, len, range, etc.)
-        - Imported modules and functions
         - "Ambient" variables (exist in namespace but not written by any cell)
+        Module bindings created by import statements are ordinary locations
+        (see tracking.imports_tracked); a use before the importing cell in
+        notebook order is caught by NoReadBeforeWrite, and a use with no
+        importing cell at all falls under the ambient exclusion here.
 
         The "ambient" exclusion handles practical cases where notebooks start
         with pre-existing data (loaded datasets, injected variables, etc.)
@@ -1770,6 +1839,16 @@ class ReproducibilityEnforcer:
 
         # Wᵢ ∪ W'ᵢ at loc granularity.
         change_wlocs: WriteLocSet = frozenset(W_new | (old_write_locs or frozenset()))
+
+        # Idempotent module rebindings (a re-executed import) stay in W'ᵢ for
+        # the ordering predicates but cannot be observed by any later cell,
+        # so they do not propagate staleness. FORMAL_DEVELOPMENT.md §8.1.
+        idempotent = getattr(tracking, "idempotent_writes", None) or set()
+        if idempotent:
+            change_wlocs = frozenset(
+                w for w in change_wlocs
+                if not (w.type == WriteLocType.VAR and w.name in idempotent)
+            )
 
         cells_below = self._cell_order[my_position + 1:]
         for cell_id in cells_below:
