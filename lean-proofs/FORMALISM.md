@@ -525,7 +525,7 @@ theorem preservation (hwf : WellFormed nb) (hstep : InstStep nb op nb') :
 This is the workhorse: it says the rerun-consistency-and-staleness
 machinery really does maintain the "every clean cell is trustworthy"
 invariant, no matter what the user does. The proof is by cases on the
-operation, matching the paper's appendix (the `[Inst-Run]` case splits
+operation, matching the proof in §3 of the supplement (the `[Inst-Run]` case splits
 on whether a clean cell sits before, at, or after the executed cell).
 
 ## 3.2 Output Consistency — an all-clean notebook is reproducible

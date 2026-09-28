@@ -1,8 +1,8 @@
 /-
 # The Instrumented Semantics Refines the Standard Semantics
 
-Figure `fig:inst-semantics` defines the instrumented rules on top of
-the standard rules of Figure `fig:std-semantics`: `[Inst-Edit]`,
+Figure 9 defines the instrumented rules on top of
+the standard rules of Figure 8: `[Inst-Edit]`,
 `[Inst-Insert]`, and `[Inst-Delete]` take a standard step `S ─op→ S'`
 as a premise, and `[Inst-Run]` extends `[Std-Run]` with the
 instrumented evaluation judgment.  This file makes that relationship a

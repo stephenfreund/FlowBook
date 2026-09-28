@@ -1,7 +1,8 @@
 /-
-# Theorem 3 (Progress): Running Stale Cells Terminates
+# Theorem 2.5 (Progress): Running Stale Cells Terminates
 
-The paper's Theorem 3, for the `RunToClean` algorithm:
+Theorem 2.5 of the supplement (proof in §5 of the supplement), for
+the `RunToClean` algorithm:
 
     E := ∅                                   -- cells executed so far
     while some cell is stale:
@@ -16,7 +17,7 @@ The paper's Theorem 3, for the `RunToClean` algorithm:
 
 From a well-formed state, every execution that reports no potential
 non-termination terminates within `n(n+2)` runs, either in a state
-where all cells are clean (and hence, by Theorem 2, the notebook is
+where all cells are clean (and hence, by Theorem 2.4, the notebook is
 reproducible) or at a cell that is stuck.
 
 ## Formalization notes
@@ -275,8 +276,8 @@ After any successful run of the first stale cell `i`, every cell `j < i`
 that became stale (necessarily via `BackwardStale`) can re-run from the
 new store reproducing its recorded behavior.  This is the sentence
 "running `C_j` from `Σ'` produces the same behavior (same output and
-read/write sets)" in the paper's proof of Theorem 3, and it is why the
-algorithm need not report at such cells. -/
+read/write sets)" in the proof of Theorem 2.5 (§5 of the supplement),
+and it is why the algorithm need not report at such cells. -/
 
 section Backward
 variable [CellEval Code Output L V]
@@ -446,7 +447,7 @@ def RunToCleanStuck (nb : Notebook Code Output L V) (F : List Nat) : Prop :=
      (i ∉ F ∧ ∀ nb', InstStep nb (.run i) nb' →
         ∃ j, j ≤ i ∧ ¬ IsClean nb'.cells j))
 
-/-- **Theorem 3 (Progress).**  From any well-formed state, every
+/-- **Theorem 2.5 (Progress).**  From any well-formed state, every
 report-free execution of the algorithm can be extended to reach a
 state that is well-formed and either all-clean or stuck.  Termination
 is by the lexicographic measure `(|F|, n − first-stale position)`. -/
@@ -553,7 +554,7 @@ theorem progress_init {nb : Notebook Code Output L V} (hwf : WellFormed nb) :
       (AllClean nb'.cells ∨ RunToCleanStuck nb' F') :=
   progress hwf _
 
-/-- Progress combined with Theorem 2: the algorithm terminates either
+/-- Progress combined with Theorem 2.4: the algorithm terminates either
 in a *reproducible* notebook or at a cell where it reports. -/
 theorem progress_reproducible {nb : Notebook Code Output L V}
     (hwf : WellFormed nb) (F : List Nat) :

@@ -1,14 +1,14 @@
 /-
-# Theorem 2 (Reproducibility / Output Consistency)
+# Theorem 2.4 (Reproducibility / Output Consistency)
 
 If `S · I = (C, O, Σ) · (T, R, W)` is well-formed and `T_i = clean` for
 all `i`, then `(C, O, Σ)` is reproducible: there exists `Σ'` such that
 executing all cells top-to-bottom from the empty store produces exactly
 the recorded outputs (`C ↓ O · Σ'`).
 
-This is the full, machine-checked proof corresponding to the appendix
-"Reproducibility: Well-Formed All-Clean States Are Reproducible" (also
-titled "Output Consistency" in `supplemental.tex`).  The induction
+This is the full, machine-checked proof of Theorem 2.4 of the
+supplement, corresponding to the proof in §4 of the supplement ("Output
+Consistency: Well-Formed All-Clean States Are Output Consistent").  The induction
 follows the paper exactly: `P(i)` asserts that the first `i` cells
 execute top-to-bottom from the empty store, producing the recorded
 outputs and a store `Σ_i` that agrees with the interactive store `Σ` on
@@ -30,7 +30,7 @@ open CellEval
 def AllClean (cs : List (Cell Code Output L)) : Prop :=
   ∀ i : Nat, ∀ c : Cell Code Output L, cs[i]? = some c → c.tag = Tag.clean
 
-/-- **Theorem 2 (Reproducibility / Output Consistency).**
+/-- **Theorem 2.4 (Reproducibility / Output Consistency).**
 If `S · I = (C, O, Σ) · (T, R, W)` is well-formed and every cell is
 clean, then `(C, O, Σ)` is reproducible: some top-to-bottom execution
 from the empty store produces exactly the recorded outputs. -/
