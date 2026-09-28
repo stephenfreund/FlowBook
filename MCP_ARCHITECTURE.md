@@ -322,4 +322,3 @@ the bracketed alpha string is the ID every tool takes. Positions used to be alph
 ID and overwrote the wrong cell. With `FLOWBOOK_STALE_OUTPUTS_ON_SAVE=clear` (opt-in) the
 notebook written by `save_notebook` carries no outputs for cells the session considers
 stale, so an out-of-date value is never shown as current; the session keeps its own copy.
-

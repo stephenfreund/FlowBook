@@ -208,7 +208,7 @@ where S is the current stale set. A cell may not read a location whose last writ
 (in document order) is stale or, transitively, was computed from a stale writer: its
 result would be derived from state a serial execution would not produce, and
 [Inst-Run] would record it clean, since forward staleness marks a reader only when
-its writer *re-executes*. The transitive clause is needed: a cell that executed while
+its writer _re-executes_. The transitive clause is needed: a cell that executed while
 its input's writer was stale is clean by the staleness rules (nothing it read has
 changed) yet carries a value a serial run would not produce. Off by default
 (`FLOWBOOK_REJECT_STALE_READS=1` enables it); implemented as
@@ -551,7 +551,7 @@ that uses `m` reads it. Modules are never checkpointed (they are not copyable),
 so `Var(m)` locs come only from tracking, never from the diff — every
 predicate must therefore use the canonical (tracking ∪ diff) Wᵢ, and cell
 rollback undoes module bindings separately (`rollback_module_bindings()`).
-Because modules are singletons, rebinding a name to the *identical* module
+Because modules are singletons, rebinding a name to the _identical_ module
 object is observationally a no-op. Such a rebinding by cell i (reported by
 `TrackingData.rebound_same`) is classified in `check()`:
 
@@ -563,7 +563,7 @@ object is observationally a no-op. Such a rebinding by cell i (reported by
   re-running the import cell marks no reader stale and mutates nothing;
 - otherwise (the name was ambient, or bound by a later cell) → an ordinary write.
 
-A first binding, a rebinding to a *different* module, and `del m` are ordinary
+A first binding, a rebinding to a _different_ module, and `del m` are ordinary
 writes. Consequences: a cell placed above its import cell that uses the module
 violates NoReadBeforeWrite; an import cell moved below a user violates
 NoWriteAfterRead; both would fail or change in a fresh top-to-bottom run.
@@ -1150,23 +1150,23 @@ These are the same predicates from §10 — no additional `Σ` parameter is need
 
 ### 12.6 Implementation Map
 
-| Concept                                  | Code Location                                                                                                                      |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Provenance class                         | `DataFrameProvenance` in `kernel_support/column_provenance.py`                                                                     |
-| Provenance tracker                       | `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py`                                                              |
-| Provenance key                           | `PROVENANCE_KEY = '_flowbook_provenance'` in `kernel_support/column_provenance.py`                                                 |
+| Concept                                        | Code Location                                                                                                                                                                     |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provenance class                               | `DataFrameProvenance` in `kernel_support/column_provenance.py`                                                                                                                    |
+| Provenance tracker                             | `DataFrameProvenanceTracker` in `kernel_support/column_provenance.py`                                                                                                             |
+| Provenance key                                 | `PROVENANCE_KEY = '_flowbook_provenance'` in `kernel_support/column_provenance.py`                                                                                                |
 | Module binding tracking / idempotent re-import | `TrackingDict.get_tracking_data()` (`rebound_same`), `rollback_module_bindings()` in `kernel_support/tracking.py`; classification at the top of `ReproducibilityEnforcer.check()` |
-| Column write hook                        | `__setitem__` patch in `kernel_support/column_tracking.py`                                                                         |
-| Column insert hook                       | `insert` patch in `kernel_support/column_tracking.py`                                                                              |
-| Column delete hook                       | `__delitem__` patch in `kernel_support/column_tracking.py`                                                                         |
-| Row mutation hook                        | `.loc.__setitem__`, `drop`, inplace wrappers in `kernel_support/column_tracking.py`                                                |
-| Index mutation hook                      | `_set_axis` patch in `kernel_support/column_tracking.py`                                                                           |
-| Dtype change hook                        | `__setitem__` dtype detection in `kernel_support/column_tracking.py`                                                               |
-| Inplace wrapper                          | `_wrap_inplace_for_provenance()` in `kernel_support/column_tracking.py`                                                            |
-| Var write hook                           | `TrackingDict.__setitem__` in `kernel_support/tracking.py`                                                                         |
-| Var delete hook (`del x` is a Var write) | `TrackingDict.__delitem__` in `kernel_support/tracking.py`                                                                         |
-| cell_id threading                        | `track_execution(cell_id=...)` in `kernel_support/tracking.py`                                                                     |
-| Tracking → WriteLoc conversion           | `tracking_to_writelocset()` in `kernel/locations.py`                                                                               |
-| Write set storage                        | `record_execution()` in `kernel/notebook_state.py`                                                                                 |
-| Unit tests                               | `kernel_support/tests/test_column_provenance.py`                                                                                   |
-| Integration tests                        | `TestForwardContaminationStructuralRead`, `TestStructuralProvenanceIntegration` in `kernel/tests/test_reproducibility_enforcer.py` |
+| Column write hook                              | `__setitem__` patch in `kernel_support/column_tracking.py`                                                                                                                        |
+| Column insert hook                             | `insert` patch in `kernel_support/column_tracking.py`                                                                                                                             |
+| Column delete hook                             | `__delitem__` patch in `kernel_support/column_tracking.py`                                                                                                                        |
+| Row mutation hook                              | `.loc.__setitem__`, `drop`, inplace wrappers in `kernel_support/column_tracking.py`                                                                                               |
+| Index mutation hook                            | `_set_axis` patch in `kernel_support/column_tracking.py`                                                                                                                          |
+| Dtype change hook                              | `__setitem__` dtype detection in `kernel_support/column_tracking.py`                                                                                                              |
+| Inplace wrapper                                | `_wrap_inplace_for_provenance()` in `kernel_support/column_tracking.py`                                                                                                           |
+| Var write hook                                 | `TrackingDict.__setitem__` in `kernel_support/tracking.py`                                                                                                                        |
+| Var delete hook (`del x` is a Var write)       | `TrackingDict.__delitem__` in `kernel_support/tracking.py`                                                                                                                        |
+| cell_id threading                              | `track_execution(cell_id=...)` in `kernel_support/tracking.py`                                                                                                                    |
+| Tracking → WriteLoc conversion                 | `tracking_to_writelocset()` in `kernel/locations.py`                                                                                                                              |
+| Write set storage                              | `record_execution()` in `kernel/notebook_state.py`                                                                                                                                |
+| Unit tests                                     | `kernel_support/tests/test_column_provenance.py`                                                                                                                                  |
+| Integration tests                              | `TestForwardContaminationStructuralRead`, `TestStructuralProvenanceIntegration` in `kernel/tests/test_reproducibility_enforcer.py`                                                |
