@@ -19,3 +19,7 @@ formal-development
 
 # Byte-exact generated files (sync tests compare verbatim)
 flowbook/docs/_generated/
+
+# Lean build output and lake-generated manifest
+lean-proofs/.lake
+lean-proofs/lake-manifest.json
