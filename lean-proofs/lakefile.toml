@@ -1,0 +1,6 @@
+name = "flowbook-proofs"
+version = "0.1.0"
+defaultTargets = ["FlowBook"]
+
+[[lean_lib]]
+name = "FlowBook"
