@@ -4,7 +4,7 @@ This document explains the Lean 4 development in this directory
 (everything except the executable kernel `FlowBook/Exec.lean`). It is
 meant to be **self-contained**: it introduces the problem, then presents
 every definition — with its full body — and every theorem statement,
-building up to the three correctness results. Only *proofs* are omitted;
+building up to the three correctness results. Only _proofs_ are omitted;
 all definitions are shown in full and explained.
 
 Everything here is machine-checked in Lean with no `sorry` and no custom
@@ -14,19 +14,19 @@ axioms.
 
 ## The problem: reproducible notebooks
 
-A *computational notebook* (Jupyter, and similar) is a sequence of code
-*cells* that a user runs interactively. Cells share state through a
+A _computational notebook_ (Jupyter, and similar) is a sequence of code
+_cells_ that a user runs interactively. Cells share state through a
 global namespace: running a cell reads some variables, writes others, and
-records an *output*. Crucially, the user may run cells **in any order**,
+records an _output_. Crucially, the user may run cells **in any order**,
 re-run them, edit them, insert and delete them.
 
-This flexibility breaks *reproducibility*. The outputs currently shown in
+This flexibility breaks _reproducibility_. The outputs currently shown in
 a notebook may not be the outputs you would get by restarting the kernel
 and running every cell from top to bottom. For example, if you run a cell
 that defines `x = 1`, then a cell that prints `x`, then go back and edit
 the first cell to `x = 2` **without re-running the second**, the notebook
 still displays `1` — but a fresh top-to-bottom run would display `2`. The
-notebook is *not reproducible*.
+notebook is _not reproducible_.
 
 FlowBook is a dynamic analysis that watches the reads and writes of each
 cell and marks cells **stale** when their displayed output can no longer
@@ -34,8 +34,8 @@ be trusted. Its guarantee: **whenever FlowBook reports every cell as
 up-to-date ("clean"), the notebook is reproducible.**
 
 This formalization defines an idealized notebook semantics, defines what
-reproducibility means, defines FlowBook's analysis as an *instrumented
-semantics*, and proves three theorems: the analysis's invariant is
+reproducibility means, defines FlowBook's analysis as an _instrumented
+semantics_, and proves three theorems: the analysis's invariant is
 preserved by every user action (**Preservation**), an all-clean notebook
 really is reproducible (**Output Consistency**), and the natural strategy
 of re-running stale cells always terminates (**Progress**).
@@ -47,44 +47,45 @@ of re-running stale cells always terminates (**Progress**).
 A few pieces of syntax recur throughout. If you know basic functional
 programming, this is enough to read every definition below:
 
-| Syntax | Meaning |
-|---|---|
-| `A → B` | function from `A` to `B`; also logical implication when `A`, `B` are propositions |
-| `Prop` | the type of propositions (statements that can be proved) |
-| `∃ x, P x` / `∀ x, P x` | there exists / for all |
-| `∧` `∨` `¬` `↔` | and, or, not, if-and-only-if |
-| `Option A` | either `some a` (a value) or `none` (absent) |
-| `List A` | a finite list |
-| `xs[i]?` | the `i`-th element of a list as an `Option` (`some x` if in range, `none` otherwise) — 0-based |
-| `xs.set i x` | the list `xs` with position `i` replaced by `x` |
-| `xs.insertIdx i x` | insert `x` at position `i`, shifting later elements right |
-| `xs.eraseIdx i` | remove the element at position `i`, shifting later elements left |
-| `xs.length` | the number of elements |
-| `{ c with field := v }` | the record `c` with one field overwritten |
-| `⟨a, b, c⟩` | an anonymous constructor (builds a structure/tuple from its parts) |
-| `fun x => e` | an anonymous function |
-| `structure … where` | a record type (a bundle of named fields) |
-| `inductive … where` | a datatype or an inductively-defined relation, given by its constructors |
+| Syntax                  | Meaning                                                                                        |
+| ----------------------- | ---------------------------------------------------------------------------------------------- |
+| `A → B`                 | function from `A` to `B`; also logical implication when `A`, `B` are propositions              |
+| `Prop`                  | the type of propositions (statements that can be proved)                                       |
+| `∃ x, P x` / `∀ x, P x` | there exists / for all                                                                         |
+| `∧` `∨` `¬` `↔`         | and, or, not, if-and-only-if                                                                   |
+| `Option A`              | either `some a` (a value) or `none` (absent)                                                   |
+| `List A`                | a finite list                                                                                  |
+| `xs[i]?`                | the `i`-th element of a list as an `Option` (`some x` if in range, `none` otherwise) — 0-based |
+| `xs.set i x`            | the list `xs` with position `i` replaced by `x`                                                |
+| `xs.insertIdx i x`      | insert `x` at position `i`, shifting later elements right                                      |
+| `xs.eraseIdx i`         | remove the element at position `i`, shifting later elements left                               |
+| `xs.length`             | the number of elements                                                                         |
+| `{ c with field := v }` | the record `c` with one field overwritten                                                      |
+| `⟨a, b, c⟩`             | an anonymous constructor (builds a structure/tuple from its parts)                             |
+| `fun x => e`            | an anonymous function                                                                          |
+| `structure … where`     | a record type (a bundle of named fields)                                                       |
+| `inductive … where`     | a datatype or an inductively-defined relation, given by its constructors                       |
 
 The whole development is generic in four types:
 
-| Type | Stands for |
-|---|---|
-| `Code` | the source code of a cell (kept abstract) |
-| `Output` | the output a cell displays (kept abstract) |
-| `L` | *locations* — the units of state cells read and write |
-| `V` | the *values* stored at locations |
+| Type     | Stands for                                            |
+| -------- | ----------------------------------------------------- |
+| `Code`   | the source code of a cell (kept abstract)             |
+| `Output` | the output a cell displays (kept abstract)            |
+| `L`      | _locations_ — the units of state cells read and write |
+| `V`      | the _values_ stored at locations                      |
 
 Cell positions are **0-based** here.
 
 ---
 
 # Part 1 — The notebook model and standard semantics
+
 ### (`FlowBook/Semantics.lean`)
 
 ## 1.1 Locations
 
-A *location* is a unit of state a cell can read or write. FlowBook tracks
+A _location_ is a unit of state a cell can read or write. FlowBook tracks
 two granularities: ordinary top-level variables, and **individual columns
 of a DataFrame** (so that two cells touching different columns of the
 same table do not appear to conflict). None of the metatheory depends on
@@ -99,7 +100,7 @@ inductive Loc (Var Addr Col : Type) where
 
 ## 1.2 Stores
 
-A *store* maps locations to values. `none` means a location is unbound.
+A _store_ maps locations to values. `none` means a location is unbound.
 The empty store binds nothing.
 
 ```lean
@@ -109,7 +110,7 @@ def Store.empty : Store L V := fun _ => none
 ```
 
 Two auxiliary relations describe when stores agree. `AgreeExcept σ σ' X`
-says `σ` and `σ'` are equal *everywhere outside* the set `X` (here a set
+says `σ` and `σ'` are equal _everywhere outside_ the set `X` (here a set
 of locations is represented by its membership predicate `L → Prop`);
 `AgreeOn` is the dual.
 
@@ -128,9 +129,9 @@ Running one cell is modeled by a judgment written informally as
 > `c ; Σ ⇓ o · Σ' · r · w`
 
 meaning: executing code `c` in store `Σ` produces output `o`, new store
-`Σ'`, the set `r` of locations *read from the incoming store*, and the
-set `w` of locations *written*. The actual language runtime (Python, say)
-is treated as a **black box**, and evaluation is a *relation*, not a
+`Σ'`, the set `r` of locations _read from the incoming store_, and the
+set `w` of locations _written_. The actual language runtime (Python, say)
+is treated as a **black box**, and evaluation is a _relation_, not a
 function, because a cell may be non-deterministic (e.g. it draws a random
 number).
 
@@ -138,11 +139,11 @@ The metatheory needs exactly two facts about this black box. They are
 bundled as a type class `CellEval` — an interface a concrete runtime must
 implement — carrying the evaluation relation `Eval` plus two guarantees:
 
-* **`frame`**: the store changes *only* at written locations. (This is
+- **`frame`**: the store changes _only_ at written locations. (This is
   what makes `w` genuinely "the write set".)
-* **`locality`**: a cell's behavior depends only on what it reads. If we
+- **`locality`**: a cell's behavior depends only on what it reads. If we
   start from a different store `τ` that agrees with `Σ` on the read set
-  `r`, then *the same execution is available*: same output, same read and
+  `r`, then _the same execution is available_: same output, same read and
   write sets, and the same values written. (Fixing the read locations
   pins down one execution, even for a non-deterministic cell.)
 
@@ -158,7 +159,7 @@ class CellEval (Code Output L V : Type) where
       (∀ ℓ, w ℓ → τ' ℓ = σ' ℓ) ∧ (∀ ℓ, ¬ w ℓ → τ' ℓ = τ ℓ)
 ```
 
-The *standard* (uninstrumented) evaluation just forgets the read/write
+The _standard_ (uninstrumented) evaluation just forgets the read/write
 sets — it is what a plain kernel does:
 
 ```lean
@@ -231,8 +232,8 @@ inductive StdStep : StdState … → Op Code → StdState … → Prop where
       StdStep st (.move s d) st'
 ```
 
-*(Implicit variable binders are elided above for readability; the full
-declaration names them explicitly.)*
+_(Implicit variable binders are elided above for readability; the full
+declaration names them explicitly.)_
 
 ## 1.6 Top-to-bottom execution and reproducibility
 
@@ -250,11 +251,11 @@ inductive Runs : Store L V → List (Code × Option Output) → Store L V → Pr
       Runs σ ((c, some o) :: rest) σ'
 ```
 
-A notebook is **reproducible** (the paper also says *output consistent*)
+A notebook is **reproducible** (the paper also says _output consistent_)
 exactly when some top-to-bottom execution from the empty store
 reproduces its recorded outputs. The final store need not match the
 user's interactive store — only the visible outputs must agree, so we
-only assert *existence* of a resulting store:
+only assert _existence_ of a resulting store:
 
 ```lean
 def Reproducible (st : StdState …) : Prop :=
@@ -268,6 +269,7 @@ This is the property FlowBook aims to guarantee.
 ---
 
 # Part 2 — FlowBook's analysis as an instrumented semantics
+
 ### (`FlowBook/Analysis.lean`)
 
 FlowBook augments each cell with bookkeeping: a **status tag**, and the
@@ -333,7 +335,7 @@ def ReadsAbove  (cs) (i) (ℓ) : Prop := ∃ j, j < i ∧ ReadsAt  cs j ℓ  -- 
 ## 2.3 Rerun consistency
 
 FlowBook allows a cell's run only if its observed reads and writes are
-consistent with what that cell would have done *in place* during a clean
+consistent with what that cell would have done _in place_ during a clean
 top-to-bottom run. This is captured by four conditions, bundled as a
 structure. Reading each field: cell `i` may not read a location it also
 writes; everything it reads must have been written by some cell **above**
@@ -359,7 +361,7 @@ their recorded output might no longer be valid. Two situations arise.
 Throughout, `w` is the cell's **new** write set (for deletion, `w` is
 empty), while the tables in `cs` hold the **old** reads and writes.
 
-**Forward staleness.** A cell `j` *below* `i` is invalidated if it
+**Forward staleness.** A cell `j` _below_ `i` is invalidated if it
 reads or writes any location that `i` writes now (`w`) or wrote before
 (`W_i`):
 
@@ -369,11 +371,11 @@ def FwdStale (cs) (i) (w) (j) : Prop :=
   i < j ∧ ∃ ℓ, (WritesAt cs i ℓ ∨ w ℓ) ∧ (ReadsAt cs j ℓ ∨ WritesAt cs j ℓ)
 ```
 
-**Backward staleness.** Suppose cell `i` *stops* writing a location `ℓ`
+**Backward staleness.** Suppose cell `i` _stops_ writing a location `ℓ`
 it used to write (`ℓ ∈ W_i \ w`). Cells below `i` that read `ℓ` were
 depending on `i` to supply it; with that write gone, `ℓ` must instead be
 restored by the **nearest cell above `i` that writes `ℓ`**. That cell —
-the *last writer* of `ℓ` above `i` — is marked stale so that re-running
+the _last writer_ of `ℓ` above `i` — is marked stale so that re-running
 it restores `ℓ`. "Last writer" is `j < i` writing `ℓ` with no other
 writer of `ℓ` strictly between `j` and `i`:
 
@@ -394,7 +396,7 @@ backward-stale:
 def Marked (cs) (i) (w) (j) : Prop := FwdStale cs i w j ∨ BwdStale cs i w j
 ```
 
-## 2.5 The tag update, and why it is a *specification*
+## 2.5 The tag update, and why it is a _specification_
 
 When cell `i` runs, every other cell `j` keeps its code, output, and
 read/write sets, but its tag becomes `stale` exactly when it is `Marked`
@@ -477,7 +479,7 @@ inductive InstStep : Notebook … → Op Code → Notebook … → Prop where
 ## 2.7 Well-formedness: the analysis invariant
 
 FlowBook maintains an invariant that every **clean** cell is trustworthy.
-Concretely, a clean cell `i` must have a *witness*: it can be re-executed
+Concretely, a clean cell `i` must have a _witness_: it can be re-executed
 from the current store to reproduce its recorded output and its recorded
 read/write sets, changing the store only at locations that later cells
 overwrite anyway.
@@ -511,6 +513,7 @@ theorem wellFormed_initial :
 # Part 3 — The three correctness theorems
 
 ## 3.1 Preservation — every operation keeps the invariant
+
 ### (`FlowBook/Preservation.lean`)
 
 > **Theorem (Preservation).** If `S · I` is well-formed and the user
@@ -529,6 +532,7 @@ operation, matching the proof in §3 of the supplement (the `[Inst-Run]` case sp
 on whether a clean cell sits before, at, or after the executed cell).
 
 ## 3.2 Output Consistency — an all-clean notebook is reproducible
+
 ### (`FlowBook/OutputConsistency.lean`)
 
 `AllClean` says every cell is tagged clean:
@@ -538,7 +542,7 @@ def AllClean (cs) : Prop := ∀ i c, cs[i]? = some c → c.tag = Tag.clean
 ```
 
 > **Theorem (Output Consistency / Reproducibility).** A well-formed
-> notebook in which *every* cell is clean is reproducible: its recorded
+> notebook in which _every_ cell is clean is reproducible: its recorded
 > outputs match some top-to-bottom execution from the empty store.
 
 ```lean
@@ -552,11 +556,12 @@ using each clean cell's witness (via `locality`) to show it produces the
 same output it recorded.
 
 ## 3.3 Progress — re-running stale cells terminates
+
 ### (`FlowBook/Progress.lean`)
 
 Preservation and Output Consistency say the invariant is kept and that
 all-clean states are good — but not that an all-clean state is
-*reachable*. Progress closes the loop, for the `RunToClean` algorithm:
+_reachable_. Progress closes the loop, for the `RunToClean` algorithm:
 
 ```
 E := ∅                                   -- cells executed so far
@@ -575,15 +580,15 @@ Every execution that reports no potential non-termination terminates,
 either all-clean (hence reproducible) or at a report.
 
 The check is necessary: cell evaluation is a relation, and rerunning
-stale cells with no check need not terminate.  Two cells with empty
+stale cells with no check need not terminate. Two cells with empty
 read sets that each write `{a}` or `{b}`, choosing differently on
 successive runs, mark each other stale forever — each run of the later
 cell that drops a location backward-marks the earlier cell via
 `LastWriter`, and each run of the earlier cell forward-marks the
-later.  The check forbids exactly the event that repeats: staleness
+later. The check forbids exactly the event that repeats: staleness
 moves toward earlier cells only via `BackwardStale` (a run dropping a
 write owned by an earlier cell), so requiring reruns to mark nothing
-before themselves *is* the termination invariant, checked directly —
+before themselves _is_ the termination invariant, checked directly —
 no footprint comparison is needed.
 
 The first stale cell is the earliest stale position:
@@ -600,7 +605,7 @@ theorem allClean_or_firstStale (cs) : AllClean cs ∨ ∃ i, FirstStale cs i
 
 Executions that report nothing are modeled by `RunToClean F nb nb' F'`,
 where `F` is the **complement of the algorithm's `E`** — the positions
-not yet executed.  Initially `F` is all positions (`E = ∅`).  Each
+not yet executed. Initially `F` is all positions (`E = ∅`). Each
 step runs the first stale cell: a first execution (`first`) is any
 successful run; a repeated execution (`rerun`) must leave every
 position `≤ i` clean — the algorithm's check, stated directly on the
@@ -644,7 +649,7 @@ theorem progress_init (hwf : WellFormed nb) :   -- the algorithm's E = ∅
       (AllClean nb'.cells ∨ RunToCleanStuck nb' F')
 ```
 
-Combined with Output Consistency, termination lands in a *reproducible*
+Combined with Output Consistency, termination lands in a _reproducible_
 notebook or at a report:
 
 ```lean
@@ -655,13 +660,13 @@ theorem progress_reproducible (hwf : WellFormed nb) (F : List Nat) :
 Termination follows the lexicographic measure `(|F|, n − first-stale
 position)`: a first execution removes `i` from `F`; a rerun keeps the
 prefix clean by its side condition, so the run of clean cells at the
-top strictly grows.  The measure yields the paper's bound — at most
+top strictly grows. The measure yields the paper's bound — at most
 `n` first executions and at most `n` reruns between consecutive first
-executions, i.e. at most `n(n+2)` runs in total.  The proof's key
+executions, i.e. at most `n(n+2)` runs in total. The proof's key
 supporting lemmas (behind the paper's Stability lemma) show the rerun
 condition is satisfiable exactly where the paper's proof needs it:
 after running the first stale cell, every cell `j < i` — in particular
-every backward-marked one — *can* re-run reproducing its recorded
+every backward-marked one — _can_ re-run reproducing its recorded
 output, read set, and write set (a `MatchingRunAt`; the run's
 `noWriteAfterRead` check keeps its new writes off those cells' read
 sets, so `locality` reproduces their recorded behavior), and such a
@@ -682,12 +687,13 @@ theorem cleanPrefix_run_exists
 ---
 
 # Part 4 — The analysis refines the standard semantics
+
 ### (`FlowBook/Erasure.lean`)
 
 The instrumented rules were built by adding bookkeeping on top of the
 standard rules. This theorem confirms the two stay in sync: erasing the
 instrumentation from any instrumented step yields a valid standard step.
-So FlowBook only *restricts* which ordinary behaviors are allowed — it
+So FlowBook only _restricts_ which ordinary behaviors are allowed — it
 never invents new ones.
 
 ```lean
@@ -697,6 +703,7 @@ theorem instStep_erase (h : InstStep nb op nb') : StdStep nb.erase op nb'.erase
 ---
 
 # Part 5 — The axioms are consistent
+
 ### (`FlowBook/Examples.lean`)
 
 Everything above assumed an abstract `CellEval` with its `frame` and
@@ -752,27 +759,27 @@ abbrev MiniNotebook := Notebook (Cmd PaperLoc Nat) Unit PaperLoc Nat
 
 ## Summary of the correspondence
 
-| Concept | Lean | File |
-|---|---|---|
-| location `ℓ ::= x ∣ d.c` | `Loc` | Semantics |
-| store, empty store, "agree except on X" | `Store`, `Store.empty`, `AgreeExcept` | Semantics |
-| cell evaluation `c ; Σ ⇓ o · Σ' · r · w` | `CellEval.Eval` + `frame`, `locality` | Semantics |
-| user operations | `Op` | Semantics |
-| standard state and semantics | `StdState`, `StdStep` | Semantics |
-| top-to-bottom execution | `Runs` | Semantics |
-| reproducible / output-consistent | `Reproducible` | Semantics |
-| status tag; instrumented cell/notebook | `Tag`, `Cell`, `Notebook` | Analysis |
-| rerun consistency (4 conditions) | `RerunConsistent` | Analysis |
-| forward / backward staleness | `FwdStale`, `IsLastWriter`, `BwdStale`, `Marked` | Analysis |
-| the tag update / instrumented semantics | `RetagSpec`, `InstStep` | Analysis |
-| the analysis invariant | `Witnessed`, `WellFormed` | Analysis |
-| notebooks start well-formed | `wellFormed_initial` | Analysis |
-| **Preservation** | `preservation` | Preservation |
-| **Output Consistency** | `output_consistency` | OutputConsistency |
-| **Progress** | `progress`, `progress_init`, `progress_reproducible` | Progress |
-| the `RunToClean` algorithm and its check | `RunToClean`, `RunToCleanStuck`, `MatchingRunAt`, `cleanPrefix_run_exists` | Progress |
-| analysis refines standard semantics | `instStep_erase` | Erasure |
-| the axioms are satisfiable | `Cmd`, `CmdEval`, `instCellEval` | Examples |
+| Concept                                  | Lean                                                                       | File              |
+| ---------------------------------------- | -------------------------------------------------------------------------- | ----------------- |
+| location `ℓ ::= x ∣ d.c`                 | `Loc`                                                                      | Semantics         |
+| store, empty store, "agree except on X"  | `Store`, `Store.empty`, `AgreeExcept`                                      | Semantics         |
+| cell evaluation `c ; Σ ⇓ o · Σ' · r · w` | `CellEval.Eval` + `frame`, `locality`                                      | Semantics         |
+| user operations                          | `Op`                                                                       | Semantics         |
+| standard state and semantics             | `StdState`, `StdStep`                                                      | Semantics         |
+| top-to-bottom execution                  | `Runs`                                                                     | Semantics         |
+| reproducible / output-consistent         | `Reproducible`                                                             | Semantics         |
+| status tag; instrumented cell/notebook   | `Tag`, `Cell`, `Notebook`                                                  | Analysis          |
+| rerun consistency (4 conditions)         | `RerunConsistent`                                                          | Analysis          |
+| forward / backward staleness             | `FwdStale`, `IsLastWriter`, `BwdStale`, `Marked`                           | Analysis          |
+| the tag update / instrumented semantics  | `RetagSpec`, `InstStep`                                                    | Analysis          |
+| the analysis invariant                   | `Witnessed`, `WellFormed`                                                  | Analysis          |
+| notebooks start well-formed              | `wellFormed_initial`                                                       | Analysis          |
+| **Preservation**                         | `preservation`                                                             | Preservation      |
+| **Output Consistency**                   | `output_consistency`                                                       | OutputConsistency |
+| **Progress**                             | `progress`, `progress_init`, `progress_reproducible`                       | Progress          |
+| the `RunToClean` algorithm and its check | `RunToClean`, `RunToCleanStuck`, `MatchingRunAt`, `cleanPrefix_run_exists` | Progress          |
+| analysis refines standard semantics      | `instStep_erase`                                                           | Erasure           |
+| the axioms are satisfiable               | `Cmd`, `CmdEval`, `instCellEval`                                           | Examples          |
 
 Every statement above is proved in Lean; see the `.lean` files for the
 proofs, and `FlowBook/Exec.lean` for an executable, separately-verified
