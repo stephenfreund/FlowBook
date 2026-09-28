@@ -2,10 +2,9 @@
 
 This directory contains a complete [Lean 4](https://lean-lang.org)
 formalization of the mathematical development in the FlowBook paper:
-the notebook semantics (`semantics-col.tex`), the dynamic analysis for
-reproducibility / output consistency (`analysis-col.tex`,
-`flowbook-analysis.tex`), and the three correctness theorems with the
-full proofs from the appendix (`appendix.tex`, `supplemental.tex`).
+the notebook semantics, the dynamic analysis for reproducibility /
+output consistency, and the three correctness theorems with the full
+proofs from the supplemental material.
 
 It also includes an **executable reference kernel** (`FlowBook/Exec.lean`)
 that is proved sound against the relational semantics and `#eval`s the
@@ -30,14 +29,14 @@ lake build
 
 | Lean file | Paper source | Contents |
 |---|---|---|
-| `FlowBook/Semantics.lean` | §Semantics (`semantics-col.tex`) | Locations `ℓ ::= x \| d.c` (`Loc`), stores, black-box cell evaluation (`CellEval`), notebook operations (`Op`), the standard semantics of Fig. `fig:std-semantics` (`StdStep`), top-to-bottom execution (`Runs`), Def. *Reproducible / Output-Consistent State* (`Reproducible`) |
-| `FlowBook/Analysis.lean` | §Analysis (`analysis-col.tex`) | Instrumentation `I = (T, R, W)` (fused into `Cell` records), Def. *Rerun Consistent Accesses* (`RerunConsistent`), `ForwardStale`/`LastWriter`/`BackwardStale` (`FwdStale`, `IsLastWriter`, `BwdStale`), the instrumented semantics of Fig. `fig:inst-semantics` (`InstStep`), Def. *Well-Formed State* (`WellFormed`), and the paper's initial-state observation (`wellFormed_initial`) |
-| `FlowBook/Preservation.lean` | Theorem 1 + appendix proof | `preservation`: well-formedness is preserved by every operation, by cases `[Inst-Run]` (subcases `j < i`, `j = i`, `j > i`), `[Inst-Edit]`, `[Inst-Insert]`, `[Inst-Delete]`, `[Inst-Move]` |
-| `FlowBook/OutputConsistency.lean` | Theorem 2 + appendix proof | `output_consistency`: well-formed all-clean states are reproducible, by the paper's induction on prefixes with the agreement invariant on `(⋃ W_{1..i}) \ (⋃ W_{i+1..n})` |
-| `FlowBook/Progress.lean` | Theorem 3 + appendix proof | `progress`, `progress_init`, `progress_reproducible`: every report-free execution of the `RunToClean` algorithm terminates in an all-clean (hence reproducible) state or at a report; `canRerun_after_run`: the paper's key claim that cells marked stale by `BackwardStale` can be re-run reproducing their recorded behavior |
-| `FlowBook/Erasure.lean` | Figs. `fig:std-semantics` / `fig:inst-semantics` | `instStep_erase`: the instrumented semantics refines the standard semantics (erasing `I` from an instrumented step yields a standard step) |
+| `FlowBook/Semantics.lean` | §Semantics | Locations `ℓ ::= x \| d.c` (`Loc`), stores, black-box cell evaluation (`CellEval`), notebook operations (`Op`), the standard semantics of Fig. 8 (`StdStep`), top-to-bottom execution (`Runs`), Def. *Reproducible / Output-Consistent State* (`Reproducible`) |
+| `FlowBook/Analysis.lean` | §Analysis | Instrumentation `I = (T, R, W)` (fused into `Cell` records), Def. *Rerun Consistent Accesses* (`RerunConsistent`), `ForwardStale`/`LastWriter`/`BackwardStale` (`FwdStale`, `IsLastWriter`, `BwdStale`), the instrumented semantics of Fig. 9 (`InstStep`), Def. *Well-Formed State* (`WellFormed`), and the paper's initial-state observation (`wellFormed_initial`) |
+| `FlowBook/Preservation.lean` | Theorem 2.3 of the supplement, proof in §3 of the supplement | `preservation`: well-formedness is preserved by every operation, by cases `[Inst-Run]` (subcases `j < i`, `j = i`, `j > i`), `[Inst-Edit]`, `[Inst-Insert]`, `[Inst-Delete]`, `[Inst-Move]` |
+| `FlowBook/OutputConsistency.lean` | Theorem 2.4 of the supplement, proof in §4 of the supplement | `output_consistency`: well-formed all-clean states are reproducible, by the paper's induction on prefixes with the agreement invariant on `(⋃ W_{1..i}) \ (⋃ W_{i+1..n})` |
+| `FlowBook/Progress.lean` | Theorem 2.5 of the supplement, proof in §5 of the supplement | `progress`, `progress_init`, `progress_reproducible`: every report-free execution of the `RunToClean` algorithm terminates in an all-clean (hence reproducible) state or at a report; `canRerun_after_run`: the paper's key claim that cells marked stale by `BackwardStale` can be re-run reproducing their recorded behavior |
+| `FlowBook/Erasure.lean` | Figs. 8 / 9 | `instStep_erase`: the instrumented semantics refines the standard semantics (erasing `I` from an instrumented step yields a standard step) |
 | `FlowBook/Examples.lean` | — | A concrete model (assignments and copies) satisfying the evaluation axioms, showing the axiomatization is consistent; instantiations of all three theorems at that model |
-| `FlowBook/Exec.lean` | Figs. `fig:litmus-tests` / `fig:staleness-litmus-tests` | An **executable** reference kernel: a concrete cell language with a functional evaluator, decidable rerun-consistency and staleness, functional operations (`runCell`/`editCell`/`insertCell`/`deleteCell`), soundness theorems tying each accepted operation to a real `InstStep`, and `#eval` demos replaying every litmus test |
+| `FlowBook/Exec.lean` | Figs. 3 / 4 | An **executable** reference kernel: a concrete cell language with a functional evaluator, decidable rerun-consistency and staleness, functional operations (`runCell`/`editCell`/`insertCell`/`deleteCell`), soundness theorems tying each accepted operation to a real `InstStep`, and `#eval` demos replaying every litmus test |
 
 ## The executable reference kernel (`FlowBook/Exec.lean`)
 
@@ -71,7 +70,7 @@ are the same object.
   kernel accepts an operation sequence and the final notebook is all
   clean, then it is reproducible.
 * **Litmus tests.**  The `#eval` block at the end replays every scenario
-  from Figures `fig:litmus-tests` and `fig:staleness-litmus-tests`.  The
+  from Figures 3 and 4.  The
   four rerun-consistency scenarios each print the exact violation the
   paper labels (`noReadAndWrite`, `writeBeforeRead`, `noReadBeforeWrite`,
   `noWriteAfterRead`); the staleness scenarios print the resulting
@@ -101,8 +100,8 @@ soundness proof, which only uses the "no violation" case.
   - `locality` — evaluation depends only on the locations read: from
     any store agreeing on `r`, the same execution (same output, same
     read and write sets, same written values) is available.  This
-    property is stated in a remark in `supplemental.tex` and is what
-    realizes the commuting diagrams in the appendix proofs.
+    property is stated in a remark in the paper and is what
+    realizes the commuting diagrams in the proofs of §§3–5 of the supplement.
 
   `FlowBook/Examples.lean` proves both axioms hold for a concrete
   language, so the axiomatization is non-vacuous.
@@ -140,9 +139,9 @@ theorem progress (hwf : WellFormed nb) (F : List Nat) :
       (AllClean nb'.cells ∨ RunToCleanStuck nb' F')
 ```
 
-## Notes on Theorem 3 (Progress)
+## Notes on Theorem 2.5 (Progress)
 
-Theorem 3 is stated for the `RunToClean` algorithm:
+Theorem 2.5 of the supplement (proved in §5 of the supplement) is stated for the `RunToClean` algorithm:
 
 ```
 E := ∅                                   -- cells executed so far

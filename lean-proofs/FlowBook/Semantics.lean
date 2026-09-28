@@ -2,18 +2,16 @@
 # A Semantics for Interactive Computational Notebook Execution
 
 This file formalizes Section "A Semantics for Interactive Computational
-Notebook Execution" of the FlowBook paper (`semantics-col.tex`, and its
-copy in `supplemental.tex`):
+Notebook Execution" of the FlowBook paper:
 
 * the notebook model: cells, outputs, stores over locations;
 * black-box cell evaluation as a big-step *relation* (the paper treats
   the underlying language runtime as a black box, and notes that cells
   may be non-deterministic);
 * the notebook operations `Run/Edit/Insert/Delete/Move` and the
-  standard semantics of Figure `fig:std-semantics`;
+  standard semantics of Figure 8;
 * top-to-bottom execution (`Std-Top-to-Bottom-Execution`) and
-  reproducibility / output consistency (Definition `def:reproducible`,
-  a.k.a. `def:output-consistent-supp`).
+  reproducibility / output consistency (Definition 1.1 of the supplement).
 
 The development is parametric in the types of cell source code `Code`,
 cell outputs `Output`, locations `L`, and values `V`.  The paper's
@@ -69,7 +67,7 @@ because cells may be non-deterministic.
 
 Treating evaluation as a black box, the metatheory needs exactly two
 assumptions, both implicit in the paper's proofs (the `locality`/frame
-property is stated in a remark in `supplemental.tex`):
+property is stated in a remark in the paper):
 
 * `frame`: the resulting store agrees with the incoming store outside
   the write set (this is the defining property of the write set: "the
@@ -116,7 +114,7 @@ inductive Op (Code : Type) where
   | delete (i : Nat)
   | move (s d : Nat)
 
-/-! ## The standard semantics (Figure `fig:std-semantics`)
+/-! ## The standard semantics (Figure 8)
 
 A standard notebook state is `S = (C, O, Σ)`.  We store the code and
 output sequences as a single list of pairs; `O_i = none` means cell `i`
@@ -127,7 +125,7 @@ structure StdState (Code Output L V : Type) where
   cells : List (Code × Option Output)
   store : Store L V
 
-/-- The standard semantics `S ─op→ S'` of Figure `fig:std-semantics`.
+/-- The standard semantics `S ─op→ S'` of Figure 8.
 
 `Std-Run` permits executing *any* cell at *any* time; `Std-Move` is the
 composition of a delete and an insert, exactly as in the figure. -/
@@ -191,7 +189,7 @@ def Reproducible [CellEval Code Output L V] (st : StdState Code Output L V) : Pr
   ∃ σ' : Store L V, Runs Store.empty st.cells σ'
 
 /-- The paper also calls reproducibility "output consistency"
-(Definition `def:output-consistent-supp`). -/
+(Definition 1.1 of the supplement). -/
 abbrev OutputConsistent [CellEval Code Output L V] (st : StdState Code Output L V) :
     Prop :=
   Reproducible st

@@ -1,19 +1,17 @@
 /-
 # Dynamic Analysis for Reproducibility: the Instrumented Semantics
 
-This file formalizes Section "Dynamic Analysis for Reproducibility"
-(`analysis-col.tex` / `supplemental.tex`):
+This file formalizes Section "Dynamic Analysis for Reproducibility":
 
 * the instrumentation state `I = (T, R, W)` — status tags, read sets,
   and write sets — attached to each cell;
 * the rerun-consistency predicates `NoReadAndWrite`, `WriteBeforeRead`,
   `NoReadBeforeWrite`, `NoWriteAfterRead`
-  (Definition `def:rerun-consistent-accesses`);
+  (Definition 2.1 of the supplement);
 * the staleness predicates `ForwardStale`, `BackwardStale`, and
   `LastWriter`;
-* the instrumented semantics `S · I ⟹op S' · I'` of Figure
-  `fig:inst-semantics`;
-* the well-formedness invariant (Definition `def:well-formed`).
+* the instrumented semantics `S · I ⟹op S' · I'` of Figure 9;
+* the well-formedness invariant (Definition 2.2 of the supplement).
 
 Representation notes:
 
@@ -101,7 +99,7 @@ def WritesAbove (i : Nat) (ℓ : L) : Prop := ∃ j, j < i ∧ WritesAt cs j ℓ
 /-- `ℓ ∈ ⋃ R_{1..i-1}`: some cell strictly above `i` reads `ℓ`. -/
 def ReadsAbove (i : Nat) (ℓ : L) : Prop := ∃ j, j < i ∧ ReadsAt cs j ℓ
 
-/-! ## Rerun consistency (Definition `def:rerun-consistent-accesses`) -/
+/-! ## Rerun consistency (Definition 2.1 of the supplement) -/
 
 /-- Definition (Rerun Consistent Accesses).  Instrumentation state `R`
 and `W` are rerun consistent for cell `i` if:
@@ -163,15 +161,15 @@ def RetagSpec (cs cs' : List (Cell Code Output L)) (i : Nat) (w : L → Prop) : 
     ∃ t, cs'[j]? = some { c with tag := t } ∧
       (t = Tag.stale ↔ (Marked cs i w j ∨ c.tag = Tag.stale))
 
-/-! ## The instrumented semantics (Figure `fig:inst-semantics`) -/
+/-! ## The instrumented semantics (Figure 9) -/
 
 open CellEval in
-/-- The instrumented semantics `S · I ⟹op S' · I'` of Figure
-`fig:inst-semantics`.
+/-- The instrumented semantics `S · I ⟹op S' · I'` of
+Figure 9.
 
 * `[Inst-Run]` evaluates cell `i` via the instrumented judgment,
   requires the updated read/write tables to be rerun consistent for
-  `i` (Definition `def:rerun-consistent-accesses`), marks cell `i`
+  `i` (Definition 2.1 of the supplement), marks cell `i`
   clean, and marks forward/backward-stale cells stale.
 * `[Inst-Edit]` replaces the code and marks the cell stale, leaving
   `R`, `W`, and the recorded output unchanged.
@@ -263,13 +261,13 @@ theorem retag_exists (cs : List (Cell Code Output L)) (i : Nat) (w : L → Prop)
     · refine ⟨.clean, ?_, by simp [hm]⟩
       simp [retagFun, hj, hcj, hm]
 
-/-! ## Well-formedness (Definition `def:well-formed`) -/
+/-! ## Well-formedness (Definition 2.2 of the supplement) -/
 
 section WellFormed
 variable [CellEval Code Output L V]
 
 open CellEval in
-/-- Clauses (1) and (2) of Definition `def:well-formed` for cell `i`:
+/-- Clauses (1) and (2) of Definition 2.2 of the supplement for cell `i`:
 the cell can be re-executed from the current store `σ` to reproduce its
 recorded output and read/write sets, changing the store only at
 locations overwritten by cells below `i`. -/

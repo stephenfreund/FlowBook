@@ -1,13 +1,13 @@
 /-
-# Theorem 1 (Preservation): Notebook Operations Preserve Well-Formedness
+# Theorem 2.3 (Preservation): Notebook Operations Preserve Well-Formedness
 
 If `S · I` is well-formed and `S · I ⟹op S' · I'`, then `S' · I'` is
 well-formed.
 
-This file gives the full, machine-checked proof corresponding to the
-appendix "Preservation: Notebook Operations Preserve Well-Formedness"
-(`appendix.tex` / `supplemental.tex`).  The case analysis follows the
-paper:
+This file gives the full, machine-checked proof of Theorem 2.3 of the
+supplement, corresponding to the proof in §3 of the supplement
+("Preservation: Notebook Operations Preserve Well-Formedness").
+The case analysis follows the paper:
 
 * `[Inst-Edit]`  — the edited cell becomes stale; every other clean
   cell keeps its witness verbatim.
@@ -661,12 +661,12 @@ theorem preservation_delete
 
 end Delete
 
-/-! ## Theorem 1 (Preservation) -/
+/-! ## Theorem 2.3 (Preservation) -/
 
 section Main
 variable [CellEval Code Output L V]
 
-/-- **Theorem 1 (Preservation).**  If `S · I` is well-formed and
+/-- **Theorem 2.3 (Preservation).**  If `S · I` is well-formed and
 `S · I ⟹op S' · I'`, then `S' · I'` is well-formed. -/
 theorem preservation {nb nb' : Notebook Code Output L V} {op : Op Code}
     (hwf : WellFormed nb) (hstep : InstStep nb op nb') :

@@ -16,14 +16,14 @@ file gives a concrete, **executable** instantiation:
 * executable operations (`runCell`, `editCell`, `insertCell`,
   `deleteCell`) returning `Except Violation ·`, where `runCell` reports
   exactly the rerun-consistency violation it detected — the messages of
-  Figure `fig:litmus-tests`;
+  Figure 3;
 * **soundness**: whenever `runCell` succeeds it produces a genuine
   `[Inst-Run]` step (`runCell_sound`), and likewise for the structural
   operations; combined with `preservation`/`output_consistency`, an
   accepted run from a well-formed state stays well-formed, and an
   all-clean reachable state is reproducible (`allClean_reproducible`);
 * `#eval` demonstrations replaying the litmus tests of
-  Figures `fig:litmus-tests` and `fig:staleness-litmus-tests`.
+  Figures 3 and 4.
 
 The executable staleness marking is computed by decidable Boolean
 functions (`fwdStaleB`, `bwdStaleB`) that are proved to reflect the
@@ -202,7 +202,7 @@ theorem readsAt_iff (ecs : List (ECell L)) (j : Nat) (ℓ : L) :
   | none => simp [ECell.toCell]
   | some ec => simp [ECell.toCell]
 
-/-! ## Decidable rerun-consistency checks (Definition `def:rerun-consistent-accesses`) -/
+/-! ## Decidable rerun-consistency checks (Definition 2.1 of the supplement) -/
 
 /-- `ℓ` is written by some cell strictly above `i`. -/
 def writtenAboveB (ecs : List (ECell L)) (i : Nat) (ℓ : L) : Bool :=
@@ -249,7 +249,7 @@ theorem readAboveB_iff (ecs : List (ECell L)) (i : Nat) (ℓ : L) :
   · rintro ⟨k, hk, hr⟩; exact ⟨k, hk, (readsAt_iff ecs k ℓ).mp hr⟩
 
 /-- Rerun-consistency violations, with the diagnostic messages of
-Figure `fig:litmus-tests`. -/
+Figure 3. -/
 inductive Violation (L : Type) where
   | noSuchCell
   | noReadAndWrite (ℓ : L)     -- "reads and writes ℓ"
@@ -753,7 +753,7 @@ def scenario (cs : List (LCmd (Loc String Nat String)))
   | .ok nb => .tags (nb.cells.map (·.tag))
 
 /-
-Figure `fig:litmus-tests`, scenario 1 (NoReadAndWrite): running
+Figure 3, scenario 1 (NoReadAndWrite): running
 `x = x + 1` after `x = 0` reads and writes `x`.
 Prints: `rejected (noReadAndWrite (var "x"))`. -/
 #eval scenario [.const vx 0, .incr vx] [.run 0, .run 1]
@@ -777,7 +777,7 @@ Prints: `rejected (noWriteAfterRead (var "a"))`. -/
 #eval scenario [.const va 1, .use va, .const va 100] [.run 0, .run 1, .run 2]
 
 /-
-Figure `fig:staleness-litmus-tests`, forward staleness: re-running an
+Figure 4, forward staleness: re-running an
 upper cell that writes `x` marks the lower reader stale.
 Prints: `tags [clean, stale]`. -/
 #eval scenario [.const vx 5, .use vx] [.run 0, .run 1, .run 0]
