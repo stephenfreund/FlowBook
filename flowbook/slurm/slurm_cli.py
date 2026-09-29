@@ -1009,7 +1009,10 @@ def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
         echo "================================"
 
         # ---- Conda environment ----
+        # ~/.bashrc is sourced untraced: `set -x` would copy every export in it (API keys, tokens) into the job log
+        {{ set +x; }} 2>/dev/null
         source ~/.bashrc || true
+        set -x
         {env_activate} || echo "Warning: Failed to activate conda environment"
 
         conda info
@@ -1165,7 +1168,10 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
         {get_flowbook_env_exports()}
 
         # ---- Conda environment ----
+        # ~/.bashrc is sourced untraced: `set -x` would copy every export in it (API keys, tokens) into the job log
+        {{ set +x; }} 2>/dev/null
         source ~/.bashrc
+        set -x
         {env_activate}
 
         # cd {shlex.quote(str(work_dir))}
