@@ -362,6 +362,7 @@ from flowbook.kernel_support.base_kernel import BaseFlowbookKernel
 from flowbook.kernel_support.checkpoint import filter_user_namespace
 from flowbook.kernel_support.deepcopyable import check_deepcopyable
 from flowbook.kernel_support.timeout_handler import CellTimeoutHandler
+from flowbook.kernel_support import class_scope
 from flowbook.kernel_support.tracking import TrackingDict, rollback_module_bindings
 from flowbook.util.cell_index import index_to_alpha
 from flowbook.util.output import error, log, timer, output
@@ -1277,6 +1278,13 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             # magic arguments is neither recorded nor read-blocked
             self._patch_var_expand(tracking_dict)
 
+            # Route class-body name loads through TrackingDict.__getitem__ so
+            # a class body's reads of notebook variables are tracked (a class
+            # body's globals lookup bypasses the mapping protocol; see
+            # kernel_support/class_scope.py)
+            class_scope.install()
+            self.shell.ast_transformers.append(class_scope.ClassBodyReadTransformer())
+
             # Save initial state checkpoint (σ_0) for EXEC-RESTORE on the first cell
             # Uncopyable vars in the initial namespace are read-blocked, same
             # as during normal execution (paper semantics: warn + block reads).
@@ -1348,6 +1356,12 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
         has to live on the class. This installs a property on the shell's
         own class that returns the TrackingDict while a cell is running
         (flagged per instance) and the original value otherwise.
+
+        With a dict subclass as globals, CPython reads and writes the dict's
+        own storage directly for class-body lookups, ``global`` statements and
+        a new function's or class's ``__module__``. The TrackingDict mirrors
+        the namespace into that storage for the duration of the code
+        (begin_mirror/end_mirror; see "Raw-storage mirror" in tracking.py).
         """
         shell = self.shell
         original_run_code = shell.run_code
@@ -1379,26 +1393,34 @@ class FlowbookKernel(BaseFlowbookKernel, Magics):
             async def patched_run_code(code_obj, result=None, *, async_=False):
                 """Execute code with the TrackingDict as both globals and locals."""
                 old_user_ns = shell.user_ns
+                tracking_dict.begin_mirror()
                 try:
                     shell.user_ns = tracking_dict
                     shell.__dict__["_flowbook_globals_override"] = tracking_dict
                     return await original_run_code(code_obj, result, async_=async_)
                 finally:
-                    shell.user_ns = old_user_ns
-                    shell.__dict__.pop("_flowbook_globals_override", None)
+                    try:
+                        tracking_dict.end_mirror()
+                    finally:
+                        shell.user_ns = old_user_ns
+                        shell.__dict__.pop("_flowbook_globals_override", None)
 
         else:
 
             def patched_run_code(code_obj, result=None, *, async_=False):
                 """Execute code with the TrackingDict as both globals and locals."""
                 old_user_ns = shell.user_ns
+                tracking_dict.begin_mirror()
                 try:
                     shell.user_ns = tracking_dict
                     shell.__dict__["_flowbook_globals_override"] = tracking_dict
                     return original_run_code(code_obj, result, async_=async_)
                 finally:
-                    shell.user_ns = old_user_ns
-                    shell.__dict__.pop("_flowbook_globals_override", None)
+                    try:
+                        tracking_dict.end_mirror()
+                    finally:
+                        shell.user_ns = old_user_ns
+                        shell.__dict__.pop("_flowbook_globals_override", None)
 
         # Replace the method
         shell.run_code = patched_run_code
