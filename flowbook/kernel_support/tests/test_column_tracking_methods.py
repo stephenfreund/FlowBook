@@ -39,7 +39,7 @@ def df():
 
 def _get_reads(tracker, df):
     """Register df and return its read set."""
-    df_id = id(df)
+    df_id = tracker.key(df)
     tracker.register_df(df, "df")
     return tracker._reads_by_id[df_id]
 
@@ -135,7 +135,7 @@ class TestNoTrackingWhenInactive:
     def test_unregistered_df_no_tracking(self, tracker, df):
         """Tracker active but df not registered — no reads recorded."""
         df.sum(numeric_only=True)
-        reads = tracker._reads_by_id.get(id(df), set())
+        reads = tracker._reads_by_id.get(tracker.key(df), set())
         assert len(reads) == 0
 
     def test_values_no_crash_when_inactive(self, df):
@@ -231,29 +231,29 @@ class TestNonStringColumnLabels:
         df = pd.DataFrame({0: [1, 2], 1: [3, 4]})
         tracker.register_df(df, "df")
         df[0] = [10, 20]
-        assert "0" in tracker._writes_by_id[id(df)]
+        assert "0" in tracker._writes_by_id[tracker.key(df)]
 
     def test_int_column_read_recorded(self, tracker):
         df = pd.DataFrame({0: [1, 2], 1: [3, 4]})
         tracker.register_df(df, "df")
         df[0]
-        assert "0" in tracker._reads_by_id[id(df)]
+        assert "0" in tracker._reads_by_id[tracker.key(df)]
 
     def test_int_column_delete_recorded(self, tracker):
         df = pd.DataFrame({0: [1, 2], 1: [3, 4]})
         tracker.register_df(df, "df")
         del df[0]
-        assert "0" in tracker._column_deletions_by_id[id(df)]
+        assert "0" in tracker._column_deletions_by_id[tracker.key(df)]
 
     def test_tuple_column_write_recorded(self, tracker):
         df = pd.DataFrame({("a", "x"): [1], ("a", "y"): [2]})
         tracker.register_df(df, "df")
         df[("a", "x")] = [9]
-        assert str(("a", "x")) in tracker._writes_by_id[id(df)]
+        assert str(("a", "x")) in tracker._writes_by_id[tracker.key(df)]
 
     def test_boolean_mask_not_recorded_as_label(self, tracker, ndf=None):
         df = pd.DataFrame({"x": [1, 2, 3]})
         tracker.register_df(df, "df")
         df[df["x"] > 1]  # mask selection — no bogus column names
-        recorded = tracker._reads_by_id[id(df)]
+        recorded = tracker._reads_by_id[tracker.key(df)]
         assert "True" not in recorded and "False" not in recorded

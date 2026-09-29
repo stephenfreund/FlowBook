@@ -488,7 +488,7 @@ class TestMethodInterceptionProducesColReads:
 
             df.sum(numeric_only=True)
 
-            reads = tracker._reads_by_id.get(id(df), set())
+            reads = tracker._reads_by_id.get(tracker.key(df), set())
             assert "price" in reads
             assert "qty" in reads
         finally:
@@ -506,7 +506,7 @@ class TestMethodInterceptionProducesColReads:
 
             df.describe()
 
-            reads = tracker._reads_by_id.get(id(df), set())
+            reads = tracker._reads_by_id.get(tracker.key(df), set())
             assert "a" in reads
             assert "b" in reads
         finally:

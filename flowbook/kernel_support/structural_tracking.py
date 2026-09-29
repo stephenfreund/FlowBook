@@ -37,6 +37,7 @@ from contextlib import contextmanager
 from enum import Enum
 
 from flowbook.util.output import timer
+from flowbook.kernel_support.object_keys import ObjectKeys
 
 
 def _unwrap_cudf_proxy(obj: Any) -> Any:
@@ -514,6 +515,9 @@ class StructuralAccessTracker:
             namespace_ref: Reference to namespace for lazy fallback walks
         """
         self._mode = mode
+        # Keyed by ObjectKeys tokens, not id(): an object's address can be reused
+        # within a cell (see object_keys.py).
+        self._keys = ObjectKeys()
         self._reads_by_id: Dict[int, Set[str]] = defaultdict(set)
         self._id_to_path: Dict[int, str] = {}
         self._original_methods: Dict[str, Any] = {}
@@ -635,7 +639,11 @@ class StructuralAccessTracker:
             path: Variable path like 'df' or 'data["train"]'
         """
         if self._mode != StructuralTrackingMode.OFF:
-            self._id_to_path[id(obj)] = path
+            self._id_to_path[self.key(obj)] = path
+
+    def key(self, obj) -> int:
+        """The tracking key of obj for this cell (use instead of id(obj))."""
+        return self._keys.key(obj)
 
     def record_structural_read(self, obj_id: int, attr: str) -> None:
         """
@@ -677,8 +685,9 @@ class StructuralAccessTracker:
             # Lazy walk to find paths for unregistered pandas objects
             # This happens rarely (only for nested objects not accessed via namespace)
             for path, obj in walk_pandas_objects(self._namespace_ref):
-                if id(obj) in unregistered_ids:
-                    self._id_to_path[id(obj)] = path
+                k = self._keys.lookup(obj)  # identity: only objects seen this cell have a key
+                if k in unregistered_ids:
+                    self._id_to_path[k] = path
 
         result: Dict[str, Set[str]] = {}
         for obj_id, attrs in self._reads_by_id.items():
@@ -691,6 +700,7 @@ class StructuralAccessTracker:
         """Reset tracking for new cell execution."""
         self._reads_by_id.clear()
         self._id_to_path.clear()
+        self._keys.reset()
 
     def _patch_dataframe(self) -> None:
         """Patch DataFrame to track structural attribute and method access.
@@ -713,10 +723,10 @@ class StructuralAccessTracker:
             if tracker is not None:
                 # Track structural attributes
                 if name in DATAFRAME_STRUCTURAL_ATTRS:
-                    tracker.record_structural_read(id(df), name)
+                    tracker.record_structural_read(tracker.key(df), name)
                 # Track when structural methods are accessed
                 elif name in DATAFRAME_STRUCTURAL_METHODS:
-                    tracker.record_structural_read(id(df), name)
+                    tracker.record_structural_read(tracker.key(df), name)
             return result
 
         pd.DataFrame.__getattribute__ = tracked_getattribute
@@ -728,7 +738,7 @@ class StructuralAccessTracker:
         def tracked_len(df):
             tracker = StructuralAccessTracker._get_active_tracker()
             if tracker is not None:
-                tracker.record_structural_read(id(df), 'len')
+                tracker.record_structural_read(tracker.key(df), 'len')
             return original_len(df)
 
         pd.DataFrame.__len__ = tracked_len
@@ -740,7 +750,7 @@ class StructuralAccessTracker:
         def tracked_iter(df):
             tracker = StructuralAccessTracker._get_active_tracker()
             if tracker is not None:
-                tracker.record_structural_read(id(df), 'iter')
+                tracker.record_structural_read(tracker.key(df), 'iter')
             return original_iter(df)
 
         pd.DataFrame.__iter__ = tracked_iter
@@ -765,9 +775,9 @@ class StructuralAccessTracker:
             tracker = StructuralAccessTracker._get_active_tracker()
             if tracker is not None:
                 if name in SERIES_STRUCTURAL_ATTRS:
-                    tracker.record_structural_read(id(s), name)
+                    tracker.record_structural_read(tracker.key(s), name)
                 elif name in SERIES_STRUCTURAL_METHODS:
-                    tracker.record_structural_read(id(s), name)
+                    tracker.record_structural_read(tracker.key(s), name)
             return result
 
         pd.Series.__getattribute__ = tracked_getattribute
@@ -779,7 +789,7 @@ class StructuralAccessTracker:
         def tracked_len(s):
             tracker = StructuralAccessTracker._get_active_tracker()
             if tracker is not None:
-                tracker.record_structural_read(id(s), 'len')
+                tracker.record_structural_read(tracker.key(s), 'len')
             return original_len(s)
 
         pd.Series.__len__ = tracked_len
@@ -791,7 +801,7 @@ class StructuralAccessTracker:
         def tracked_iter(s):
             tracker = StructuralAccessTracker._get_active_tracker()
             if tracker is not None:
-                tracker.record_structural_read(id(s), 'iter')
+                tracker.record_structural_read(tracker.key(s), 'iter')
             return original_iter(s)
 
         pd.Series.__iter__ = tracked_iter
