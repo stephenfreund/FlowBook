@@ -104,6 +104,14 @@ def _is_ipython_result_var(key: str) -> bool:
 
 
 _UNBOUND = object()  # sentinel: the name had no binding before this cell
+_MISSING = object()  # sentinel: no entry in a mapping (raw-storage mirror)
+_NOT_DIRTY = object()  # sentinel: the raw storage adds nothing to _real_ns for a name
+
+# Names TrackingDict keeps in its own dict storage between cells. CPython reads
+# them from a function's globals with raw dict access when it creates a function
+# (__module__ from __name__, and __builtins__), and functions defined in a cell
+# keep this TrackingDict as their globals after the cell ends.
+_RAW_PERSISTENT = ("__name__", "__builtins__")
 
 
 def imports_tracked() -> bool:
@@ -148,6 +156,11 @@ class TrackingDict(dict):
     Key design: We don't store data ourselves - we delegate to user_global_ns.
     This means list comprehensions and functions automatically find variables
     because they look in user_global_ns, which IS where we store everything.
+
+    Exception: when a TrackingDict is used as exec *globals*, CPython bypasses
+    the mapping protocol in a few places and uses the dict's own storage. See
+    "Raw-storage mirror" below: while a cell runs, that storage mirrors
+    _real_ns so those accesses see (and can change) the real values.
     """
 
     # Use __slots__ to prevent attribute access from going through __getattr__
@@ -181,6 +194,11 @@ class TrackingDict(dict):
         # description). Tracked reads of these raise UncopyableReadError;
         # rebinding or deleting the name lifts the block.
         object.__setattr__(self, '_blocked_reads', {})
+        # Raw-storage mirror (see begin_mirror): nesting depth of mirrored
+        # run_code calls, and the snapshot of _real_ns the mirror started from.
+        object.__setattr__(self, '_mirror_depth', 0)
+        object.__setattr__(self, '_mirror_base', {})
+        self._reset_raw()
         # Pass namespace reference to trackers for lazy fallback walks
         object.__setattr__(self, '_column_tracker', ColumnAccessTracker(namespace_ref=real_ns_actual))
         object.__setattr__(self, '_structural_tracker', StructuralAccessTracker(namespace_ref=real_ns_actual))
@@ -218,6 +236,7 @@ class TrackingDict(dict):
 
     def __getitem__(self, key):
         self._check_blocked(key)
+        self._apply_raw_key(key)
         value = self._real_ns[key]
         if self._tracking_enabled:
             self._track_read(key, value)
@@ -245,11 +264,15 @@ class TrackingDict(dict):
                 if not _is_ipython_result_var(key):
                     self._structural_tracker.register(value, key)
         self._real_ns[key] = value
+        if self._mirror_depth:
+            dict.__setitem__(self, key, value)
 
     def __delitem__(self, key):
+        self._apply_raw_key(key)
         if self._tracking_enabled and key not in self._prev_bindings:
             self._prev_bindings[key] = self._real_ns.get(key, _UNBOUND)
         del self._real_ns[key]
+        dict.pop(self, key, None)
         self._blocked_reads.pop(key, None)
         if self._tracking_enabled:
             # `del x` is a write to x in the formal model: it changes what
@@ -261,16 +284,17 @@ class TrackingDict(dict):
             self._writes.add(key)
 
     def __contains__(self, key):
+        self._apply_raw_key(key)
         return key in self._real_ns
 
     def __iter__(self):
-        return iter(self._real_ns)
+        return iter(self._view())
 
     def __len__(self):
-        return len(self._real_ns)
+        return len(self._view())
 
     def __repr__(self):
-        return f"TrackingDict({repr(self._real_ns)})"
+        return f"TrackingDict({repr(self._view())})"
 
     # =========================================================================
     # Dict methods - all delegate to _real_ns
@@ -280,13 +304,13 @@ class TrackingDict(dict):
         # Names-only access: reveals which variables exist, not their
         # values. There is no location type for the namespace key set, so
         # this is intentionally untracked (documented escape hatch).
-        return self._real_ns.keys()
+        return self._view().keys()
 
     def _track_all_reads(self) -> None:
         """Record reads of every user variable (values()/items() reveal all
         values — the honest read set is 'everything')."""
         from flowbook.kernel_support.checkpoint import is_valid_variable
-        for key, value in list(self._real_ns.items()):
+        for key, value in list(self._view().items()):
             if is_valid_variable(key, value):
                 self._track_read(key, value)
 
@@ -295,20 +319,21 @@ class TrackingDict(dict):
             # Iterating values reads every variable's value (audit:
             # namespace iteration escaped read tracking).
             self._track_all_reads()
-        return self._real_ns.values()
+        return self._view().values()
 
     def items(self):
         if self._tracking_enabled:
             # Iterating items reads every variable's value (audit:
             # namespace iteration escaped read tracking).
             self._track_all_reads()
-        return self._real_ns.items()
+        return self._view().items()
 
     def get(self, key, default=None):
         """Get with default — tracked like __getitem__ (audit:
         globals().get('x') escaped read tracking and the uncopyable
         read block)."""
         self._check_blocked(key)
+        self._apply_raw_key(key)
         if key not in self._real_ns:
             return default
         value = self._real_ns[key]
@@ -345,13 +370,151 @@ class TrackingDict(dict):
 
     def popitem(self):
         key, value = self._real_ns.popitem()
+        dict.pop(self, key, None)
         return key, value
 
     def clear(self):
         self._real_ns.clear()
+        if self._mirror_depth:
+            dict.clear(self)
 
     def copy(self):
-        return dict(self._real_ns)
+        return dict(self._view())
+
+    # =========================================================================
+    # Raw-storage mirror (TrackingDict as exec globals)
+    # =========================================================================
+    #
+    # The kernel runs cells with this TrackingDict as exec *globals* as well as
+    # locals, so reads from nested scopes (LOAD_GLOBAL in functions, lambdas,
+    # comprehensions) go through __getitem__ and are tracked. But CPython does
+    # not always use the mapping protocol on a globals dict subclass. It uses
+    # the dict's own storage directly for
+    #   - a class body's fallback from its namespace to globals (LOAD_NAME),
+    #   - `global x; x = ...` and `global x; del x` in a function
+    #     (STORE_GLOBAL / DELETE_GLOBAL),
+    #   - the __module__ of a new function (globals['__name__']) and of a new
+    #     class (LOAD_NAME __name__), and a new function's __builtins__.
+    # With empty storage those fail: a class body cannot see any global, a
+    # `global` write is lost, and notebook functions and classes get
+    # __module__ None / 'builtins' (so their instances cannot be pickled).
+    #
+    # So while a cell runs (begin_mirror .. end_mirror) the dict's own storage
+    # holds a copy of _real_ns, kept current by __setitem__ / __delitem__. A
+    # name whose raw value is neither the value the mirror started from nor
+    # the value in _real_ns was changed by a raw write: reads see the raw
+    # value: the first access through the mapping protocol applies it to
+    # _real_ns as a tracked write (_apply_raw_key), so the write is recorded
+    # before any later read of the name, and end_mirror applies the rest. Between cells the storage holds only _RAW_PERSISTENT
+    # (plus any raw write made by a notebook function called outside a cell,
+    # which the next begin_mirror applies untracked); it is never a stale
+    # copy, because FlowBook restores checkpoints into _real_ns directly.
+    # Class-body reads that reach the raw storage are not tracked; the
+    # kernel's class-body AST transformer (class_scope.py) routes them
+    # through __getitem__ instead.
+
+    def _raw_override(self, key):
+        """What the raw storage says about key beyond _real_ns.
+
+        _NOT_DIRTY when a raw write has not touched key (read _real_ns),
+        _MISSING when a raw delete removed it, otherwise the raw value.
+        """
+        raw = dict.get(self, key, _MISSING)
+        if raw is self._mirror_base.get(key, _MISSING):
+            return _NOT_DIRTY
+        if raw is self._real_ns.get(key, _MISSING):
+            return _NOT_DIRTY
+        return raw
+
+    def _apply_raw_key(self, key) -> None:
+        """Apply a pending raw write/delete of key to _real_ns (tracked like any write)."""
+        pending = self._raw_override(key)
+        if pending is _NOT_DIRTY:
+            return
+        if pending is _MISSING:
+            self._record_raw_delete(key)
+        else:
+            self[key] = pending
+        if not self._mirror_depth:
+            # Between cells the raw storage must not keep copies (FlowBook
+            # restores checkpoints into _real_ns directly).
+            dict.pop(self, key, None)
+            if key in _RAW_PERSISTENT and key in self._real_ns:
+                dict.__setitem__(self, key, self._real_ns[key])
+                self._mirror_base[key] = self._real_ns[key]
+
+    def _record_raw_delete(self, key) -> None:
+        if self._tracking_enabled and key not in self._prev_bindings:
+            self._prev_bindings[key] = self._real_ns.get(key, _UNBOUND)
+        self._real_ns.pop(key, None)
+        self._blocked_reads.pop(key, None)
+        if self._tracking_enabled:
+            self._writes.add(key)
+
+    def _raw_changes(self):
+        """(written, deleted): raw writes and raw deletes not yet in _real_ns."""
+        base, real = self._mirror_base, self._real_ns
+        written = {}
+        for key, raw in dict.items(self):
+            if raw is not base.get(key, _MISSING) and raw is not real.get(key, _MISSING):
+                written[key] = raw
+        deleted = [key for key, b in base.items()
+                   if not dict.__contains__(self, key) and real.get(key, _MISSING) is b]
+        return written, deleted
+
+    def _view(self) -> dict:
+        """The namespace as user code sees it: _real_ns plus pending raw changes."""
+        written, deleted = self._raw_changes()
+        if not written and not deleted:
+            return self._real_ns
+        view = dict(self._real_ns)
+        view.update(written)
+        for key in deleted:
+            view.pop(key, None)
+        return view
+
+    def _apply_raw_changes(self) -> None:
+        """Apply pending raw writes/deletes to _real_ns through the tracked paths."""
+        written, deleted = self._raw_changes()
+        for key in deleted:
+            self._record_raw_delete(key)
+        for key, value in written.items():
+            self[key] = value
+
+    def _reset_raw(self) -> None:
+        dict.clear(self)
+        for key in _RAW_PERSISTENT:
+            if key in self._real_ns:
+                dict.__setitem__(self, key, self._real_ns[key])
+        object.__setattr__(self, '_mirror_base', dict(dict.items(self)))
+
+    def begin_mirror(self) -> None:
+        """Start mirroring _real_ns into the raw storage (before running cell code).
+
+        Nested calls (a magic that runs code inside a cell) only count depth.
+        """
+        object.__setattr__(self, '_mirror_depth', self._mirror_depth + 1)
+        if self._mirror_depth > 1:
+            return
+        # Raw writes made between cells (a notebook function with a `global`
+        # statement called from outside any cell) belong to no cell.
+        with self.suspended():
+            self._apply_raw_changes()
+        dict.clear(self)
+        dict.update(self, self._real_ns)
+        object.__setattr__(self, '_mirror_base', dict(self._real_ns))
+
+    def end_mirror(self) -> None:
+        """Apply the cell's raw writes to _real_ns (tracked) and stop mirroring."""
+        if not self._mirror_depth:
+            return
+        object.__setattr__(self, '_mirror_depth', self._mirror_depth - 1)
+        if self._mirror_depth:
+            return
+        try:
+            self._apply_raw_changes()
+        finally:
+            self._reset_raw()
 
     # =========================================================================
     # Uncopyable variable read blocking
