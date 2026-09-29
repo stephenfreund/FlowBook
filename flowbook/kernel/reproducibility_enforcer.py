@@ -140,6 +140,12 @@ _expand_with_deep_aliases(accessed_vars, pre_checkpoint, log_aliases=True)
   - Returns expanded set including all deep aliases
   - Uses pre-state checkpoint because alias relationships existed before cell ran
 
+_expand_var_set_dict_with_aliases(...) copies column/structural accesses to
+aliases using the same index, but only between names the cell did not rebind;
+column writes also go to the names holding the frame after the cell
+(_post_state_holders), since a rebound name's pre-state aliases describe the
+object it held before, not the one the cell wrote.
+
 WHAT GETS TRACKED
 -----------------
   - Containers: dict, list, tuple, set, frozenset
@@ -412,9 +418,41 @@ def _expand_with_deep_aliases(
     return pre_checkpoint.get_aliases_for_vars(accessed_vars, log_aliases=log_aliases)
 
 
+def _post_state_holders(namespace, rebound: Set[str]) -> Dict[int, Set[str]]:
+    """
+    Map id(pandas object) to the variables holding it AFTER the cell.
+
+    Every user variable holding a DataFrame/Series at top level is recorded.
+    Variables in ``rebound`` (bound to a new object by this cell) are also
+    walked with walk_pandas_objects, so a frame placed in a container the cell
+    built (``data = {'train': X}``) is found under ``data``. Variables not
+    rebound hold the same object as before the cell, so their deep aliases are
+    already in the pre-state alias index; walking only the rebound ones keeps
+    this to one pass over the namespace's top-level bindings.
+    """
+    from flowbook.kernel_support.column_tracking import (
+        _is_dataframe, _is_series, walk_pandas_objects,
+    )
+    from flowbook.kernel_support.memory_checkpoint import is_valid_variable_name
+
+    holders: Dict[int, Set[str]] = {}
+    for name, value in namespace.items():
+        if not isinstance(name, str) or not is_valid_variable_name(name):
+            continue
+        if name in rebound:
+            for _path, obj in walk_pandas_objects({name: value}):
+                holders.setdefault(id(obj), set()).add(name)
+        elif _is_dataframe(value) or _is_series(value):
+            holders.setdefault(id(value), set()).add(name)
+    return holders
+
+
 def _expand_var_set_dict_with_aliases(
     var_set_dict: Dict[str, Set[str]],
     pre_checkpoint,
+    namespace=None,
+    rebound: Optional[Set[str]] = None,
+    post_holders: Optional[Dict[int, Set[str]]] = None,
 ) -> Dict[str, Set[str]]:
     """
     Expand a var->set dict to include all aliases of each variable.
@@ -427,39 +465,61 @@ def _expand_var_set_dict_with_aliases(
         If p and x are aliases for the same DataFrame, and
         var_set_dict = {'p': {'col1'}}, returns {'p': {'col1'}, 'x': {'col1'}}.
 
+    Aliasing must describe the object the cell accessed, not what the names
+    held before it. Names the cell rebound (``rebound``) held some other object
+    before the cell, so the pre-state alias index says nothing about them:
+
+    - Pre-state aliases (pre_checkpoint's deep alias index) are followed only
+      from and to names that were not rebound. Such a name holds the same
+      object before and after the cell, so if p and x shared a frame before,
+      writing p['col'] in place also wrote x['col'].
+    - With ``post_holders`` (see _post_state_holders; passed for column
+      writes), a variable is also expanded to the names holding its object
+      after the cell. This is what credits a frame created in the cell:
+      ``t = f(...); X = t`` records the column writes for X and t, whether or
+      not X and t were already aliases of an earlier run's frame. The
+      non-rebound names holding that object seed the pre-state lookup, so
+      ``X = train; X['c'] = 1`` also reaches train's pre-existing aliases.
+
+    Reads (column reads-before-writes, structural reads) are not expanded to
+    post-state holders: a rebound name is wholly written by the cell (its own
+    reads are dropped by TrackingDict.get_tracking_data), so what it holds
+    afterwards was not read before being written.
+
+    Keys that are nested paths (``data['train']``) are not variables in the
+    alias index and are left unexpanded. An alias that is itself a key keeps
+    its own set; any other alias gets the union of the sets of the keys it
+    aliases.
+
     Args:
         var_set_dict: Dict mapping var names to sets of attributes/columns
         pre_checkpoint: Pre-execution checkpoint for alias lookup
+        namespace: Post-execution namespace (needed with post_holders)
+        rebound: Names the cell bound to a different object (TrackingData.rebound)
+        post_holders: id(object) -> names holding it after the cell, or None
 
     Returns:
         Expanded dict including all aliases with their attributes/columns
     """
-    if not var_set_dict or pre_checkpoint is None:
+    if not var_set_dict:
         return var_set_dict
+    rebound = rebound or set()
 
-    # Get all aliases for variables in the dict
-    vars_to_expand = set(var_set_dict.keys())
-    expanded_vars = pre_checkpoint.get_aliases_for_vars(vars_to_expand, log_aliases=False)
-
-    # Find new aliases (vars in expanded_vars but not in original)
-    new_aliases = expanded_vars - vars_to_expand
-
-    if not new_aliases:
-        return var_set_dict
-
-    # Build expanded dict - start with copy of original
     result: Dict[str, Set[str]] = {k: set(v) for k, v in var_set_dict.items()}
-
-    # For each new alias, determine which original var it aliases
-    # and copy that var's attributes to the alias
-    for alias in new_aliases:
-        # Find which original vars this alias shares IDs with
-        alias_set = pre_checkpoint.get_aliases_for_vars({alias}, log_aliases=False)
-        for orig_var in vars_to_expand:
-            if orig_var in alias_set:
-                # alias is an alias of orig_var - copy attributes
-                result[alias] = set(var_set_dict[orig_var])
-                break
+    for var, attrs in var_set_dict.items():
+        post: Set[str] = set()
+        if post_holders is not None and namespace is not None:
+            obj = _ns_get(namespace, var)
+            if obj is not None:
+                post = post_holders.get(id(obj), set())
+        # Names still holding the same object as before the cell.
+        seeds = ({var} | post) - rebound
+        aliases = set(post)
+        if seeds and pre_checkpoint is not None:
+            aliases |= pre_checkpoint.get_aliases_for_vars(seeds, log_aliases=False) - rebound
+        for alias in aliases:
+            if alias not in var_set_dict:
+                result.setdefault(alias, set()).update(attrs)
 
     return result
 
@@ -966,18 +1026,24 @@ class ReproducibilityEnforcer:
         # This ensures the expanded versions are used throughout.
         # When x and y are aliases for p, reading p['col'] should also record
         # x['col'] and y['col'] in the tracking data for proper staleness detection.
+        # Pre-state aliasing applies only to names the cell did not rebind;
+        # column writes also go to the names holding the written frame after
+        # the cell (see _expand_var_set_dict_with_aliases), so a frame created
+        # by the cell is credited the same way on its first run and on a rerun.
         # ================================================================
+        rebound = tracking.rebound or set()
         expanded_column_reads = _expand_var_set_dict_with_aliases(
             {k: set(v) for k, v in tracking.column_reads_before_writes.items()},
-            pre_checkpoint,
+            pre_checkpoint, rebound=rebound,
         )
         expanded_column_writes = _expand_var_set_dict_with_aliases(
             {k: set(v) for k, v in tracking.column_writes.items()},
-            pre_checkpoint,
+            pre_checkpoint, namespace=namespace, rebound=rebound,
+            post_holders=_post_state_holders(namespace, rebound) if tracking.column_writes else None,
         )
         expanded_structural_reads = _expand_var_set_dict_with_aliases(
             {k: set(v) for k, v in tracking.structural_reads.items()},
-            pre_checkpoint,
+            pre_checkpoint, rebound=rebound,
         )
 
         # Module rebindings to the identical object (a re-executed import):
