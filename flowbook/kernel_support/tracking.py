@@ -762,6 +762,10 @@ class TrackingDict(dict):
             reads_before_writes=set(k for k in self._reads_before_writes if keep(k)),
             writes=kept_writes,
             rebound_same=set(k for k in kept_writes if is_noop_rebinding(k)),
+            # Names now bound to a different object than before the cell (identity:
+            # `x = x` followed by an in-place change is a mutation, not a rebinding).
+            rebound=set(k for k in kept_writes
+                        if self._real_ns.get(k, _UNBOUND) is not self._prev_bindings.get(k, _UNBOUND)),
             column_reads_before_writes=column_rbw,
             column_writes={k: set(v) for k, v in self.column_writes.items()},
             structural_reads=struct_reads,
