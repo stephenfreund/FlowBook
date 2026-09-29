@@ -9,19 +9,21 @@
 
 **Output consistency for Jupyter notebooks.**
 
-FlowBook is a JupyterLab extension that enforces _rerun consistency_:
-re-executing any cell from the current state would produce a result
-consistent with a top-to-bottom execution of the notebook,
-regardless of which cells have been run, modified, and rerun.
+FlowBook is a JupyterLab extension that keeps Jupyter notebooks
+_output consistent_: running the notebook top-to-bottom from an empty
+store yields exactly the outputs currently recorded.
+
+It does this by enforcing _rerun consistency_: a cell may run only if
+it reads the same inputs and has the same effect it would have in a
+top-to-bottom execution of the notebook, regardless of which cells have
+been run, modified, and rerun.
 Cells whose inputs may have changed are marked _stale_,
 and operations that would break rerun consistency (e.g., a later cell
-overwriting a value read by an earlier one) disallowed.
-
+overwriting a value read by an earlier one) are rejected.
 When every cell is _clean_ — executed and rerun consistent —
-the notebook is guaranteed _output consistent_: running it top-to-bottom
-from an empty store yields exactly the outputs currently recorded.
+the notebook is guaranteed to be output consistent.
 
-(Note: we sometimes use reproducibility as a synonym for output consistency in the documentation and code.)
+(Note: we sometimes use reproducibility as a synonym for output consistency in parts of the code and developer docs.)
 
 ## Quick Start
 
