@@ -55,6 +55,11 @@ open it in JupyterLab. Be sure to use the **FlowBook Kernel**.
 For a longer, self-contained tutorial, download our
 [FlowBook tutorial](https://github.com/stephenfreund/FlowBook/raw/main/examples/FlowBookTutorial.ipynb)
 
+If you installed from a clone of this repository, you don't need to download
+either file. They are already at `examples/GettingStarted.ipynb` and
+`examples/FlowBookTutorial.ipynb`, so they appear in the file browser when you
+launch with `jupyter lab examples/`.
+
 ## AI Fix Suggestions
 
 FlowBook can ask an LLM to diagnose any violation it raises and propose
