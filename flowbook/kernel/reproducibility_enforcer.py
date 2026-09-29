@@ -1009,6 +1009,7 @@ class ReproducibilityEnforcer:
             reads_before_writes=tracking.reads_before_writes,
             writes=writes,
             rebound_same=tracking.rebound_same,
+            rebound=tracking.rebound,
             idempotent_writes=idempotent_writes,
             column_reads_before_writes=expanded_column_reads,
             column_writes=expanded_column_writes,

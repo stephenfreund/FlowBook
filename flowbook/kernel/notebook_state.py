@@ -249,11 +249,18 @@ class NotebookState:
         # Only include diff-derived locs for variables that tracking also considers
         # as writes — otherwise unrecoverable mutations (in-place changes not tracked
         # as writes) would incorrectly appear as writes in last_writer_for().
+        # And not for variables the cell rebound to a different object: Var(x) already
+        # conflicts with every read of x (reads of x's columns include Var(x)), and the
+        # diff of the old and new value would only describe how the result differs from
+        # whatever value an earlier cell left in x, so Wᵢ would depend on execution
+        # history (a rerun records fewer locations than the first run).
         if typed_changes:
             tracking_write_vars = (tracking.writes or set()) | set(tracking.column_writes.keys() if tracking.column_writes else [])
+            rebound = getattr(tracking, "rebound", None) or set()
             diff_wlocs = changes_to_write_locs(typed_changes, namespace, stable_map)
             recoverable_diff_wlocs = frozenset(
-                w for w in diff_wlocs if w.var_name() in tracking_write_vars
+                w for w in diff_wlocs
+                if w.var_name() in tracking_write_vars and w.var_name() not in rebound
             )
             self.writes[cell_id] = tracking_wlocs | recoverable_diff_wlocs
         else:
