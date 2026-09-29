@@ -35,7 +35,7 @@ class TestColumnAccessTracker:
         df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
-        tracker.record_read(id(df), ["a"])
+        tracker.record_read(tracker.key(df), ["a"])
 
         result = tracker.resolve_to_paths()
         assert "df" in result
@@ -48,9 +48,9 @@ class TestColumnAccessTracker:
         tracker.register_df(df, "df")
 
         # Write to 'a' first
-        tracker.record_write(id(df), ["a"])
+        tracker.record_write(tracker.key(df), ["a"])
         # Then read 'a' and 'b'
-        tracker.record_read(id(df), ["a", "b"])
+        tracker.record_read(tracker.key(df), ["a", "b"])
 
         result = tracker.resolve_to_paths()
         assert "df" in result
@@ -63,7 +63,7 @@ class TestColumnAccessTracker:
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
 
-        tracker.record_read(id(df), ["a", "b", "c"])
+        tracker.record_read(tracker.key(df), ["a", "b", "c"])
 
         result = tracker.resolve_to_paths()
         assert result["df"] == {"a", "b", "c"}
@@ -73,7 +73,7 @@ class TestColumnAccessTracker:
         df = pd.DataFrame({"a": [1]})
         tracker = ColumnAccessTracker()
         tracker.register_df(df, "df")
-        tracker.record_read(id(df), ["a"])
+        tracker.record_read(tracker.key(df), ["a"])
 
         tracker.reset()
 
@@ -88,8 +88,8 @@ class TestColumnAccessTracker:
         tracker.register_df(df1, "df1")
         tracker.register_df(df2, "df2")
 
-        tracker.record_read(id(df1), ["a"])
-        tracker.record_read(id(df2), ["b"])
+        tracker.record_read(tracker.key(df1), ["a"])
+        tracker.record_read(tracker.key(df2), ["b"])
 
         result = tracker.resolve_to_paths()
         assert result["df1"] == {"a"}
@@ -521,7 +521,7 @@ class TestDiffIntegration:
         tracker.register_df(df, "df")
 
         # Only write, no reads
-        tracker.record_write(id(df), ["b"])
+        tracker.record_write(tracker.key(df), ["b"])
 
         result = tracker.resolve_to_paths()
 
@@ -536,7 +536,7 @@ class TestDiffIntegration:
         tracker.register_df(df, "df")
 
         # Write columns
-        tracker.record_write(id(df), ["b", "c"])
+        tracker.record_write(tracker.key(df), ["b", "c"])
 
         result = tracker.resolve_writes_to_paths()
 
