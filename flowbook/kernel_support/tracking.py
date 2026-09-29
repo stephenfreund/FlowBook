@@ -226,6 +226,14 @@ class TrackingDict(dict):
         objects for column/structural tracking."""
         if key not in self._writes:
             self._reads_before_writes.add(key)
+        # IPython's result variables (_, __, ___, _N) alias objects that real
+        # variables hold, and IPython's display hook reads _/__/___ through this
+        # dict whenever a cell ends in an expression. Registering the object under
+        # that name would replace its real path (e.g. X), and the column reads of X
+        # would then be dropped when the display hook writes ___. Same guard as
+        # __setitem__.
+        if _is_ipython_result_var(key):
+            return
         # Lazy registration: register DataFrames/Series when accessed from
         # namespace. This eliminates namespace walking at start/stop time.
         if _is_dataframe(value):
