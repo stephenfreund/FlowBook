@@ -103,8 +103,8 @@ example {nb : MiniNotebook} (hwf : WellFormed nb) (hclean : AllClean nb.cells) :
   output_consistency hwf hclean
 
 example {nb : MiniNotebook} (hwf : WellFormed nb) (F : List Nat) :
-    ∃ nb' F', RunToClean F nb nb' F' ∧
-      (Reproducible nb'.erase ∨ RunToCleanStuck nb' F') :=
+    ∃ nb' F', FirstStaleExec F nb nb' F' ∧
+      (Reproducible nb'.erase ∨ FirstStaleStuck nb' F') :=
   progress_reproducible hwf F
 
 end Examples

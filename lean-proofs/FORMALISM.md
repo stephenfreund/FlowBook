@@ -561,35 +561,22 @@ same output it recorded.
 
 Preservation and Output Consistency say the invariant is kept and that
 all-clean states are good — but not that an all-clean state is
-_reachable_. Progress closes the loop, for the `RunToClean` algorithm:
+_reachable_. Progress closes the loop: repeatedly running the first
+stale cell terminates, either all-clean (hence reproducible) or at a
+stuck cell.
 
-```
-E := ∅                                   -- cells executed so far
-while some cell is stale:
-    i := the first stale cell
-    if i is stuck:
-        report error
-    else:
-        Run i with [Inst-Run]
-        if i ∈ E and the run marked a cell before i stale:
-            report potential non-termination
-        E := E ∪ {i}
-```
-
-Every execution that reports no potential non-termination terminates,
-either all-clean (hence reproducible) or at a report.
-
-The check is necessary: cell evaluation is a relation, and rerunning
-stale cells with no check need not terminate. Two cells with empty
-read sets that each write `{a}` or `{b}`, choosing differently on
-successive runs, mark each other stale forever — each run of the later
-cell that drops a location backward-marks the earlier cell via
-`LastWriter`, and each run of the earlier cell forward-marks the
-later. The check forbids exactly the event that repeats: staleness
-moves toward earlier cells only via `BackwardStale` (a run dropping a
-write owned by an earlier cell), so requiring reruns to mark nothing
-before themselves _is_ the termination invariant, checked directly —
-no footprint comparison is needed.
+Cell evaluation is a relation, so "run the first stale cell" does not
+determine a unique successor, and without constraint the strategy need
+not terminate. Two cells with empty read sets that each write `{a}` or
+`{b}`, choosing differently on successive runs, mark each other stale
+forever — each run of the later cell that drops a location
+backward-marks the earlier cell via `LastWriter`, and each run of the
+earlier cell forward-marks the later. The supplement therefore assumes
+that rerunning a previously clean cell whose reads are unchanged
+reproduces its recorded read and write sets (automatic for
+deterministic evaluation); the paper's proof uses exactly this. A
+rerun with unchanged write set has `W_i \ W'_i = ∅`, so `BackwardStale`
+marks nothing and staleness never moves backward.
 
 The first stale cell is the earliest stale position:
 
@@ -603,75 +590,71 @@ Any notebook is either all-clean or has a first stale cell:
 theorem allClean_or_firstStale (cs) : AllClean cs ∨ ∃ i, FirstStale cs i
 ```
 
-Executions that report nothing are modeled by `RunToClean F nb nb' F'`,
-where `F` is the **complement of the algorithm's `E`** — the positions
-not yet executed. Initially `F` is all positions (`E = ∅`). Each
-step runs the first stale cell: a first execution (`first`) is any
-successful run; a repeated execution (`rerun`) must leave every
-position `≤ i` clean — the algorithm's check, stated directly on the
-successor state:
+Executions of the strategy are modeled by `FirstStaleExec F nb nb' F'`,
+where `F` is the set of positions with **no validated recorded
+behavior** (edited, inserted, or initially stale cells). Initially `F`
+is all positions. Each step runs the first stale cell: a cell in `F`
+gets one ordinary run (`first`); a cell not in `F` must satisfy the
+rerun assumption (`rerun`, a `MatchingRunAt` step):
 
 ```lean
-inductive RunToClean : List Nat → Notebook … → Notebook … → List Nat → Prop where
-  | refl : RunToClean F nb nb F                        -- done
-  | first (hfs : FirstStale nb.cells i) (hmem : i ∈ F) -- first execution of cell i
+def MatchingRunAt (nb) (i) (nb') : Prop :=   -- [Inst-Run] with Eval … ci.reads ci.writes
+
+inductive FirstStaleExec : List Nat → Notebook … → Notebook … → List Nat → Prop where
+  | refl : FirstStaleExec F nb nb F                    -- done
+  | first (hfs : FirstStale nb.cells i) (hmem : i ∈ F) -- first run of cell i
           (hstep : InstStep nb (.run i) nb₁)
-          (hrest : RunToClean (F.erase i) nb₁ nb' F') : RunToClean F nb nb' F'
-  | rerun (hfs : FirstStale nb.cells i) (hmem : i ∉ F) -- a rerun marks nothing before i
-          (hstep : InstStep nb (.run i) nb₁)
-          (hclean : ∀ j, j ≤ i → IsClean nb₁.cells j)
-          (hrest : RunToClean F nb₁ nb' F') : RunToClean F nb nb' F'
+          (hrest : FirstStaleExec (F.erase i) nb₁ nb' F') : FirstStaleExec F nb nb' F'
+  | rerun (hfs : FirstStale nb.cells i) (hmem : i ∉ F) -- reproduces recorded R_i, W_i
+          (hstep : MatchingRunAt nb i nb₁)
+          (hrest : FirstStaleExec F nb₁ nb' F') : FirstStaleExec F nb nb' F'
 ```
 
-The algorithm cannot continue without a report when the first stale
-cell admits no run of the required kind:
+The strategy is stuck when the first stale cell admits no run of the
+required kind:
 
 ```lean
-def RunToCleanStuck (nb) (F) : Prop :=
+def FirstStaleStuck (nb) (F) : Prop :=
   ∃ i, FirstStale nb.cells i ∧
-    ((i ∈ F ∧ ∀ nb', ¬ InstStep nb (.run i) nb') ∨    -- no run at all: report error
-     (i ∉ F ∧ ∀ nb', InstStep nb (.run i) nb' →      -- every run marks a cell at or
-        ∃ j, j ≤ i ∧ ¬ IsClean nb'.cells j))          --   before i: report potential
-                                                      --   non-termination
+    ((i ∈ F ∧ ∀ nb', ¬ InstStep nb (.run i) nb') ∨    -- no run at all
+     (i ∉ F ∧ ∀ nb', ¬ MatchingRunAt nb i nb'))       -- no matching rerun
 ```
 
-> **Theorem (Progress).** From any well-formed state, every report-free
-> execution of `RunToClean` can be extended to reach a state that is
+> **Theorem (Progress).** From any well-formed state, every
+> execution of `FirstStaleExec` can be extended to reach a state that is
 > well-formed and either all-clean or stuck.
 
 ```lean
 theorem progress (hwf : WellFormed nb) (F : List Nat) :
-    ∃ nb' F', RunToClean F nb nb' F' ∧ WellFormed nb' ∧
-      (AllClean nb'.cells ∨ RunToCleanStuck nb' F')
+    ∃ nb' F', FirstStaleExec F nb nb' F' ∧ WellFormed nb' ∧
+      (AllClean nb'.cells ∨ FirstStaleStuck nb' F')
 
-theorem progress_init (hwf : WellFormed nb) :   -- the algorithm's E = ∅
-    ∃ nb' F', RunToClean (List.range nb.cells.length) nb nb' F' ∧ WellFormed nb' ∧
-      (AllClean nb'.cells ∨ RunToCleanStuck nb' F')
+theorem progress_init (hwf : WellFormed nb) :   -- initial all-stale state
+    ∃ nb' F', FirstStaleExec (List.range nb.cells.length) nb nb' F' ∧ WellFormed nb' ∧
+      (AllClean nb'.cells ∨ FirstStaleStuck nb' F')
 ```
 
 Combined with Output Consistency, termination lands in a _reproducible_
-notebook or at a report:
+notebook or at a stuck cell:
 
 ```lean
 theorem progress_reproducible (hwf : WellFormed nb) (F : List Nat) :
-    ∃ nb' F', RunToClean F nb nb' F' ∧ (Reproducible nb'.erase ∨ RunToCleanStuck nb' F')
+    ∃ nb' F', FirstStaleExec F nb nb' F' ∧ (Reproducible nb'.erase ∨ FirstStaleStuck nb' F')
 ```
 
 Termination follows the lexicographic measure `(|F|, n − first-stale
-position)`: a first execution removes `i` from `F`; a rerun keeps the
-prefix clean by its side condition, so the run of clean cells at the
-top strictly grows. The measure yields the paper's bound — at most
-`n` first executions and at most `n` reruns between consecutive first
-executions, i.e. at most `n(n+2)` runs in total. The proof's key
-supporting lemmas (behind the paper's Stability lemma) show the rerun
-condition is satisfiable exactly where the paper's proof needs it:
-after running the first stale cell, every cell `j < i` — in particular
-every backward-marked one — _can_ re-run reproducing its recorded
-output, read set, and write set (a `MatchingRunAt`; the run's
-`noWriteAfterRead` check keeps its new writes off those cells' read
-sets, so `locality` reproduces their recorded behavior), and such a
-run marks nothing before itself, so it satisfies the rerun condition
-and never triggers the report:
+position)`: a first run removes `i` from `F`; a matching rerun leaves
+every position `≤ i` clean (`matching_clean_prefix`), so the run of
+clean cells at the top strictly grows. The key supporting lemma
+(behind the paper's Stability lemma) shows the rerun assumption is
+satisfiable exactly where the paper's proof needs it: after running
+the first stale cell, every cell `j < i` — in particular every
+backward-marked one — _can_ re-run reproducing its recorded output,
+read set, and write set (the run's `noWriteAfterRead` check keeps its
+new writes off those cells' read sets, so `locality` reproduces their
+recorded behavior). A matching rerun may forward-mark later cells;
+whether those remain matchable when the sweep reaches them is not
+proved, and a validated cell with no matching run counts as stuck.
 
 ```lean
 theorem canRerun_after_run
@@ -679,9 +662,9 @@ theorem canRerun_after_run
     (hstep : InstStep nb (.run i) nb') :
     ∀ j, j < i → CanRerunAt nb' j
 
-theorem cleanPrefix_run_exists
-    (hfs : FirstStale nb.cells i) (h : CanRerunAt nb i) :
-    ∃ nb', InstStep nb (.run i) nb' ∧ ∀ j, j ≤ i → IsClean nb'.cells j
+theorem matching_clean_prefix
+    (hfs : FirstStale nb.cells i) (h : MatchingRunAt nb i nb') :
+    ∀ j, j ≤ i → IsClean nb'.cells j
 ```
 
 ---
@@ -777,7 +760,7 @@ abbrev MiniNotebook := Notebook (Cmd PaperLoc Nat) Unit PaperLoc Nat
 | **Preservation**                         | `preservation`                                                             | Preservation      |
 | **Output Consistency**                   | `output_consistency`                                                       | OutputConsistency |
 | **Progress**                             | `progress`, `progress_init`, `progress_reproducible`                       | Progress          |
-| the `RunToClean` algorithm and its check | `RunToClean`, `RunToCleanStuck`, `MatchingRunAt`, `cleanPrefix_run_exists` | Progress          |
+| the first-stale strategy and rerun assumption | `FirstStaleExec`, `FirstStaleStuck`, `MatchingRunAt`, `matching_clean_prefix` | Progress          |
 | analysis refines standard semantics      | `instStep_erase`                                                           | Erasure           |
 | the axioms are satisfiable               | `Cmd`, `CmdEval`, `instCellEval`                                           | Examples          |
 

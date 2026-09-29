@@ -33,7 +33,7 @@ lake build
 | `FlowBook/Analysis.lean`          | §Analysis                                                    | Instrumentation `I = (T, R, W)` (fused into `Cell` records), Def. _Rerun Consistent Accesses_ (`RerunConsistent`), `ForwardStale`/`LastWriter`/`BackwardStale` (`FwdStale`, `IsLastWriter`, `BwdStale`), the instrumented semantics of Fig. 9 (`InstStep`), Def. _Well-Formed State_ (`WellFormed`), and the paper's initial-state observation (`wellFormed_initial`) |
 | `FlowBook/Preservation.lean`      | Theorem 2.3 of the supplement, proof in §3 of the supplement | `preservation`: well-formedness is preserved by every operation, by cases `[Inst-Run]` (subcases `j < i`, `j = i`, `j > i`), `[Inst-Edit]`, `[Inst-Insert]`, `[Inst-Delete]`, `[Inst-Move]`                                                                                                                                                                           |
 | `FlowBook/OutputConsistency.lean` | Theorem 2.4 of the supplement, proof in §4 of the supplement | `output_consistency`: well-formed all-clean states are reproducible, by the paper's induction on prefixes with the agreement invariant on `(⋃ W_{1..i}) \ (⋃ W_{i+1..n})`                                                                                                                                                                                             |
-| `FlowBook/Progress.lean`          | Theorem 2.5 of the supplement, proof in §5 of the supplement | `progress`, `progress_init`, `progress_reproducible`: every report-free execution of the `RunToClean` algorithm terminates in an all-clean (hence reproducible) state or at a report; `canRerun_after_run`: the paper's key claim that cells marked stale by `BackwardStale` can be re-run reproducing their recorded behavior                                        |
+| `FlowBook/Progress.lean`          | Theorem 2.5 of the supplement, proof in §5 of the supplement | `progress`, `progress_init`, `progress_reproducible`: every execution of the first-stale strategy (`FirstStaleExec`), under the paper's rerun assumption, terminates in an all-clean (hence reproducible) state or at a stuck cell; `canRerun_after_run`: the assumption is satisfiable for cells marked stale by `BackwardStale`                                        |
 | `FlowBook/Erasure.lean`           | Figs. 8 / 9                                                  | `instStep_erase`: the instrumented semantics refines the standard semantics (erasing `I` from an instrumented step yields a standard step)                                                                                                                                                                                                                            |
 | `FlowBook/Examples.lean`          | —                                                            | A concrete model (assignments and copies) satisfying the evaluation axioms, showing the axiomatization is consistent; instantiations of all three theorems at that model                                                                                                                                                                                              |
 | `FlowBook/Exec.lean`              | Figs. 3 / 4                                                  | An **executable** reference kernel: a concrete cell language with a functional evaluator, decidable rerun-consistency and staleness, functional operations (`runCell`/`editCell`/`insertCell`/`deleteCell`), soundness theorems tying each accepted operation to a real `InstStep`, and `#eval` demos replaying every litmus test                                     |
@@ -135,58 +135,48 @@ theorem output_consistency (hwf : WellFormed nb) (hclean : AllClean nb.cells) :
     Reproducible nb.erase
 
 theorem progress (hwf : WellFormed nb) (F : List Nat) :
-    ∃ nb' F', RunToClean F nb nb' F' ∧ WellFormed nb' ∧
-      (AllClean nb'.cells ∨ RunToCleanStuck nb' F')
+    ∃ nb' F', FirstStaleExec F nb nb' F' ∧ WellFormed nb' ∧
+      (AllClean nb'.cells ∨ FirstStaleStuck nb' F')
 ```
 
 ## Notes on Theorem 2.5 (Progress)
 
-Theorem 2.5 of the supplement (proved in §5 of the supplement) is stated for the `RunToClean` algorithm:
+Theorem 2.5 of the supplement (proved in §5 of the supplement) states
+that repeatedly running the first stale cell terminates, either with
+all cells clean or at a stuck cell, under the supplement's assumption
+that rerunning a previously clean cell whose reads are unchanged
+reproduces its recorded read and write sets (automatic for
+deterministic evaluation).
 
-```
-E := ∅                                   -- cells executed so far
-while some cell is stale:
-    i := the first stale cell
-    if i is stuck:
-        report error
-    else:
-        Run i with [Inst-Run]
-        if i ∈ E and the run marked a cell before i stale:
-            report potential non-termination
-        E := E ∪ {i}
-```
+The assumption is necessary because cell evaluation is
+non-deterministic: without it, three cells suffice for a
+non-terminating execution in which every run succeeds (let cells 2
+and 3 each alternate between writing `{a}` and `{b}`; each run of one
+backward-marks the other via `LastWriter`).
 
-The check is necessary because cell evaluation is non-deterministic:
-without it, three cells suffice for a non-terminating execution in
-which every run succeeds (let cells 2 and 3 each alternate between
-writing `{a}` and `{b}`; each run of one backward-marks the other via
-`LastWriter`). Staleness moves toward earlier cells only via
-`BackwardStale` (a run dropping a write owned by an earlier cell), so
-requiring reruns to mark nothing before themselves is the termination
-invariant itself, checked directly.
+The formalization makes the assumption a side condition:
+`FirstStaleExec` carries `F`, the positions with no validated recorded
+behavior (initially all positions); a `first` step runs a cell in `F`
+with any successful `[Inst-Run]`, and a `rerun` step must be a
+`MatchingRunAt` step, reproducing the recorded read and write sets.
+`FirstStaleStuck` holds when the first stale cell has no run of the
+required kind.
 
-The formalization models the report-free executions: `RunToClean`
-carries `F`, the complement of the algorithm's `E` (initially all
-positions); a `first` step executes a cell for the first time with any
-successful `[Inst-Run]`, and a `rerun` step is an `[Inst-Run]` step
-that leaves every position `≤ i` clean — the algorithm's check, stated
-on the successor state.
-
-- `progress` proves every report-free execution **terminates**, by the
-  paper's measure: a first execution shrinks `F`, and a rerun keeps
-  the prefix clean by its side condition, so the clean prefix strictly
-  grows — at most `n` first executions and at most `n` reruns between
-  them.
-- `canRerun_after_run` and `cleanPrefix_run_exists` prove the paper's
-  supporting claim behind the Stability lemma: after any successful
-  run of the first stale cell `i`, every cell `j < i` — in particular
-  every cell marked by `BackwardStale` — can re-run from the new store
-  reproducing its recorded output, read set, and write set
-  (`MatchingRunAt`), and such a run marks nothing before itself,
-  satisfying the rerun condition, because the run's `NoWriteAfterRead`
-  check keeps the new writes away from those cells' read sets. Hence
-  such reruns need never trigger the report; for deterministic
-  runtimes no rerun does, so the report never fires.
+- `progress` proves every such execution **terminates**, by the
+  lexicographic measure `(|F|, n − first-stale position)`: a first run
+  shrinks `F`, and a matching rerun has `W_i \ W'_i = ∅`, so
+  `BackwardStale` marks nothing and the clean prefix strictly grows
+  (`matching_clean_prefix`).
+- `canRerun_after_run` proves the assumption is satisfiable where the
+  paper's proof uses it: after any successful run of the first stale
+  cell `i`, every cell `j < i` — in particular every cell marked by
+  `BackwardStale` — can re-run from the new store reproducing its
+  recorded output, read set, and write set, because the run's
+  `NoWriteAfterRead` check keeps the new writes away from those cells'
+  read sets.
+- A matching rerun may forward-mark later cells; whether those remain
+  matchable when the sweep reaches them is not proved, and a validated
+  cell with no matching run counts as stuck.
 
 ## Verifying the axiom footprint
 
