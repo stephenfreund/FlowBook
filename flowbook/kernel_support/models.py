@@ -57,6 +57,17 @@ class TrackingData(BaseModel):
             "the importer), kept as idempotent (this cell re-ran), or real."
         ),
     )
+    rebound: Set[str] = Field(
+        default_factory=set,
+        description=(
+            "Subset of writes whose binding after the cell is a different object from "
+            "the one bound before it (or the name was unbound before or is deleted "
+            "after). Diff-derived write locations are not recorded for these: the "
+            "Var(x) write already conflicts with every read of x, and comparing the "
+            "columns of the old and new value only describes how the cell's result "
+            "differs from whatever value some earlier cell left in x."
+        ),
+    )
     idempotent_writes: Set[str] = Field(
         default_factory=set,
         description=(

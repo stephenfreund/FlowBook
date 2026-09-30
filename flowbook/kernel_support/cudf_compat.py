@@ -405,11 +405,11 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
     def tracked_cudf_getitem(df, key):
         if _cudf_tracker is not None:
             if isinstance(key, str):
-                _cudf_tracker.record_read(id(df), [key])
+                _cudf_tracker.record_read(_cudf_tracker.key(df), [key])
             elif isinstance(key, list):
                 str_keys = [k for k in key if isinstance(k, str)]
                 if str_keys:
-                    _cudf_tracker.record_read(id(df), str_keys)
+                    _cudf_tracker.record_read(_cudf_tracker.key(df), str_keys)
         return original_getitem(df, key)
 
     cudf.DataFrame.__getitem__ = tracked_cudf_getitem
@@ -421,11 +421,11 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
     def tracked_cudf_setitem(df, key, value):
         if _cudf_tracker is not None:
             if isinstance(key, str):
-                _cudf_tracker.record_write(id(df), [key])
+                _cudf_tracker.record_write(_cudf_tracker.key(df), [key])
             elif isinstance(key, list):
                 str_keys = [k for k in key if isinstance(k, str)]
                 if str_keys:
-                    _cudf_tracker.record_write(id(df), str_keys)
+                    _cudf_tracker.record_write(_cudf_tracker.key(df), str_keys)
         return original_setitem(df, key, value)
 
     cudf.DataFrame.__setitem__ = tracked_cudf_setitem
@@ -437,14 +437,15 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
     def tracked_cudf_groupby(df, by=None, *args, **kwargs):
         if _cudf_tracker is not None and by is not None:
             if isinstance(by, str):
-                _cudf_tracker.record_read(id(df), [by])
+                _cudf_tracker.record_read(_cudf_tracker.key(df), [by])
             elif isinstance(by, list):
                 str_keys = [k for k in by if isinstance(k, str)]
                 if str_keys:
-                    _cudf_tracker.record_read(id(df), str_keys)
+                    _cudf_tracker.record_read(_cudf_tracker.key(df), str_keys)
         result = original_groupby(df, by=by, *args, **kwargs)
-        # Store mapping from GroupBy -> DataFrame
-        _cudf_groupby_to_df[id(result)] = id(df)
+        # Store mapping from GroupBy -> DataFrame (tracker keys; see object_keys.py)
+        if _cudf_tracker is not None:
+            _cudf_groupby_to_df[_cudf_tracker.key(result)] = _cudf_tracker.key(df)
         return result
 
     cudf.DataFrame.groupby = tracked_cudf_groupby
@@ -457,7 +458,7 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
 
         def tracked_cudf_gb_getitem(gb, key):
             if _cudf_tracker is not None:
-                df_id = _cudf_groupby_to_df.get(id(gb))
+                df_id = _cudf_groupby_to_df.get(_cudf_tracker.key(gb))
                 if df_id is not None:
                     if isinstance(key, str):
                         _cudf_tracker.record_read(df_id, [key])
@@ -481,19 +482,19 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
             # Track columns read from left DataFrame
             if on is not None:
                 cols = [on] if isinstance(on, str) else list(on)
-                _cudf_tracker.record_read(id(df), cols)
+                _cudf_tracker.record_read(_cudf_tracker.key(df), cols)
             if left_on is not None:
                 cols = [left_on] if isinstance(left_on, str) else list(left_on)
-                _cudf_tracker.record_read(id(df), cols)
+                _cudf_tracker.record_read(_cudf_tracker.key(df), cols)
 
             # Track columns read from right DataFrame
             if hasattr(right, '__class__') and 'DataFrame' in right.__class__.__name__:
                 if on is not None:
                     cols = [on] if isinstance(on, str) else list(on)
-                    _cudf_tracker.record_read(id(right), cols)
+                    _cudf_tracker.record_read(_cudf_tracker.key(right), cols)
                 if right_on is not None:
                     cols = [right_on] if isinstance(right_on, str) else list(right_on)
-                    _cudf_tracker.record_read(id(right), cols)
+                    _cudf_tracker.record_read(_cudf_tracker.key(right), cols)
 
         return original_merge(df, right, how=how, on=on, left_on=left_on,
                               right_on=right_on, *args, **kwargs)
@@ -507,7 +508,7 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
     def tracked_cudf_sort_values(df, by, *args, **kwargs):
         if _cudf_tracker is not None:
             cols = [by] if isinstance(by, str) else list(by)
-            _cudf_tracker.record_read(id(df), cols)
+            _cudf_tracker.record_read(_cudf_tracker.key(df), cols)
         return original_sort(df, by, *args, **kwargs)
 
     cudf.DataFrame.sort_values = tracked_cudf_sort_values
@@ -519,7 +520,7 @@ def install_cudf_tracking(tracker: 'ColumnAccessTracker') -> None:
     def tracked_cudf_drop_duplicates(df, subset=None, *args, **kwargs):
         if _cudf_tracker is not None and subset is not None:
             cols = [subset] if isinstance(subset, str) else list(subset)
-            _cudf_tracker.record_read(id(df), cols)
+            _cudf_tracker.record_read(_cudf_tracker.key(df), cols)
         return original_drop_dup(df, subset=subset, *args, **kwargs)
 
     cudf.DataFrame.drop_duplicates = tracked_cudf_drop_duplicates

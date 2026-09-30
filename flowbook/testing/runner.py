@@ -16,6 +16,7 @@ import numpy as np
 from flowbook.kernel_support.checkpoint import Checkpoint, Checkpoints
 from flowbook.util.output import log, timer
 from flowbook.kernel_support.models import TrackingData
+from flowbook.kernel_support import class_scope
 from flowbook.kernel_support.tracking import TrackingDict, rollback_module_bindings
 from flowbook.kernel.reproducibility_enforcer import ReproducibilityEnforcer
 from flowbook.kernel.models import ReproducibilityResult
@@ -184,7 +185,14 @@ plt.ioff()
                 error = None
                 with self._tracking_dict.track_execution(cell_id=cell.cell_id):
                     try:
-                        exec(cell.source, self._tracking_dict)
+                        # Same execution model as the kernel: TrackingDict as
+                        # globals, its raw storage mirrored for the cell, class
+                        # bodies' loads routed through it (tracking.py, class_scope.py)
+                        self._tracking_dict.begin_mirror()
+                        try:
+                            exec(class_scope.compile_cell(cell.source), self._tracking_dict)
+                        finally:
+                            self._tracking_dict.end_mirror()
                     except Exception as e:
                         error = f"{type(e).__name__}: {e}"
 

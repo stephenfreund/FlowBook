@@ -28,6 +28,7 @@ from collections import defaultdict
 
 from flowbook.util.output import log, error, timer
 from flowbook.kernel_support import cudf_compat
+from flowbook.kernel_support.object_keys import ObjectKeys
 
 # Threshold for skipping large primitive lists/tuples during dataframe walks.
 # Below this size, the overhead of checking isn't worth it.
@@ -103,7 +104,7 @@ def _record_df_getitem(tracker: "ColumnAccessTracker", df, key) -> None:
     """Record the column reads of ``df[key]``."""
     str_keys = _key_label_strings(key)
     if str_keys:
-        tracker.record_read(id(df), str_keys)
+        tracker.record_read(tracker.key(df), str_keys)
 
 
 def _record_df_setitem_before(tracker: "ColumnAccessTracker", df, key) -> dict:
@@ -124,7 +125,7 @@ def _record_df_setitem_before(tracker: "ColumnAccessTracker", df, key) -> dict:
     # Labels normalized via str, matching the diff's column naming
     str_keys = _key_label_strings(key)
     if str_keys:
-        tracker.record_write(id(df), str_keys)
+        tracker.record_write(tracker.key(df), str_keys)
         # Record column provenance (first writer wins)
         if tracker._cell_id is not None:
             from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
@@ -142,7 +143,7 @@ def _record_df_setitem_after(tracker: "ColumnAccessTracker", df, old_dtypes: dic
     for col, old_dt in old_dtypes.items():
         if col in df.columns and new_dtypes[col] != old_dt:
             DataFrameProvenanceTracker.record_dtype_change(df, col, tracker._cell_id)
-            tracker.record_dtype_change(id(df), col)
+            tracker.record_dtype_change(tracker.key(df), col)
 
 
 def _record_df_delitem(tracker: "ColumnAccessTracker", df, key) -> None:
@@ -150,7 +151,7 @@ def _record_df_delitem(tracker: "ColumnAccessTracker", df, key) -> None:
     from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
     for k in _column_label_strings(key):
         DataFrameProvenanceTracker.record_column_delete(df, k, tracker._cell_id)
-        tracker.record_column_deletion(id(df), k)
+        tracker.record_column_deletion(tracker.key(df), k)
 
 
 # DataFrame methods that read the data of EVERY column. Each is patched with
@@ -243,6 +244,9 @@ class ColumnAccessTracker:
         _thread_local.column_tracker = tracker
 
     def __init__(self, namespace_ref: Optional[dict] = None):
+        # All *_by_id / _id_to_path maps are keyed by ObjectKeys tokens, not id():
+        # an object's address can be reused within a cell (see object_keys.py).
+        self._keys = ObjectKeys()
         self._reads_by_id: Dict[int, Set[str]] = defaultdict(set)
         self._writes_by_id: Dict[int, Set[str]] = defaultdict(set)
         self._id_to_path: Dict[int, str] = {}
@@ -351,9 +355,13 @@ class ColumnAccessTracker:
             ColumnAccessTracker._class_original_methods.clear()
         self._installed = False
 
+    def key(self, obj) -> int:
+        """The tracking key of obj for this cell (use instead of id(obj))."""
+        return self._keys.key(obj)
+
     def register_df(self, df: pd.DataFrame, path: str) -> None:
         """Register a DataFrame with its namespace path."""
-        self._id_to_path[id(df)] = path
+        self._id_to_path[self.key(df)] = path
 
     def record_read(self, df_id: int, columns: Iterable[str]) -> None:
         """Record column reads for a DataFrame by ID."""
@@ -397,8 +405,9 @@ class ColumnAccessTracker:
             # Lazy walk to find paths for unregistered DataFrames
             # This happens rarely (only for nested DataFrames not accessed via namespace)
             for path, df in walk_dataframes(self._namespace_ref):
-                if id(df) in unregistered_ids:
-                    self._id_to_path[id(df)] = path
+                k = self._keys.lookup(df)  # identity: only objects seen this cell have a key
+                if k in unregistered_ids:
+                    self._id_to_path[k] = path
 
         for df_id in all_df_ids:
             if df_id not in self._id_to_path:
@@ -486,6 +495,7 @@ class ColumnAccessTracker:
         self._reads_by_id.clear()
         self._writes_by_id.clear()
         self._id_to_path.clear()
+        self._keys.reset()
         self._groupby_to_df.clear()
         self._row_mutations_by_id.clear()
         self._index_mutations_by_id.clear()
@@ -555,7 +565,7 @@ class ColumnAccessTracker:
             tracker = ColumnAccessTracker._get_active_tracker()
             if tracker is not None:
                 for col_name in _column_label_strings(column):
-                    tracker.record_write(id(df), [col_name])
+                    tracker.record_write(tracker.key(df), [col_name])
                     if tracker._cell_id is not None:
                         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                         DataFrameProvenanceTracker.record_column_write(df, col_name, tracker._cell_id)
@@ -585,7 +595,7 @@ class ColumnAccessTracker:
             if tracker is not None and columns is not None:
                 # Track column drops as reads (need to know what columns exist)
                 cols = [columns] if isinstance(columns, str) else list(columns)
-                tracker.record_read(id(df), cols)
+                tracker.record_read(tracker.key(df), cols)
 
             # Snapshot state for provenance detection on inplace drops
             pre_len = None
@@ -603,12 +613,12 @@ class ColumnAccessTracker:
                 # Row drop provenance
                 if len(df) != pre_len:
                     DataFrameProvenanceTracker.record_row_mutation(df, cell_id)
-                    tracker.record_row_mutation(id(df))
+                    tracker.record_row_mutation(tracker.key(df))
                 # Column deletion provenance
                 post_cols = set(str(c) for c in df.columns)
                 for col in pre_cols - post_cols:
                     DataFrameProvenanceTracker.record_column_delete(df, col, cell_id)
-                    tracker.record_column_deletion(id(df), col)
+                    tracker.record_column_deletion(tracker.key(df), col)
 
             return result
 
@@ -623,15 +633,15 @@ class ColumnAccessTracker:
             if tracker is not None and by is not None:
                 # Track groupby columns as reads
                 if isinstance(by, str):
-                    tracker.record_read(id(df), [by])
+                    tracker.record_read(tracker.key(df), [by])
                 elif isinstance(by, list):
                     str_keys = _column_label_strings_from_iterable(by)
                     if str_keys:
-                        tracker.record_read(id(df), str_keys)
+                        tracker.record_read(tracker.key(df), str_keys)
             result = original_groupby(df, by=by, *args, **kwargs)
             # Store mapping from GroupBy -> DataFrame for cudf compatibility
             if tracker is not None:
-                tracker._groupby_to_df[id(result)] = id(df)
+                tracker._groupby_to_df[tracker.key(result)] = tracker.key(df)
             return result
 
         pd.DataFrame.groupby = tracked_groupby
@@ -650,7 +660,7 @@ class ColumnAccessTracker:
                     if isinstance(df, pd.DataFrame):
                         columns = _extract_columns_from_loc_key(key, df)
                         if columns:
-                            tracker.record_read(id(df), columns)
+                            tracker.record_read(tracker.key(df), columns)
                 return original_loc_getitem(loc_indexer, key)
 
             _LocIndexer.__getitem__ = tracked_loc_getitem
@@ -671,7 +681,7 @@ class ColumnAccessTracker:
                     if isinstance(df, pd.DataFrame):
                         columns = _extract_columns_from_loc_key(key, df)
                         if columns:
-                            tracker.record_write(id(df), columns)
+                            tracker.record_write(tracker.key(df), columns)
                         if tracker._cell_id is not None:
                             pre_len = len(df)
                     del df  # pandas 2.x's chained-assignment check is sys.getrefcount(self.obj) <= 2; don't pin a third ref
@@ -681,7 +691,7 @@ class ColumnAccessTracker:
                     if len(df) != pre_len:
                         from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                         DataFrameProvenanceTracker.record_row_mutation(df, tracker._cell_id)
-                        tracker.record_row_mutation(id(df))
+                        tracker.record_row_mutation(tracker.key(df))
 
             _LocIndexer.__setitem__ = tracked_loc_setitem
         except (ImportError, AttributeError):
@@ -700,7 +710,7 @@ class ColumnAccessTracker:
                     if isinstance(df, pd.DataFrame):
                         columns = _extract_columns_from_iloc_key(key, df)
                         if columns:
-                            tracker.record_read(id(df), columns)
+                            tracker.record_read(tracker.key(df), columns)
                 return original_iloc_getitem(iloc_indexer, key)
 
             _iLocIndexer.__getitem__ = tracked_iloc_getitem
@@ -720,7 +730,7 @@ class ColumnAccessTracker:
                     if isinstance(df, pd.DataFrame):
                         columns = _extract_columns_from_iloc_key(key, df)
                         if columns:
-                            tracker.record_write(id(df), columns)
+                            tracker.record_write(tracker.key(df), columns)
                     del df  # pandas 2.x's chained-assignment check is sys.getrefcount(self.obj) <= 2; don't pin a third ref
                 return original_iloc_setitem(iloc_indexer, key, value)
 
@@ -741,19 +751,19 @@ class ColumnAccessTracker:
                 # Track columns read from left DataFrame (self)
                 if on is not None:
                     cols = [on] if isinstance(on, str) else list(on)
-                    tracker.record_read(id(df), cols)
+                    tracker.record_read(tracker.key(df), cols)
                 if left_on is not None:
                     cols = [left_on] if isinstance(left_on, str) else list(left_on)
-                    tracker.record_read(id(df), cols)
+                    tracker.record_read(tracker.key(df), cols)
 
                 # Track columns read from right DataFrame
                 if isinstance(right, pd.DataFrame):
                     if on is not None:
                         cols = [on] if isinstance(on, str) else list(on)
-                        tracker.record_read(id(right), cols)
+                        tracker.record_read(tracker.key(right), cols)
                     if right_on is not None:
                         cols = [right_on] if isinstance(right_on, str) else list(right_on)
-                        tracker.record_read(id(right), cols)
+                        tracker.record_read(tracker.key(right), cols)
 
             return original_merge(df, right, how=how, on=on, left_on=left_on,
                                   right_on=right_on, left_index=left_index,
@@ -780,7 +790,7 @@ class ColumnAccessTracker:
                 if cudf_compat.is_cudf_groupby(gb) or cudf_compat.is_cudf_proxy(gb):
                     # Still track column access using our stored mapping
                     if tracker is not None:
-                        df_id = tracker._groupby_to_df.get(id(gb))
+                        df_id = tracker._groupby_to_df.get(tracker.key(gb))
                         if df_id is not None:
                             str_keys = (
                                 _column_label_strings_from_iterable(key)
@@ -798,10 +808,10 @@ class ColumnAccessTracker:
                     try:
                         df = gb.obj
                         if isinstance(df, pd.DataFrame):
-                            df_id = id(df)
+                            df_id = tracker.key(df)
                     except AttributeError:
                         # Fallback: look up DataFrame id from groupby mapping
-                        df_id = tracker._groupby_to_df.get(id(gb))
+                        df_id = tracker._groupby_to_df.get(tracker.key(gb))
 
                     if df_id is not None:
                         str_keys = (
@@ -825,7 +835,7 @@ class ColumnAccessTracker:
             tracker = ColumnAccessTracker._get_active_tracker()
             if tracker is not None:
                 cols = [by] if isinstance(by, str) else list(by)
-                tracker.record_read(id(df), cols)
+                tracker.record_read(tracker.key(df), cols)
             return original_sort_values(df, by, **kwargs)
 
         pd.DataFrame.sort_values = tracked_sort_values
@@ -838,7 +848,7 @@ class ColumnAccessTracker:
             tracker = ColumnAccessTracker._get_active_tracker()
             if tracker is not None and subset is not None:
                 cols = [subset] if isinstance(subset, str) else list(subset)
-                tracker.record_read(id(df), cols)
+                tracker.record_read(tracker.key(df), cols)
             return original_drop_duplicates(df, subset=subset, **kwargs)
 
         pd.DataFrame.drop_duplicates = tracked_drop_duplicates
@@ -858,7 +868,7 @@ class ColumnAccessTracker:
                 def tracked_method(df_self, *args, **kwargs):
                     tracker = ColumnAccessTracker._get_active_tracker()
                     if tracker is not None:
-                        df_id = id(df_self)
+                        df_id = tracker.key(df_self)
                         if df_id in tracker._id_to_path:
                             cols = [str(c) for c in df_self.columns]
                             tracker.record_read(df_id, cols)
@@ -877,7 +887,7 @@ class ColumnAccessTracker:
             def tracked_values(df_self):
                 tracker = ColumnAccessTracker._get_active_tracker()
                 if tracker is not None:
-                    df_id = id(df_self)
+                    df_id = tracker.key(df_self)
                     if df_id in tracker._id_to_path:
                         cols = [str(c) for c in df_self.columns]
                         tracker.record_read(df_id, cols)
@@ -909,7 +919,7 @@ class ColumnAccessTracker:
                         frames = []
                 for obj in frames:
                     if isinstance(obj, pd.DataFrame):
-                        df_id = id(obj)
+                        df_id = tracker.key(obj)
                         if df_id in tracker._id_to_path:
                             tracker.record_read(
                                 df_id, [str(c) for c in obj.columns]
@@ -931,7 +941,7 @@ class ColumnAccessTracker:
             if tracker is not None and tracker._cell_id is not None and axis == 0:
                 from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                 DataFrameProvenanceTracker.record_index_mutation(df_self, tracker._cell_id)
-                tracker.record_index_mutation(id(df_self))
+                tracker.record_index_mutation(tracker.key(df_self))
             return original_set_axis(df_self, axis, labels)
 
         pd.DataFrame._set_axis = patched_set_axis
@@ -972,7 +982,7 @@ class ColumnAccessTracker:
                 # are no-ops while suspended.
                 from flowbook.kernel_support.column_provenance import DataFrameProvenanceTracker
                 cell_id = tracker._cell_id
-                df_id = id(df_self)
+                df_id = tracker.key(df_self)
                 if len_changed:
                     DataFrameProvenanceTracker.record_row_mutation(df_self, cell_id)
                     tracker.record_row_mutation(df_id)
