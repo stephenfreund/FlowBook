@@ -989,10 +989,10 @@ def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
     else:
         env_activate = f"conda activate {shlex.quote(work_item.env_name)}"
 
+    # No shell tracing (set -x): it would copy environment values (API keys, tokens from ~/.bashrc or FLOWBOOK_*
+    # variables) into the job log. The command that runs is printed explicitly instead.
     inner_cmd = textwrap.dedent(
         f"""
-        set -x
-
         # ---- Python output & hang diagnostics ----
         export PYTHONUNBUFFERED=1
         export PYTHONFAULTHANDLER=1
@@ -1009,10 +1009,7 @@ def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
         echo "================================"
 
         # ---- Conda environment ----
-        # ~/.bashrc is sourced untraced: `set -x` would copy every export in it (API keys, tokens) into the job log
-        {{ set +x; }} 2>/dev/null
         source ~/.bashrc || true
-        set -x
         {env_activate} || echo "Warning: Failed to activate conda environment"
 
         conda info
@@ -1021,6 +1018,7 @@ def run_local_job(work_item: WorkItem, args: argparse.Namespace) -> bool:
         set -euo pipefail
 
         # ---- Requested command ----
+        printf '+ %s\n' {shlex.quote(command_str)}
         {command_str}
         """
     ).strip()
@@ -1115,10 +1113,11 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
     else:
         env_activate = f"conda activate {shlex.quote(work_item.env_name)}"
 
+    # No shell tracing (set -x): it would copy environment values (API keys, tokens from ~/.bashrc or FLOWBOOK_*
+    # variables) into the job log. The command that runs is printed explicitly instead.
     inner_cmd = textwrap.dedent(
         f"""
         set -euo pipefail
-        set -x
 
         # ---- Python output & hang diagnostics ----
         export PYTHONUNBUFFERED=1
@@ -1168,16 +1167,14 @@ def submit_single_job(work_item: WorkItem, args: argparse.Namespace) -> Optional
         {get_flowbook_env_exports()}
 
         # ---- Conda environment ----
-        # ~/.bashrc is sourced untraced: `set -x` would copy every export in it (API keys, tokens) into the job log
-        {{ set +x; }} 2>/dev/null
         source ~/.bashrc
-        set -x
         {env_activate}
 
         # cd {shlex.quote(str(work_dir))}
 
         # ---- Requested command ----
         # srun --cpu-bind=cores {command_str}
+        printf '+ srun %s\n' {shlex.quote(command_str)}
         srun {command_str}
         """
     ).strip()
