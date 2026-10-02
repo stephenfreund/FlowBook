@@ -2,10 +2,11 @@
 
 ---
 
-[Emery Berger](https://emeryberger.com),
-[Cormac Flanagan](https://users.soe.ucsc.edu/~cormac/),
-[Stephen Freund](https://www.cs.williams.edu/~freund/),
-[Eunice Jun](http://eunicemjun.com/)
+This repository contains:
+1. The full source for FlowBook, and accompanying documentation, tutorials, and examples.
+2. FlowBook's [formal development and correctness proofs](FlowBookSupplementalMaterialsProof.pdf).
+3. A [Lean mechanization](lean-proofs/README.md) of the formal development and proofs.
+
 
 **Output consistency for Jupyter notebooks.**
 
@@ -23,7 +24,6 @@ overwriting a value read by an earlier one) are rejected.
 When every cell is _clean_ — executed and rerun consistent —
 the notebook is guaranteed to be output consistent.
 
-Please see our [Full Formal Development and Correctness Proofs](FlowBookSupplementalMaterialsProof.pdf).
 
 ## Quick Start
 
