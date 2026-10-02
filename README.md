@@ -23,7 +23,7 @@ overwriting a value read by an earlier one) are rejected.
 When every cell is _clean_ — executed and rerun consistent —
 the notebook is guaranteed to be output consistent.
 
-Please see our [Full Formal Development and Correctness Proofs](FlowBookSupplementalMaterialsProof.pdf)
+Please see our [Full Formal Development and Correctness Proofs](FlowBookSupplementalMaterialsProof.pdf).
 
 ## Quick Start
 
