@@ -4,7 +4,7 @@
 
 This repository contains:
 1. The full source for FlowBook, and accompanying documentation, tutorials, and examples.
-2. FlowBook's [formal development and correctness proofs](FlowBookSupplementalMaterialsProof.pdf).
+2. A paper supplement containing FlowBook's [formal development and correctness proofs](FlowBookSupplementalMaterialsProof.pdf).
 3. A [Lean mechanization](lean-proofs/README.md) of the formal development and proofs.
 
 
