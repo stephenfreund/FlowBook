@@ -9,11 +9,26 @@ Per-cell tracking records which files were read-before-written (analogous to
 TrackingDict for variables). This feeds into the reproducibility enforcer
 for file-level backward mutation detection and staleness propagation.
 
+Both modes record metadata queries -- os.path.exists, os.listdir (a read of
+the directory) and os.stat, and through os.stat os.path.isfile/isdir/
+getsize/getmtime and pathlib.Path.exists/is_file/is_dir/stat -- as reads
+of the queried path: whether a file exists is state a cell can depend on
+(`if not os.path.exists(p): compute and save p`).
+
 Known limitations:
 - Not thread-safe (consistent with existing kernel)
+- Not intercepted in either mode: os.lstat (os.path.lexists/islink,
+  Path.lstat/is_symlink), os.scandir (os.walk, glob, Path.glob/rglob),
+  os.access, os.fstat, and functions bound before the patches were installed
+  (e.g. `from os import stat` at import time). In full mode these also do
+  not see the overlay.
+- The notebook directory itself is neither tracked nor overlaid (only paths
+  below it are), so in full mode os.listdir(".") lists the real directory
+  without the files earlier cells wrote to the overlay.
 """
 
 import builtins
+import errno
 import os
 import shutil
 import tempfile
@@ -30,6 +45,20 @@ class FileTrackingData:
 
 # Sentinel value for namespace patching
 _NOT_PRESENT = object()
+
+# os.stat as imported, before any patch. FlowBook's own overlay bookkeeping
+# checks existence with this, so it neither goes through the patched
+# functions nor is recorded as a user read.
+_real_stat = os.stat
+
+
+def _real_exists(path) -> bool:
+    """os.path.exists on the real filesystem, bypassing any VFS patch."""
+    try:
+        _real_stat(path)
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 # --- Low-level fd flag helpers ---
@@ -227,10 +256,11 @@ class VirtualFileSystem:
         """Resolve a path for reading: overlay first, then real FS."""
         abs_path = os.path.abspath(real_path)
         if abs_path in self._deleted_paths:
-            # File was deleted in overlay - return overlay path (will fail on open)
+            # File was deleted in overlay - return overlay path (will fail on
+            # open, unless the file was written again after the deletion)
             return self._to_overlay_path(abs_path)
         overlay = self._to_overlay_path(abs_path)
-        if os.path.exists(overlay):
+        if _real_exists(overlay):
             return overlay
         return real_path
 
@@ -243,12 +273,23 @@ class VirtualFileSystem:
         abs_prefix = os.path.abspath(prefix)
         self._excluded_prefixes.add(abs_prefix)
 
+    def _in_overlay_dir(self, abs_path: str) -> bool:
+        """True if abs_path is inside the overlay directory itself."""
+        overlay_dir = self._overlay_dir
+        return overlay_dir is not None and (
+            abs_path == overlay_dir or abs_path.startswith(overlay_dir + os.sep))
+
     def _should_overlay(self, abs_path: str) -> bool:
         """Check if a path should be redirected to the overlay.
 
         Only redirects files under the notebook directory tree (if set).
-        Paths outside (e.g., /dev/shm, /tmp) pass through to real FS.
+        Paths outside (e.g., /dev/shm, /tmp) pass through to real FS, as do
+        paths inside the overlay itself (the patched functions reach those
+        when the unpatched functions they delegate to, e.g. os.makedirs,
+        call os.path.exists or os.stat on overlay paths).
         """
+        if self._in_overlay_dir(abs_path):
+            return False
         if self._notebook_dir is None:
             return True
         return abs_path.startswith(self._notebook_dir)
@@ -257,8 +298,12 @@ class VirtualFileSystem:
         """Check if a path should be tracked.
 
         Only tracks files under the notebook directory tree (if set).
-        Always excludes internal FlowBook paths and explicitly excluded prefixes.
+        Always excludes internal FlowBook paths (the overlay) and explicitly
+        excluded prefixes.
         """
+        if self._in_overlay_dir(abs_path):
+            return False
+
         # Filter out dynamically excluded prefixes (e.g., checkpoint storage dir)
         for prefix in self._excluded_prefixes:
             if abs_path.startswith(prefix):
@@ -299,7 +344,13 @@ class VirtualFileSystem:
     # =========================================================================
 
     def _install_patches(self) -> None:
-        """Install monkey-patches for full VFS mode."""
+        """Install monkey-patches for full VFS mode.
+
+        Writes are redirected to the overlay; reads and metadata queries
+        (open, os.stat, os.path.exists, os.listdir) resolve overlay-first and
+        honour paths deleted in the overlay. Both are recorded, as in
+        tracking-only mode, for paths that _should_track_path accepts.
+        """
         self._originals = {
             "builtins.open": builtins.open,
             "os.remove": os.remove,
@@ -310,6 +361,7 @@ class VirtualFileSystem:
             "os.rmdir": os.rmdir,
             "os.path.exists": os.path.exists,
             "os.listdir": os.listdir,
+            "os.stat": os.stat,
             "shutil.copy": shutil.copy,
             "shutil.copy2": shutil.copy2,
             "shutil.move": shutil.move,
@@ -326,6 +378,7 @@ class VirtualFileSystem:
         _orig_open = self._originals["builtins.open"]
         _orig_exists = self._originals["os.path.exists"]
         _orig_listdir = self._originals["os.listdir"]
+        _orig_stat = self._originals["os.stat"]
         _orig_remove = self._originals["os.remove"]
         _orig_makedirs = self._originals["os.makedirs"]
         _orig_mkdir = self._originals["os.mkdir"]
@@ -339,7 +392,7 @@ class VirtualFileSystem:
         def _ensure_overlay_dir(overlay_path):
             """Create overlay directory using original (unpatched) functions."""
             overlay_dir = os.path.dirname(overlay_path)
-            if not _orig_exists(overlay_dir):
+            if not _real_exists(overlay_dir):
                 # Temporarily restore to avoid recursion through patched mkdir
                 saved_makedirs = os.makedirs
                 saved_mkdir = os.mkdir
@@ -386,7 +439,7 @@ class VirtualFileSystem:
             vfs._track_write(path)
             vfs._deleted_paths.add(abs_path)
             overlay = vfs._to_overlay_path(abs_path)
-            if _orig_exists(overlay):
+            if _real_exists(overlay):
                 _orig_remove(overlay, *args, **kwargs)
 
         def patched_rename(src, dst, *args, **kwargs):
@@ -442,7 +495,7 @@ class VirtualFileSystem:
             os.makedirs = _orig_makedirs
             os.mkdir = _orig_mkdir
             try:
-                if not _orig_exists(overlay_parent):
+                if not _real_exists(overlay_parent):
                     _orig_makedirs(overlay_parent, exist_ok=True)
                 return _orig_mkdir(overlay, *args, **kwargs)
             finally:
@@ -458,35 +511,53 @@ class VirtualFileSystem:
                 return _orig_rmdir(path, *args, **kwargs)
             vfs._deleted_paths.add(abs_path)
             overlay = vfs._to_overlay_path(abs_path)
-            if _orig_exists(overlay):
+            if _real_exists(overlay):
                 _orig_rmdir(overlay, *args, **kwargs)
 
-        def patched_exists(path):
-            if isinstance(path, bytes):
-                return _orig_exists(path)
+        # Metadata queries are reads of the queried path (as in tracking-only
+        # mode): a cell that checks whether a file exists depends on it.
+        # os.path.isfile/isdir/getsize/getmtime and pathlib's Path.stat/
+        # exists/is_file/is_dir call os.stat, so patched_stat covers them.
+        def patched_stat(path, *args, **kwargs):
+            if isinstance(path, (bytes, int)) or kwargs.get("dir_fd") is not None:
+                return _orig_stat(path, *args, **kwargs)
             abs_path = os.path.abspath(path)
+            vfs._track_read(path)
             if not vfs._should_overlay(abs_path):
-                return _orig_exists(path)
+                return _orig_stat(path, *args, **kwargs)
+            # Overlay copy if any; for a deleted path the overlay location,
+            # which exists only if the path was written again since
             if abs_path in vfs._deleted_paths:
+                resolved = vfs._to_overlay_path(abs_path)
+                if not _real_exists(resolved):
+                    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+            else:
+                resolved = vfs._resolve_read_path(path)
+            return _orig_stat(resolved, *args, **kwargs)
+
+        def patched_exists(path):
+            if isinstance(path, (bytes, int)):
+                return _orig_exists(path)
+            try:
+                patched_stat(path)
+            except (OSError, ValueError):
                 return False
-            overlay = vfs._to_overlay_path(abs_path)
-            if _orig_exists(overlay):
-                return True
-            return _orig_exists(path)
+            return True
 
         def patched_listdir(path="."):
-            if isinstance(path, bytes):
+            if isinstance(path, (bytes, int)):
                 return _orig_listdir(path)
             abs_path = os.path.abspath(path)
+            vfs._track_read(path)
             if not vfs._should_overlay(abs_path):
                 return _orig_listdir(path)
             # Merge real FS and overlay
             real_entries = set()
-            if _orig_exists(abs_path):
+            if _real_exists(abs_path):
                 real_entries = set(_orig_listdir(abs_path))
             overlay = vfs._to_overlay_path(abs_path)
             overlay_entries = set()
-            if _orig_exists(overlay):
+            if _real_exists(overlay):
                 overlay_entries = set(_orig_listdir(overlay))
             # Remove deleted entries
             merged = (real_entries | overlay_entries)
@@ -558,7 +629,7 @@ class VirtualFileSystem:
                 return _orig_rmtree(path, *args, **kwargs)
             vfs._deleted_paths.add(abs_path)
             overlay = vfs._to_overlay_path(abs_path)
-            if _orig_exists(overlay):
+            if _real_exists(overlay):
                 _orig_rmtree(overlay, *args, **kwargs)
 
         # --- Low-level fd patches ---
@@ -628,6 +699,7 @@ class VirtualFileSystem:
         os.rmdir = patched_rmdir
         os.path.exists = patched_exists
         os.listdir = patched_listdir
+        os.stat = patched_stat
         shutil.copy = patched_shutil_copy
         shutil.copy2 = patched_shutil_copy2
         shutil.move = patched_shutil_move

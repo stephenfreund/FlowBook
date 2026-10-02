@@ -37,8 +37,9 @@ This formalization defines an idealized notebook semantics, defines what
 reproducibility means, defines FlowBook's analysis as an _instrumented
 semantics_, and proves three theorems: the analysis's invariant is
 preserved by every user action (**Preservation**), an all-clean notebook
-really is reproducible (**Output Consistency**), and the natural strategy
-of re-running stale cells always terminates (**Progress**).
+really is reproducible (**Output Consistency**), and, for deterministic
+cells, the natural strategy of re-running the first stale cell always
+terminates (**Progress**).
 
 ---
 
@@ -135,7 +136,8 @@ is treated as a **black box**, and evaluation is a _relation_, not a
 function, because a cell may be non-deterministic (e.g. it draws a random
 number).
 
-The metatheory needs exactly two facts about this black box. They are
+Preservation and Output Consistency need exactly two facts about this
+black box. (Progress additionally assumes determinism, §3.3.) They are
 bundled as a type class `CellEval` — an interface a concrete runtime must
 implement — carrying the evaluation relation `Eval` plus two guarantees:
 
@@ -561,111 +563,111 @@ same output it recorded.
 
 Preservation and Output Consistency say the invariant is kept and that
 all-clean states are good — but not that an all-clean state is
-_reachable_. Progress closes the loop: repeatedly running the first
-stale cell terminates, either all-clean (hence reproducible) or at a
-stuck cell.
-
-Cell evaluation is a relation, so "run the first stale cell" does not
-determine a unique successor, and without constraint the strategy need
-not terminate. Two cells with empty read sets that each write `{a}` or
-`{b}`, choosing differently on successive runs, mark each other stale
-forever — each run of the later cell that drops a location
-backward-marks the earlier cell via `LastWriter`, and each run of the
-earlier cell forward-marks the later. The supplement therefore assumes
-that rerunning a previously clean cell whose reads are unchanged
-reproduces its recorded read and write sets (automatic for
-deterministic evaluation); the paper's proof uses exactly this. A
-rerun with unchanged write set has `W_i \ W'_i = ∅`, so `BackwardStale`
-marks nothing and staleness never moves backward.
-
-The first stale cell is the earliest stale position:
+_reachable_. Progress closes the loop for the natural strategy: while
+some cell is stale, run the first stale cell.
 
 ```lean
 def FirstStale (cs) (i) : Prop := IsStale cs i ∧ ∀ j, j < i → ¬ IsStale cs j
+
+def StrategyStep (nb nb') : Prop :=          -- run the first stale cell
+  ∃ i, FirstStale nb.cells i ∧ InstStep nb (.run i) nb'
+
+def Stuck (nb) : Prop :=                      -- its run fails a check or raises
+  ∃ i, FirstStale nb.cells i ∧ ∀ nb', ¬ InstStep nb (.run i) nb'
 ```
 
-Any notebook is either all-clean or has a first stale cell:
+### The determinism assumption
+
+For arbitrary non-deterministic cells the strategy need not terminate:
+two cells with empty read sets that each write `{a}` or `{b}`, choosing
+differently on successive runs, mark each other stale forever. Progress
+therefore assumes determinism. The paper states it for read _sets_
+("rerunning a cell when the values it reads are unchanged reproduces its
+read set, write set, and written values"), but that is not enough.
+Take three cells `A`, `B`, `C` that write `a := 0`, `b := 0`, `c := 0`,
+and below them a cell `U` that reads `{a, b}` and writes `c := 1` when
+`a ≠ 0 = b`; reads `{b, c}` and writes `a := 1` when `b ≠ 0 = c`; reads
+`{c, a}` and writes `b := 1` when `c ≠ 0 = a`; and otherwise reads all
+three. `U` satisfies the set-level property. From the well-formed state
+`a = 1, b = c = 0` (with `U` stale), running the first stale cell cycles
+through `U, A, U, C, U, B` and returns to the same state
+(`FlowBook/Counterexample.lean`, `setDeterminism_insufficient`). Each run of
+`U` drops the location it last wrote, `BackwardStale` marks that
+location's writer, and that writer's rerun re-marks `U`.
+
+Such a `U` must inspect its inputs "in parallel". The paper's proof
+relies on the order of reads ("the first such location `u` reads"), so
+the formalization states determinism sequentially: a run reads the
+locations of a list `rseq c σ` in order. The next location read depends
+only on the values already read, and the write set and written values
+depend only on the values read. Outputs are unconstrained.
 
 ```lean
-theorem allClean_or_firstStale (cs) : AllClean cs ∨ ∃ i, FirstStale cs i
+class Deterministic (Code Output L V) [CellEval Code Output L V] where
+  rseq : Code → Store L V → List L
+  reads_iff : Eval c σ o σ' r w → ∀ ℓ, r ℓ ↔ ℓ ∈ rseq c σ
+  rseq_take : (∀ ℓ, ℓ ∈ (rseq c σ).take k → τ ℓ = σ ℓ) →
+    (rseq c τ).take (k + 1) = (rseq c σ).take (k + 1)
+  det : Eval c σ o σ' r w → Eval c τ o₂ τ' r₂ w₂ → (∀ ℓ, r ℓ → τ ℓ = σ ℓ) →
+    (∀ ℓ, w₂ ℓ ↔ w ℓ) ∧ ∀ ℓ, w ℓ → τ' ℓ = σ' ℓ
 ```
 
-Executions of the strategy are modeled by `FirstStaleExec F nb nb' F'`,
-where `F` is the set of positions with **no validated recorded
-behavior** (edited, inserted, or initially stale cells). Initially `F`
-is all positions. Each step runs the first stale cell: a cell in `F`
-gets one ordinary run (`first`); a cell not in `F` must satisfy the
-rerun assumption (`rerun`, a `MatchingRunAt` step):
+### The theorem
+
+> **Theorem (Progress).** Under `Deterministic`, every execution of the
+> strategy from a well-formed state is finite, and it ends in a
+> well-formed state that is either all-clean or stuck.
 
 ```lean
-def MatchingRunAt (nb) (i) (nb') : Prop :=   -- [Inst-Run] with Eval … ci.reads ci.writes
+theorem progress_terminates (hwf : WellFormed nb) : Acc StrategyRel nb
 
-inductive FirstStaleExec : List Nat → Notebook … → Notebook … → List Nat → Prop where
-  | refl : FirstStaleExec F nb nb F                    -- done
-  | first (hfs : FirstStale nb.cells i) (hmem : i ∈ F) -- first run of cell i
-          (hstep : InstStep nb (.run i) nb₁)
-          (hrest : FirstStaleExec (F.erase i) nb₁ nb' F') : FirstStaleExec F nb nb' F'
-  | rerun (hfs : FirstStale nb.cells i) (hmem : i ∉ F) -- reproduces recorded R_i, W_i
-          (hstep : MatchingRunAt nb i nb₁)
-          (hrest : FirstStaleExec F nb₁ nb' F') : FirstStaleExec F nb nb' F'
+theorem progress_halted (hwf : WellFormed nb) (hexec : StrategyStar nb nb')
+    (hhalt : ∀ nb'', ¬ StrategyStep nb' nb'') :
+    WellFormed nb' ∧ (AllClean nb'.cells ∨ Stuck nb')
+
+theorem progress (hwf : WellFormed nb) :
+    ∃ nb', StrategyStar nb nb' ∧ WellFormed nb' ∧ (AllClean nb'.cells ∨ Stuck nb')
+
+theorem progress_reproducible (hwf : WellFormed nb) :
+    ∃ nb', StrategyStar nb nb' ∧ (Reproducible nb'.erase ∨ Stuck nb')
 ```
 
-The strategy is stuck when the first stale cell admits no run of the
-required kind:
+`Acc StrategyRel nb` says there is no infinite sequence of strategy
+steps from `nb`, whatever outputs the cells produce.
 
-```lean
-def FirstStaleStuck (nb) (F) : Prop :=
-  ∃ i, FirstStale nb.cells i ∧
-    ((i ∈ F ∧ ∀ nb', ¬ InstStep nb (.run i) nb') ∨    -- no run at all
-     (i ∉ F ∧ ∀ nb', ¬ MatchingRunAt nb i nb'))       -- no matching rerun
-```
+### The proof
 
-> **Theorem (Progress).** From any well-formed state, every
-> execution of `FirstStaleExec` can be extended to reach a state that is
-> well-formed and either all-clean or stuck.
+Let `E` be the top-to-bottom execution of the current code
+(`TopPre cs k σ`: the first `k` cells run from `∅` and produce `σ`;
+unique under determinism).
 
-```lean
-theorem progress (hwf : WellFormed nb) (F : List Nat) :
-    ∃ nb' F', FirstStaleExec F nb nb' F' ∧ WellFormed nb' ∧
-      (AllClean nb'.cells ∨ FirstStaleStuck nb' F')
+- **The clean prefix agrees with `E`** (`clean_prefix`). In a
+  well-formed state, every cell above the first stale cell is _settled_:
+  its recorded read and write sets are those of its run in `E`. The
+  store also agrees with `E` on every location written above the first
+  stale cell and not at or below it. This is the Output Consistency
+  induction restricted to a prefix. It follows from well-formedness
+  alone, so it holds in every state the strategy reaches, and no
+  invariant about stored values has to be carried across runs.
+- **Run analysis** (`run_analysis`). A run of the first stale cell `f`
+  either is an `E`-run (it reads exactly `E`'s reads, and its write set
+  is `E`'s), or it first diverges from `E` at some location `p` that
+  both runs read. In that case `p` holds a value cell `f` itself wrote,
+  and `p` leaves `f`'s write set (`NoReadAndWrite`).
+- **Phases** (`Phase`, `phase_acc`). A phase for cell `m` lasts while
+  the first stale cell is at or above `m`. Cells above `m` stay settled,
+  so their runs are `E`-runs that keep their write sets. They mark only
+  cells below themselves, and the first stale cell moves down. A run of
+  `m` that diverges at the `d`-th read leaves `E`'s first `d + 1` reads
+  exposed, so the next run of `m` agrees with `E` on more reads. After
+  an `E`-run of `m`, the next run of `m` keeps its write set. The
+  measure within a phase is `(|rseq m| + 1 − κ, n − first stale)`,
+  where `κ` counts the reads on which the next run of `m` agrees with
+  `E`. Successive phases are for strictly lower cells (`acc_aux`).
 
-theorem progress_init (hwf : WellFormed nb) :   -- initial all-stale state
-    ∃ nb' F', FirstStaleExec (List.range nb.cells.length) nb nb' F' ∧ WellFormed nb' ∧
-      (AllClean nb'.cells ∨ FirstStaleStuck nb' F')
-```
-
-Combined with Output Consistency, termination lands in a _reproducible_
-notebook or at a stuck cell:
-
-```lean
-theorem progress_reproducible (hwf : WellFormed nb) (F : List Nat) :
-    ∃ nb' F', FirstStaleExec F nb nb' F' ∧ (Reproducible nb'.erase ∨ FirstStaleStuck nb' F')
-```
-
-Termination follows the lexicographic measure `(|F|, n − first-stale
-position)`: a first run removes `i` from `F`; a matching rerun leaves
-every position `≤ i` clean (`matching_clean_prefix`), so the run of
-clean cells at the top strictly grows. The key supporting lemma
-(behind the paper's Stability lemma) shows the rerun assumption is
-satisfiable exactly where the paper's proof needs it: after running
-the first stale cell, every cell `j < i` — in particular every
-backward-marked one — _can_ re-run reproducing its recorded output,
-read set, and write set (the run's `noWriteAfterRead` check keeps its
-new writes off those cells' read sets, so `locality` reproduces their
-recorded behavior). A matching rerun may forward-mark later cells;
-whether those remain matchable when the sweep reaches them is not
-proved, and a validated cell with no matching run counts as stuck.
-
-```lean
-theorem canRerun_after_run
-    (hwf : WellFormed nb) (hfs : FirstStale nb.cells i)
-    (hstep : InstStep nb (.run i) nb') :
-    ∀ j, j < i → CanRerunAt nb' j
-
-theorem matching_clean_prefix
-    (hfs : FirstStale nb.cells i) (h : MatchingRunAt nb i nb') :
-    ∀ j, j ≤ i → IsClean nb'.cells j
-```
+`progress_halted` needs no determinism: a state with no strategy step is
+all-clean or stuck by definition, and Preservation keeps every reached
+state well-formed.
 
 ---
 
@@ -690,9 +692,10 @@ theorem instStep_erase (h : InstStep nb op nb') : StdStep nb.erase op nb'.erase
 ### (`FlowBook/Examples.lean`)
 
 Everything above assumed an abstract `CellEval` with its `frame` and
-`locality` axioms. To show these assumptions are not vacuous — that a
-real runtime can satisfy them — a tiny concrete language is exhibited and
-proved to be a `CellEval`.
+`locality` axioms, and Progress also assumed `Deterministic`. To show
+these assumptions are not vacuous — that a real runtime can satisfy
+them — a tiny concrete language is exhibited and proved to be a
+`CellEval` and `Deterministic`.
 
 The language has two commands: assign a constant to a location, or copy
 one location to another.
@@ -721,13 +724,18 @@ def CmdEval [DecidableEq L] (c : Cmd L V) (σ : Store L V) (_ : Unit)
 ```
 
 This is registered as a `CellEval` instance, with `frame` and `locality`
-proved (proofs omitted):
+proved, and as a `Deterministic` instance (an assignment reads `[]`, a
+copy reads `[src]`; proofs omitted):
 
 ```lean
 instance instCellEval [DecidableEq L] : CellEval (Cmd L V) Unit L V where
   Eval := CmdEval
   frame := …
   locality := …
+
+instance instDeterministic [DecidableEq L] : Deterministic (Cmd L V) Unit L V where
+  rseq c _ := match c with | .assign _ _ => [] | .copy _ src => [src]
+  …
 ```
 
 Instantiating the paper's location type and this language gives a
@@ -742,27 +750,29 @@ abbrev MiniNotebook := Notebook (Cmd PaperLoc Nat) Unit PaperLoc Nat
 
 ## Summary of the correspondence
 
-| Concept                                  | Lean                                                                       | File              |
-| ---------------------------------------- | -------------------------------------------------------------------------- | ----------------- |
-| location `ℓ ::= x ∣ d.c`                 | `Loc`                                                                      | Semantics         |
-| store, empty store, "agree except on X"  | `Store`, `Store.empty`, `AgreeExcept`                                      | Semantics         |
-| cell evaluation `c ; Σ ⇓ o · Σ' · r · w` | `CellEval.Eval` + `frame`, `locality`                                      | Semantics         |
-| user operations                          | `Op`                                                                       | Semantics         |
-| standard state and semantics             | `StdState`, `StdStep`                                                      | Semantics         |
-| top-to-bottom execution                  | `Runs`                                                                     | Semantics         |
-| reproducible / output-consistent         | `Reproducible`                                                             | Semantics         |
-| status tag; instrumented cell/notebook   | `Tag`, `Cell`, `Notebook`                                                  | Analysis          |
-| rerun consistency (4 conditions)         | `RerunConsistent`                                                          | Analysis          |
-| forward / backward staleness             | `FwdStale`, `IsLastWriter`, `BwdStale`, `Marked`                           | Analysis          |
-| the tag update / instrumented semantics  | `RetagSpec`, `InstStep`                                                    | Analysis          |
-| the analysis invariant                   | `Witnessed`, `WellFormed`                                                  | Analysis          |
-| notebooks start well-formed              | `wellFormed_initial`                                                       | Analysis          |
-| **Preservation**                         | `preservation`                                                             | Preservation      |
-| **Output Consistency**                   | `output_consistency`                                                       | OutputConsistency |
-| **Progress**                             | `progress`, `progress_init`, `progress_reproducible`                       | Progress          |
-| the first-stale strategy and rerun assumption | `FirstStaleExec`, `FirstStaleStuck`, `MatchingRunAt`, `matching_clean_prefix` | Progress          |
-| analysis refines standard semantics      | `instStep_erase`                                                           | Erasure           |
-| the axioms are satisfiable               | `Cmd`, `CmdEval`, `instCellEval`                                           | Examples          |
+| Concept                                  | Lean                                                  | File              |
+| ---------------------------------------- | ----------------------------------------------------- | ----------------- |
+| location `ℓ ::= x ∣ d.c`                 | `Loc`                                                 | Semantics         |
+| store, empty store, "agree except on X"  | `Store`, `Store.empty`, `AgreeExcept`                 | Semantics         |
+| cell evaluation `c ; Σ ⇓ o · Σ' · r · w` | `CellEval.Eval` + `frame`, `locality`                 | Semantics         |
+| user operations                          | `Op`                                                  | Semantics         |
+| standard state and semantics             | `StdState`, `StdStep`                                 | Semantics         |
+| top-to-bottom execution                  | `Runs`                                                | Semantics         |
+| reproducible / output-consistent         | `Reproducible`                                        | Semantics         |
+| status tag; instrumented cell/notebook   | `Tag`, `Cell`, `Notebook`                             | Analysis          |
+| rerun consistency (4 conditions)         | `RerunConsistent`                                     | Analysis          |
+| forward / backward staleness             | `FwdStale`, `IsLastWriter`, `BwdStale`, `Marked`      | Analysis          |
+| the tag update / instrumented semantics  | `RetagSpec`, `InstStep`                               | Analysis          |
+| the analysis invariant                   | `Witnessed`, `WellFormed`                             | Analysis          |
+| notebooks start well-formed              | `wellFormed_initial`                                  | Analysis          |
+| **Preservation**                         | `preservation`                                        | Preservation      |
+| **Output Consistency**                   | `output_consistency`                                  | OutputConsistency |
+| determinism (sequential reads)           | `Deterministic`                                       | Progress          |
+| top-to-bottom execution of a prefix      | `TopPre`, `Settled`, `clean_prefix`                   | Progress          |
+| **Progress**                             | `progress_terminates`, `progress`, `progress_halted`  | Progress          |
+| the strategy                             | `FirstStale`, `StrategyStep`, `StrategyStar`, `Stuck` | Progress          |
+| analysis refines standard semantics      | `instStep_erase`                                      | Erasure           |
+| the axioms are satisfiable               | `Cmd`, `CmdEval`, `instCellEval`, `instDeterministic` | Examples          |
 
 Every statement above is proved in Lean; see the `.lean` files for the
 proofs, and `FlowBook/Exec.lean` for an executable, separately-verified

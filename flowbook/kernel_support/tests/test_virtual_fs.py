@@ -1,12 +1,13 @@
 """Tests for VirtualFileSystem."""
 
 import os
+import pathlib
 import shutil
 import tempfile
 
 import pytest
 
-from flowbook.kernel_support.virtual_fs import VirtualFileSystem, FileTrackingData
+from flowbook.kernel_support.virtual_fs import VirtualFileSystem, FileTrackingData, _real_exists
 
 
 @pytest.fixture
@@ -53,7 +54,7 @@ class TestVFSOverlay:
             f.write("hello overlay")
 
         # Real file should NOT exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(real_file)
 
         # But patched exists should find it
@@ -82,7 +83,7 @@ class TestVFSOverlay:
         with open(real_file, "w") as f:
             f.write("to commit")
 
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(real_file)
 
         vfs.commit()
@@ -117,7 +118,7 @@ class TestVFSOverlay:
         assert not os.path.exists(real_file)
 
         # Real file still exists
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(real_file)
 
     def test_listdir_merges(self, vfs, tmpdir):
@@ -703,7 +704,7 @@ class TestModeTransition:
         assert os.path.exists(real_file)
 
         # Real file should NOT exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(real_file)
 
     def test_namespace_repatched_after_mode_transition(self, vfs, tmpdir):
@@ -733,7 +734,7 @@ class TestModeTransition:
         assert os.path.exists(real_file)
 
         # Real file should NOT exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(real_file)
 
     def test_multiple_namespaces_repatched(self, vfs, tmpdir):
@@ -769,7 +770,7 @@ class TestCommitExtended:
         with open(file2, "w") as f:
             f.write("content 2")
 
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(file1)
         assert not orig_exists(file2)
 
@@ -793,7 +794,7 @@ class TestCommitExtended:
         with open(nested_file, "w") as f:
             f.write("nested content")
 
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(nested_file)
 
         vfs.commit()
@@ -816,7 +817,7 @@ class TestCommitExtended:
         os.remove(real_file)
 
         # Real file still exists before commit
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(real_file)
 
         vfs.commit()
@@ -840,7 +841,7 @@ class TestCommitExtended:
             f.write("second")
 
         # First file should be on real FS, second only in overlay
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(file1)
         assert not orig_exists(file2)
 
@@ -859,7 +860,7 @@ class TestCommitExtended:
             with open(dst_file, "w") as dst:
                 dst.write(src.read())
 
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(dst_file)
 
         vfs.commit()
@@ -950,7 +951,7 @@ class TestFullVFSExtendedOps:
         assert not os.path.exists(real_file)
 
         # Real file should still exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(real_file)
 
     def test_manual_copy_goes_to_overlay(self, vfs, tmpdir):
@@ -972,7 +973,7 @@ class TestFullVFSExtendedOps:
         assert os.path.exists(dst_file)
 
         # Real destination should NOT exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(dst_file)
 
     def test_rename_within_overlay(self, vfs, tmpdir):
@@ -992,7 +993,7 @@ class TestFullVFSExtendedOps:
         assert os.path.exists(dst_file)
 
         # Both should NOT exist on real FS
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(src_file)
         assert not orig_exists(dst_file)
 
@@ -1007,7 +1008,7 @@ class TestFullVFSExtendedOps:
         assert os.path.exists(new_dirs)
 
         # Real dirs should NOT exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(new_dirs)
 
     def test_os_rename_goes_to_overlay(self, vfs, tmpdir):
@@ -1027,7 +1028,7 @@ class TestFullVFSExtendedOps:
         assert os.path.exists(dst_file)
 
         # Both should NOT exist on real FS
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(src_file)
         assert not orig_exists(dst_file)
 
@@ -1046,7 +1047,7 @@ class TestFullVFSExtendedOps:
         assert not os.path.exists(real_dir)
 
         # Real dir should still exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(real_dir)
 
 
@@ -1155,15 +1156,10 @@ class TestBothModesTracking:
         vfs.enable()
         vfs.reset_cell_tracking()
 
-        os.path.exists(real_file)
+        assert os.path.exists(real_file)
 
-        # Note: In full VFS mode, os.path.exists is patched but doesn't track
-        # because it's primarily used for resolving overlay vs real FS
-        # This test documents the current behavior
         tracking = vfs.get_cell_file_tracking()
-        # In full VFS mode, exists checks aren't tracked as reads
-        # (the tracking is for reproducibility, and exists checks in VFS
-        # are internal implementation details)
+        assert os.path.abspath(real_file) in tracking.file_reads_before_writes
 
     def test_cumulative_tracking_persists_across_cells_both_modes(self, vfs, tmpdir):
         """Cumulative tracking should work in both modes."""
@@ -1216,6 +1212,232 @@ class TestBothModesTracking:
                 f"Cell tracking not cleared in {mode_name}"
             assert len(tracking2.file_reads_before_writes) == 0, \
                 f"Cell reads not cleared in {mode_name}"
+
+
+class TestFullVFSReadOps:
+    """Metadata queries are reads in full VFS mode too, and see the overlay.
+
+    `if not os.path.exists(p): compute and save p` depends on p: before the
+    fix full mode recorded nothing for exists/listdir and did not patch
+    os.stat (so os.path.isfile & co. neither recorded nor saw the overlay).
+    """
+
+    def _reads(self, vfs):
+        return vfs.get_cell_file_tracking().file_reads_before_writes
+
+    def test_os_path_exists_tracked_as_read(self, vfs, tmpdir):
+        real_file = os.path.join(tmpdir, "exists_check.txt")
+        with open(real_file, "w") as f:
+            f.write("exists")
+        missing = os.path.join(tmpdir, "missing.txt")
+
+        vfs.enable()
+        vfs.reset_cell_tracking()
+
+        assert os.path.exists(real_file)
+        assert not os.path.exists(missing)
+
+        # A failed existence check is a read too
+        assert self._reads(vfs) == {real_file, missing}
+
+    def test_os_listdir_tracked_as_read(self, vfs, tmpdir):
+        vfs.enable()
+        vfs.reset_cell_tracking()
+
+        os.listdir(tmpdir)
+
+        assert os.path.abspath(tmpdir) in self._reads(vfs)
+
+    def test_os_stat_tracked_as_read(self, vfs, tmpdir):
+        real_file = os.path.join(tmpdir, "stat_check.txt")
+        with open(real_file, "w") as f:
+            f.write("stat me")
+
+        vfs.enable()
+        vfs.reset_cell_tracking()
+
+        assert os.stat(real_file).st_size == 7
+
+        assert real_file in self._reads(vfs)
+
+    @pytest.mark.parametrize("query", [
+        os.path.isfile, os.path.getsize, os.path.getmtime,
+        lambda p: pathlib.Path(p).exists(), lambda p: pathlib.Path(p).is_file(),
+    ], ids=["isfile", "getsize", "getmtime", "Path.exists", "Path.is_file"])
+    def test_stat_based_queries_tracked_as_read(self, vfs, tmpdir, query):
+        """os.path.isfile & co. and pathlib call os.stat, so they are covered."""
+        real_file = os.path.join(tmpdir, "query.txt")
+        with open(real_file, "w") as f:
+            f.write("check")
+
+        vfs.enable()
+        vfs.reset_cell_tracking()
+
+        assert query(real_file)
+
+        assert real_file in self._reads(vfs)
+
+    def test_os_path_isdir_tracked_as_read(self, vfs, tmpdir):
+        vfs.enable()
+        vfs.reset_cell_tracking()
+
+        assert os.path.isdir(tmpdir)
+
+        assert os.path.abspath(tmpdir) in self._reads(vfs)
+
+    def test_queries_see_overlay_file(self, vfs, tmpdir):
+        vfs.set_notebook_dir(tmpdir)
+        sub = os.path.join(tmpdir, "sub")
+        os.mkdir(sub)
+        vfs.enable()
+        path = os.path.join(sub, "new.txt")
+        with open(path, "w") as f:
+            f.write("overlay")
+        assert not _real_exists(path)
+
+        assert os.path.exists(path)
+        assert os.path.isfile(path)
+        assert os.stat(path).st_size == 7
+        assert os.path.getsize(path) == 7
+        assert pathlib.Path(path).exists()
+        assert "new.txt" in os.listdir(sub)
+
+    def test_queries_honour_deleted_paths(self, vfs, tmpdir):
+        vfs.set_notebook_dir(tmpdir)
+        sub = os.path.join(tmpdir, "sub")
+        os.mkdir(sub)
+        path = os.path.join(sub, "gone.txt")
+        with open(path, "w") as f:
+            f.write("real")
+        vfs.enable()
+        os.remove(path)
+        assert _real_exists(path)
+        vfs.reset_cell_tracking()
+
+        assert not os.path.exists(path)
+        assert not os.path.isfile(path)
+        assert not pathlib.Path(path).exists()
+        with pytest.raises(FileNotFoundError):
+            os.stat(path)
+        assert "gone.txt" not in os.listdir(sub)
+        assert path in self._reads(vfs)
+
+    def test_rewrite_after_delete_is_visible(self, vfs, tmpdir):
+        """exists/stat agree with open after a path is deleted and written again."""
+        vfs.set_notebook_dir(tmpdir)
+        path = os.path.join(tmpdir, "again.txt")
+        with open(path, "w") as f:
+            f.write("real")
+        vfs.enable()
+        os.remove(path)
+        with open(path, "w") as f:
+            f.write("new!!")
+
+        assert os.path.exists(path)
+        assert os.stat(path).st_size == 5
+        with open(path) as f:
+            assert f.read() == "new!!"
+
+    def test_queries_outside_notebook_dir_not_tracked(self, vfs, tmpdir):
+        nb_dir = os.path.join(tmpdir, "nb")
+        os.mkdir(nb_dir)
+        outside = os.path.join(tmpdir, "outside.txt")
+        with open(outside, "w") as f:
+            f.write("x")
+        vfs.set_notebook_dir(nb_dir)
+        vfs.enable()
+        vfs.reset_cell_tracking()
+
+        assert os.path.exists(outside)
+        assert os.path.isfile(outside)
+        os.listdir(tmpdir)
+
+        assert self._reads(vfs) == set()
+
+    def test_excluded_prefix_not_tracked(self, vfs, tmpdir):
+        vfs.set_notebook_dir(tmpdir)
+        excluded = os.path.join(tmpdir, "cp")
+        os.mkdir(excluded)
+        vfs.add_excluded_prefix(excluded)
+        vfs.enable()
+        vfs.reset_cell_tracking()
+
+        os.path.exists(os.path.join(excluded, "a"))
+        os.listdir(excluded)
+
+        assert self._reads(vfs) == set()
+
+    def test_overlay_bookkeeping_not_tracked(self, vfs, tmpdir):
+        """The overlay's own paths are never recorded, even without a notebook dir."""
+        vfs.enable()
+        vfs.reset_cell_tracking()
+        path = os.path.join(tmpdir, "sub", "deep", "f.txt")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as f:
+            f.write("x")
+        with open(path) as f:
+            f.read()
+        os.path.exists(path)
+        shutil.copy2(path, os.path.join(tmpdir, "g.txt"))
+
+        tracked = vfs.get_read_paths() | vfs.get_write_paths()
+        assert not any(p.startswith(vfs._overlay_dir) for p in tracked), tracked
+        assert path in vfs.get_write_paths()
+
+    def test_patches_removed(self, vfs, tmpdir):
+        orig_stat, orig_exists, orig_listdir = os.stat, os.path.exists, os.listdir
+        vfs.enable()
+        assert os.stat is not orig_stat
+        vfs.disable()
+        assert (os.stat, os.path.exists, os.listdir) == (orig_stat, orig_exists, orig_listdir)
+
+    def test_caching_idiom_reads_and_writes_same_file(self, vfs, tmpdir):
+        """`if exists(p): load p else: compute; save p` — the first run both reads
+        (the existence check) and writes p, so NoReadAndWrite can flag it."""
+        vfs.set_notebook_dir(tmpdir)
+        vfs.enable()
+        preds = [os.path.join(tmpdir, f"pred{i}.txt") for i in (1, 2, 3)]
+
+        def cell():
+            if all(os.path.exists(p) for p in preds):
+                out = []
+                for p in preds:
+                    with open(p) as f:
+                        out.append(f.read())
+                return out
+            out = [str(i) for i in (1, 2, 3)]
+            for p, v in zip(preds, out):
+                with open(p, "w") as f:
+                    f.write(v)
+            return out
+
+        vfs.reset_cell_tracking()
+        cell()
+        first = vfs.get_cell_file_tracking()
+        # all() stops at the first missing file
+        assert preds[0] in first.file_reads_before_writes & first.file_writes
+
+        vfs.reset_cell_tracking()
+        cell()
+        second = vfs.get_cell_file_tracking()
+        assert set(preds) <= second.file_reads_before_writes
+        assert second.file_writes == set()
+
+    def test_caching_idiom_with_numpy(self, vfs, tmpdir):
+        """np.save/np.load go through the patched open."""
+        np = pytest.importorskip("numpy")
+        vfs.set_notebook_dir(tmpdir)
+        vfs.enable()
+        path = os.path.join(tmpdir, "pred1.npy")
+        vfs.reset_cell_tracking()
+
+        if not os.path.exists(path):
+            np.save(path, np.arange(3))
+        tracking = vfs.get_cell_file_tracking()
+        assert path in tracking.file_reads_before_writes
+        assert path in tracking.file_writes
+        assert not _real_exists(path)
+        assert np.load(path).tolist() == [0, 1, 2]
 
 
 class TestNotebookDirFiltering:
@@ -1492,7 +1714,7 @@ class TestBytesPathHandling:
         bytes_path = real_file.encode()
         os.remove(bytes_path)
         # Bytes path bypasses overlay and goes to real OS
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(real_file)
 
     def test_bytes_rename(self, vfs, tmpdir):
@@ -1505,7 +1727,7 @@ class TestBytesPathHandling:
         vfs.enable()
 
         os.rename(src.encode(), dst.encode())
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(src)
         assert orig_exists(dst)
 
@@ -1514,7 +1736,7 @@ class TestBytesPathHandling:
         vfs.enable()
         new_dirs = os.path.join(tmpdir, "bytes_a", "bytes_b")
         os.makedirs(new_dirs.encode())
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(new_dirs)
 
     def test_bytes_mkdir(self, vfs, tmpdir):
@@ -1522,7 +1744,7 @@ class TestBytesPathHandling:
         vfs.enable()
         new_dir = os.path.join(tmpdir, "bytes_mkdir")
         os.mkdir(new_dir.encode())
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(new_dir)
 
     def test_bytes_rmdir(self, vfs, tmpdir):
@@ -1532,7 +1754,7 @@ class TestBytesPathHandling:
 
         vfs.enable()
         os.rmdir(dir_to_rm.encode())
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(dir_to_rm)
 
     def test_bytes_shutil_copy(self, vfs, tmpdir):
@@ -1546,7 +1768,7 @@ class TestBytesPathHandling:
         # Bytes guard bypasses overlay; _orig_copy internally calls patched
         # open() which also has a bytes guard, so the copy goes to real FS
         shutil.copy(src.encode(), dst.encode())
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(dst)
 
     def test_bytes_shutil_copy2(self, vfs, tmpdir):
@@ -1560,7 +1782,7 @@ class TestBytesPathHandling:
         # Bytes guard bypasses overlay; _orig_copy2 internally calls patched
         # open() which also has a bytes guard, so the copy goes to real FS
         shutil.copy2(src.encode(), dst.encode())
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(dst)
 
     def test_bytes_shutil_move(self, vfs, tmpdir):
@@ -1572,7 +1794,7 @@ class TestBytesPathHandling:
 
         vfs.enable()
         shutil.move(src.encode(), dst.encode())
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(src)
         assert orig_exists(dst)
 
@@ -1762,7 +1984,7 @@ class TestOverlayScoping:
             f.write("external data")
 
         # File should exist on real FS
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(outside_file)
 
         # Verify content via real FS
@@ -1783,7 +2005,7 @@ class TestOverlayScoping:
             f.write("notebook data")
 
         # File should NOT exist on real FS
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(inside_file)
 
         # But patched exists should find it
@@ -1823,7 +2045,7 @@ class TestOverlayScoping:
         os.remove(outside_file)
 
         # Real file should be gone
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(outside_file)
 
     def test_chmod_after_write_outside_notebook_dir(self, vfs, tmpdir):
@@ -1863,7 +2085,7 @@ class TestOverlayScoping:
         os.makedirs(outside_dirs)
 
         # Real dirs should exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(outside_dirs)
 
     def test_no_notebook_dir_overlays_everything(self, vfs, tmpdir):
@@ -1875,7 +2097,7 @@ class TestOverlayScoping:
             f.write("overlay content")
 
         # File should NOT exist on real FS
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(real_file)
 
         # But patched exists should find it
@@ -1931,7 +2153,7 @@ class TestOverlayScoping:
 
         shutil.copy(src, dst)
 
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(dst)
 
     def test_rename_outside_notebook_dir_uses_real_fs(self, vfs, tmpdir):
@@ -1951,7 +2173,7 @@ class TestOverlayScoping:
 
         os.rename(src, dst)
 
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(src)
         assert orig_exists(dst)
 
@@ -1967,7 +2189,7 @@ class TestOverlayScoping:
 
         shutil.rmtree(outside_tree)
 
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(outside_tree)
 
 
@@ -1982,7 +2204,7 @@ class TestLowLevelFDFullVFS:
         os.close(fd)
 
         # Real file should NOT exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(real_file)
 
         # Patched exists should find it (via overlay)
@@ -2055,7 +2277,7 @@ class TestLowLevelFDFullVFS:
         os.write(fd, b"committed")
         os.close(fd)
 
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert not orig_exists(real_file)
 
         vfs.commit()
@@ -2071,7 +2293,7 @@ class TestLowLevelFDFullVFS:
         os.close(fd)
 
         # Bytes paths bypass overlay — real file should exist
-        orig_exists = vfs._originals["os.path.exists"]
+        orig_exists = _real_exists  # real FS: the saved os.path.exists goes through the patched os.stat
         assert orig_exists(real_file)
 
 

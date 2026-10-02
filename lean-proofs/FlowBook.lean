@@ -6,3 +6,4 @@ import FlowBook.Progress
 import FlowBook.Erasure
 import FlowBook.Examples
 import FlowBook.Exec
+import FlowBook.Counterexample

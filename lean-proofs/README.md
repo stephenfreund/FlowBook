@@ -7,7 +7,7 @@ output consistency, and the three correctness theorems with the full
 proofs from the supplemental material.
 
 It also includes an **executable reference kernel** (`FlowBook/Exec.lean`)
-that is proved sound against the relational semantics and `#eval`s the
+that is proved sound against the relational semantics and checks the
 paper's litmus tests (see the dedicated section below).
 
 All proofs are complete and machine-checked: there are **no `sorry`s
@@ -33,10 +33,11 @@ lake build
 | `FlowBook/Analysis.lean`          | §Analysis                                                    | Instrumentation `I = (T, R, W)` (fused into `Cell` records), Def. _Rerun Consistent Accesses_ (`RerunConsistent`), `ForwardStale`/`LastWriter`/`BackwardStale` (`FwdStale`, `IsLastWriter`, `BwdStale`), the instrumented semantics of Fig. 9 (`InstStep`), Def. _Well-Formed State_ (`WellFormed`), and the paper's initial-state observation (`wellFormed_initial`) |
 | `FlowBook/Preservation.lean`      | Theorem 2.3 of the supplement, proof in §3 of the supplement | `preservation`: well-formedness is preserved by every operation, by cases `[Inst-Run]` (subcases `j < i`, `j = i`, `j > i`), `[Inst-Edit]`, `[Inst-Insert]`, `[Inst-Delete]`, `[Inst-Move]`                                                                                                                                                                           |
 | `FlowBook/OutputConsistency.lean` | Theorem 2.4 of the supplement, proof in §4 of the supplement | `output_consistency`: well-formed all-clean states are reproducible, by the paper's induction on prefixes with the agreement invariant on `(⋃ W_{1..i}) \ (⋃ W_{i+1..n})`                                                                                                                                                                                             |
-| `FlowBook/Progress.lean`          | Theorem 2.5 of the supplement, proof in §5 of the supplement | `progress`, `progress_init`, `progress_reproducible`: every execution of the first-stale strategy (`FirstStaleExec`), under the paper's rerun assumption, terminates in an all-clean (hence reproducible) state or at a stuck cell; `canRerun_after_run`: the assumption is satisfiable for cells marked stale by `BackwardStale`                                        |
+| `FlowBook/Progress.lean`          | Theorem 2.5 of the supplement, proof in §5 of the supplement | `progress_terminates`, `progress`, `progress_halted`, `progress_reproducible`: under the `Deterministic` assumption, every execution of the strategy "run the first stale cell" is finite and ends in a well-formed state that is all-clean (hence reproducible) or stuck; `clean_prefix`: the clean prefix agrees with the top-to-bottom execution                   |
 | `FlowBook/Erasure.lean`           | Figs. 8 / 9                                                  | `instStep_erase`: the instrumented semantics refines the standard semantics (erasing `I` from an instrumented step yields a standard step)                                                                                                                                                                                                                            |
-| `FlowBook/Examples.lean`          | —                                                            | A concrete model (assignments and copies) satisfying the evaluation axioms, showing the axiomatization is consistent; instantiations of all three theorems at that model                                                                                                                                                                                              |
-| `FlowBook/Exec.lean`              | Figs. 3 / 4                                                  | An **executable** reference kernel: a concrete cell language with a functional evaluator, decidable rerun-consistency and staleness, functional operations (`runCell`/`editCell`/`insertCell`/`deleteCell`), soundness theorems tying each accepted operation to a real `InstStep`, and `#eval` demos replaying every litmus test                                     |
+| `FlowBook/Examples.lean`          | —                                                            | A concrete model (assignments and copies) satisfying the evaluation axioms and `Deterministic`, showing the axiomatization is consistent; instantiations of all three theorems at that model                                                                                                                                                                          |
+| `FlowBook/Exec.lean`              | Figs. 3 / 4                                                  | An **executable** reference kernel: a concrete cell language with a functional evaluator, decidable rerun-consistency and staleness, functional operations (`runCell`/`editCell`/`insertCell`/`deleteCell`), soundness theorems tying each accepted operation to a real `InstStep`, and `#guard` checks replaying every litmus test                                     |
+| `FlowBook/Counterexample.lean`    | §5 of the supplement                                         | `setDeterminism_insufficient`: a language satisfying the supplement's set-level determinism assumption and a well-formed notebook from which running the first stale cell cycles forever                                                                                                                                                                              |
 
 ## The executable reference kernel (`FlowBook/Exec.lean`)
 
@@ -69,17 +70,15 @@ are the same object.
   from a freshly built (all-stale, hence well-formed) notebook, if the
   kernel accepts an operation sequence and the final notebook is all
   clean, then it is reproducible.
-- **Litmus tests.** The `#eval` block at the end replays every scenario
-  from Figures 3 and 4. The
-  four rerun-consistency scenarios each print the exact violation the
-  paper labels (`noReadAndWrite`, `writeBeforeRead`, `noReadBeforeWrite`,
-  `noWriteAfterRead`); the staleness scenarios print the resulting
-  per-cell tags — forward staleness `[clean, stale]` and the combined
-  backward+forward scenario `[stale, clean, stale]`. Run them with:
-
-  ```bash
-  lake env lean FlowBook/Exec.lean
-  ```
+- **Litmus tests.** The `#guard` block at the end replays every scenario
+  from Figures 3 and 4, and `lake build` fails unless each one produces
+  the outcome shown in the paper. The four rerun-consistency scenarios
+  must report the exact violation the paper labels (`noReadAndWrite`,
+  `writeBeforeRead`, `noReadBeforeWrite`, `noWriteAfterRead`); the four
+  staleness scenarios must produce the resulting per-cell tags —
+  `[clean, stale]` for forward staleness after a rerun (1) and after a
+  write→write conflict (2), `[stale]` after deleting the writer (3), and
+  `[stale, clean, stale]` for the combined backward+forward scenario (4).
 
 Because `runCell` reports the _first_ violation it finds, `diagnose`
 checks `NoReadBeforeWrite` before `WriteBeforeRead` so that a top cell
@@ -103,7 +102,9 @@ soundness proof, which only uses the "no violation" case.
     property is stated in a remark in the paper and is what
     realizes the commuting diagrams in the proofs of §§3–5 of the supplement.
 
-  `FlowBook/Examples.lean` proves both axioms hold for a concrete
+  Progress additionally assumes the `Deterministic` class (sequential
+  determinism; see the notes on Theorem 2.5 below).
+  `FlowBook/Examples.lean` proves all of these hold for a concrete
   language, so the axiomatization is non-vacuous.
 
 - **State representation.** The paper's `S · I = (C, O, Σ) · (T, R, W)`
@@ -134,49 +135,55 @@ theorem preservation (hwf : WellFormed nb) (hstep : InstStep nb op nb') :
 theorem output_consistency (hwf : WellFormed nb) (hclean : AllClean nb.cells) :
     Reproducible nb.erase
 
-theorem progress (hwf : WellFormed nb) (F : List Nat) :
-    ∃ nb' F', FirstStaleExec F nb nb' F' ∧ WellFormed nb' ∧
-      (AllClean nb'.cells ∨ FirstStaleStuck nb' F')
+theorem progress_terminates [Deterministic Code Output L V] (hwf : WellFormed nb) :
+    Acc StrategyRel nb
+
+theorem progress [Deterministic Code Output L V] (hwf : WellFormed nb) :
+    ∃ nb', StrategyStar nb nb' ∧ WellFormed nb' ∧ (AllClean nb'.cells ∨ Stuck nb')
 ```
 
 ## Notes on Theorem 2.5 (Progress)
 
-Theorem 2.5 of the supplement (proved in §5 of the supplement) states
-that repeatedly running the first stale cell terminates, either with
-all cells clean or at a stuck cell, under the supplement's assumption
-that rerunning a previously clean cell whose reads are unchanged
-reproduces its recorded read and write sets (automatic for
-deterministic evaluation).
+Theorem 2.5 of the supplement (proved in §5 of the supplement) is stated
+for the strategy "while some cell is stale, run the first stale cell",
+under a determinism assumption. `StrategyStep` is one step of the
+strategy, with any accepted `[Inst-Run]` step, so the cell's output is
+unconstrained. `Stuck` says the first stale cell has no `[Inst-Run]`
+step: its run fails a rerun-consistency check or raises an exception.
 
-The assumption is necessary because cell evaluation is
-non-deterministic: without it, three cells suffice for a
-non-terminating execution in which every run succeeds (let cells 2
-and 3 each alternate between writing `{a}` and `{b}`; each run of one
-backward-marks the other via `LastWriter`).
-
-The formalization makes the assumption a side condition:
-`FirstStaleExec` carries `F`, the positions with no validated recorded
-behavior (initially all positions); a `first` step runs a cell in `F`
-with any successful `[Inst-Run]`, and a `rerun` step must be a
-`MatchingRunAt` step, reproducing the recorded read and write sets.
-`FirstStaleStuck` holds when the first stale cell has no run of the
-required kind.
-
-- `progress` proves every such execution **terminates**, by the
-  lexicographic measure `(|F|, n − first-stale position)`: a first run
-  shrinks `F`, and a matching rerun has `W_i \ W'_i = ∅`, so
-  `BackwardStale` marks nothing and the clean prefix strictly grows
-  (`matching_clean_prefix`).
-- `canRerun_after_run` proves the assumption is satisfiable where the
-  paper's proof uses it: after any successful run of the first stale
-  cell `i`, every cell `j < i` — in particular every cell marked by
-  `BackwardStale` — can re-run from the new store reproducing its
-  recorded output, read set, and write set, because the run's
-  `NoWriteAfterRead` check keeps the new writes away from those cells'
-  read sets.
-- A matching rerun may forward-mark later cells; whether those remain
-  matchable when the sweep reaches them is not proved, and a validated
-  cell with no matching run counts as stuck.
+- **Determinism must be sequential.** The supplement phrases the
+  assumption in terms of read _sets_. That is not sufficient. Put
+  three cells writing `a := 0`, `b := 0`, `c := 0` above a cell `U`
+  that reads `{a, b}` and writes `c := 1` when `a ≠ 0 = b`, reads
+  `{b, c}` and writes `a := 1` when `b ≠ 0 = c`, reads `{c, a}` and
+  writes `b := 1` when `c ≠ 0 = a`, and otherwise reads all three.
+  `U` satisfies the set-level assumption. Starting from `a = 1`,
+  `b = c = 0` with `U` stale, the strategy runs `U, A, U, C, U, B` and
+  returns to the same state, forever (machine-checked in
+  `FlowBook/Counterexample.lean`). The supplement's proof uses the
+  order of reads ("the first such location `u` reads"), so
+  `Deterministic` assumes it explicitly. A run reads the list
+  `rseq c σ`, and the next location read depends only on the values
+  already read (`rseq_take`). The write set and written values depend
+  only on the values read (`det`).
+- **Proof.** `clean_prefix` shows that in any well-formed state, the
+  cells above the first stale cell carry the read and write sets of
+  the top-to-bottom execution `E` (`Settled`). The store agrees with
+  `E` on the locations written above the first stale cell and not at
+  or below it. `run_analysis` shows that a run of the first stale cell
+  either is an `E`-run or diverges from `E` at a location both runs
+  read, which the cell itself wrote and now stops writing. A phase for
+  cell `m` (`Phase`, `phase_acc`) lasts while the first stale cell is
+  at or above `m`. Within a phase, runs above `m` keep their write sets
+  and move the first stale cell down. Each diverging run of `m` agrees
+  with `E` on strictly more reads than the last, and after an `E`-run
+  of `m` the next run of `m` keeps its write set. Successive phases are
+  for strictly lower cells.
+- `progress_terminates` gives termination as `Acc`: no infinite
+  execution exists, whatever outputs the cells produce.
+  `progress_halted` shows that every execution that cannot continue
+  ends well-formed and all-clean or stuck. `progress` and
+  `progress_reproducible` package the two.
 
 ## Verifying the axiom footprint
 
@@ -184,7 +191,8 @@ required kind.
 lake env lean -q <(echo 'import FlowBook
 #print axioms FlowBook.preservation
 #print axioms FlowBook.output_consistency
-#print axioms FlowBook.progress')
+#print axioms FlowBook.progress
+#print axioms FlowBook.progress_terminates')
 ```
 
 Each reports `[propext, Classical.choice, Quot.sound]` — Lean's
