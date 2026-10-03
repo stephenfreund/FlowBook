@@ -43,7 +43,7 @@ the notebook is guaranteed to be output consistent.
    python3 -m pip install -e .
    ```
 
-2. You will need Python and node. More details on installation from source below.
+2. Installing from source requires Python 3.10+ and Node.js 20+. More details on installation from source below.
 
    Then launch jupyter lab
 
@@ -173,6 +173,13 @@ pip uninstall flowbook-python
 
 ## Source Installation
 
+Requirements:
+
+- Python 3.10 or later
+- Node.js 20 or later (needed to build the JupyterLab extension)
+
+Our development environment uses Python 3.11.4 and Node.js 22.22.0.
+
 Clone this repository and then install it as an editable package
 
 ```bash
@@ -184,8 +191,6 @@ Once JupyterLab opens, create or open a notebook and select the
 **FlowBook** kernel from the kernel picker. Start with
 `GettingStarted.ipynb`, then explore the `demos/` and `litmus/`
 directories.
-
-Note: You will need NodeJS to build the extension package.
 
 The `jlpm` command is JupyterLab's pinned version of
 [yarn](https://yarnpkg.com/) that is installed with JupyterLab. You may use
