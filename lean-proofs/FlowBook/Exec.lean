@@ -22,13 +22,12 @@ file gives a concrete, **executable** instantiation:
   operations; combined with `preservation`/`output_consistency`, an
   accepted run from a well-formed state stays well-formed, and an
   all-clean reachable state is reproducible (`allClean_reproducible`);
-* `#eval` demonstrations replaying the litmus tests of
-  Figures 3 and 4.
+* `#guard` checks replaying the litmus tests of Figures 3 and 4.
 
 The executable staleness marking is computed by decidable Boolean
 functions (`fwdStaleB`, `bwdStaleB`) that are proved to reflect the
-relational `FwdStale`/`BwdStale` predicates, so the tags shown by the
-`#eval` demos are the same tags the soundness theorem certifies.
+relational `FwdStale`/`BwdStale` predicates, so the tags checked by the
+`#guard`s are the same tags the soundness theorem certifies.
 -/
 import FlowBook.Preservation
 import FlowBook.OutputConsistency
@@ -724,15 +723,16 @@ theorem mkNb_runOps_reproducible {cs : List (LCmd L)} {ops : List (EOp L)}
     (hac : AllClean nb'.toNb.cells) : Reproducible nb'.toNb.erase :=
   output_consistency (runOps_wellFormed (mkNb_wellFormed cs) h) hac
 
-/-! ## `#eval` demonstrations of the litmus tests -/
+/-! ## Machine-checked replays of the litmus tests -/
 
 section Demos
 
 /-- Locations used by the demos. -/
 private def vx : Loc String Nat String := .var "x"
+private def vy : Loc String Nat String := .var "y"
 private def va : Loc String Nat String := .var "a"
 private def vz : Loc String Nat String := .var "z"
-private def vw : Loc String Nat String := .var "w"
+private def vother : Loc String Nat String := .var "other"
 private def vdf : Loc String Nat String := .var "df"
 private def dfy : Loc String Nat String := .col 0 "y"
 
@@ -742,7 +742,7 @@ via `Repr` rather than trying to run it as a monad.) -/
 inductive Result (L : Type) where
   | rejected (v : Violation L)
   | tags (ts : List Tag)
-deriving Repr
+deriving Repr, DecidableEq
 
 /-- Run a scenario and report either the rerun-consistency violation or
 the final per-cell tags. -/
@@ -752,43 +752,65 @@ def scenario (cs : List (LCmd (Loc String Nat String)))
   | .error v => .rejected v
   | .ok nb => .tags (nb.cells.map (·.tag))
 
+/-! Each `#guard` below fails the build unless the kernel reports exactly
+the violation or tags shown in the paper's figure. -/
+
+/-! ### Figure 3: rerun-consistency violations -/
+
 /-
-Figure 3, scenario 1 (NoReadAndWrite): running
-`x = x + 1` after `x = 0` reads and writes `x`.
-Prints: `rejected (noReadAndWrite (var "x"))`. -/
-#eval scenario [.const vx 0, .incr vx] [.run 0, .run 1]
+Scenario 1 (NoReadAndWrite): running `x = x + 1` after `x = 0` reads
+and writes `x`. -/
+#guard scenario [.const vx 0, .incr vx] [.run 0, .run 1] =
+  .rejected (.noReadAndWrite vx)
 
 /-
 Scenario 2 (WriteBeforeRead): running `df.head()` with the cell that
-defines `df` never executed.
-Prints: `rejected (writeBeforeRead (var "df"))`. -/
-#eval scenario [.const vdf 5, .use vdf] [.run 1]
+defines `df` never executed. -/
+#guard scenario [.const vdf 5, .use vdf] [.run 1] =
+  .rejected (.writeBeforeRead vdf)
 
 /-
 Scenario 3 (NoReadBeforeWrite): `df["y"].sum()` reads a column written
-by a cell below it.
-Prints: `rejected (noReadBeforeWrite (col 0 "y"))`. -/
-#eval scenario [.use dfy, .const dfy 3] [.run 1, .run 0]
+by a cell below it. -/
+#guard scenario [.use dfy, .const dfy 3] [.run 1, .run 0] =
+  .rejected (.noReadBeforeWrite dfy)
 
 /-
 Scenario 4 (NoWriteAfterRead): `a = 100` overwrites `a` read by a cell
-above it.
-Prints: `rejected (noWriteAfterRead (var "a"))`. -/
-#eval scenario [.const va 1, .use va, .const va 100] [.run 0, .run 1, .run 2]
+above it. -/
+#guard scenario [.const va 1, .use va, .const va 100] [.run 0, .run 1, .run 2] =
+  .rejected (.noWriteAfterRead va)
+
+/-! ### Figure 4: staleness -/
 
 /-
-Figure 4, forward staleness: re-running an
-upper cell that writes `x` marks the lower reader stale.
-Prints: `tags [clean, stale]`. -/
-#eval scenario [.const vx 5, .use vx] [.run 0, .run 1, .run 0]
+Scenario 1 (ForwardStale, write→read): after `J` (`x = 100`) and `K`
+(`print(x)`) run, editing `J` to `x = 9999` and rerunning it marks `K`
+stale. -/
+#guard scenario [.const vx 100, .use vx]
+    [.run 0, .run 1, .edit 0 (.const vx 9999), .run 0] =
+  .tags [.clean, .stale]
 
 /-
-Backward + forward staleness (scenario 4): after `P,Q,R` run, editing
-`Q` to stop writing `z` and re-running it marks `P` stale (BackwardStale,
-to restore `z`) and `R` stale (ForwardStale).
-Prints: `tags [stale, clean, stale]`. -/
-#eval scenario [.const vz 1, .const vz 2, .use vz]
-  [.run 0, .run 1, .run 2, .edit 1 (.const vw 9), .run 1]
+Scenario 2 (ForwardStale, write→write): running `M` (`y = 20`) and then
+`L` (`y = 10`) above it marks `M` stale. -/
+#guard scenario [.const vy 10, .const vy 20] [.run 1, .run 0] =
+  .tags [.clean, .stale]
+
+/-
+Scenario 3 (ForwardStale, delete): after `N` (`df = ...`) and `O`
+(`df.describe()`) run, deleting `N` marks `O` stale. -/
+#guard scenario [.const vdf 5, .use vdf] [.run 0, .run 1, .delete 0] =
+  .tags [.stale]
+
+/-
+Scenario 4 (BackwardStale + ForwardStale): after `P` (`z = 0`), `Q`
+(`z = 99`), and `R` (`print(z)`) run, editing `Q` to `other = 99` and
+rerunning it marks `P` stale (BackwardStale, to restore `z`) and `R`
+stale (ForwardStale). -/
+#guard scenario [.const vz 0, .const vz 99, .use vz]
+    [.run 0, .run 1, .run 2, .edit 1 (.const vother 99), .run 1] =
+  .tags [.stale, .clean, .stale]
 
 end Demos
 

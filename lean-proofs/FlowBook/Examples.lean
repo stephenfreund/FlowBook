@@ -2,12 +2,12 @@
 # A Concrete Model of the Evaluation Axioms
 
 The whole development is parametric in a black-box cell evaluation
-relation satisfying the `frame` and `locality` axioms of `CellEval`.
-This file exhibits a concrete model — a miniature cell language of
-constant assignments `dst := v` and copies `dst := src` — and proves it
-satisfies the axioms.  This shows the axiomatization is consistent
-(non-vacuous): the three theorems are about a nonempty class of
-languages.
+relation satisfying the `frame` and `locality` axioms of `CellEval`,
+and Progress additionally assumes `Deterministic`.  This file exhibits a
+concrete model — a miniature cell language of constant assignments
+`dst := v` and copies `dst := src` — and proves it satisfies all of
+these.  This shows the axiomatization is consistent (non-vacuous): the
+three theorems are about a nonempty class of languages.
 
 The paper's location grammar `ℓ ::= x | d.c` (`FlowBook.Loc`) is used
 as the location type of the example instantiation at the bottom.
@@ -86,6 +86,40 @@ instance instCellEval (L V : Type) [DecidableEq L] :
         have hne : ℓ ≠ dst := fun h => hnw ((hw ℓ).mpr h)
         simp [update, hne]
 
+/-- The miniature language is deterministic: an assignment reads nothing,
+a copy reads its source, and the written value depends only on the
+value read. -/
+instance instDeterministic (L V : Type) [DecidableEq L] :
+    Deterministic (Cmd L V) Unit L V where
+  rseq c _ := match c with
+    | .assign _ _ => []
+    | .copy _ src => [src]
+  reads_iff := by
+    intro c σ o σ' r w heval ℓ
+    cases c with
+    | assign dst v => obtain ⟨_, hr, _⟩ := heval; simp [hr ℓ]
+    | copy dst src => obtain ⟨_, hr, _⟩ := heval; simp [hr ℓ]
+  rseq_take := by intros; rfl
+  det := by
+    intro c σ o σ' r w τ o₂ τ' r₂ w₂ h1 h2 hagree
+    cases c with
+    | assign dst v =>
+      obtain ⟨hσ', _, hw⟩ := h1
+      obtain ⟨hτ', _, hw₂⟩ := h2
+      refine ⟨fun ℓ => (hw₂ ℓ).trans (hw ℓ).symm, fun ℓ hwℓ => ?_⟩
+      have : ℓ = dst := (hw ℓ).mp hwℓ
+      subst this
+      rw [hσ', hτ']
+      simp [update]
+    | copy dst src =>
+      obtain ⟨hσ', hr, hw⟩ := h1
+      obtain ⟨hτ', _, hw₂⟩ := h2
+      refine ⟨fun ℓ => (hw₂ ℓ).trans (hw ℓ).symm, fun ℓ hwℓ => ?_⟩
+      have : ℓ = dst := (hw ℓ).mp hwℓ
+      subst this
+      rw [hσ', hτ', hagree src ((hr src).mpr rfl)]
+      simp [update]
+
 /-- The paper's location type, instantiated with string variable names,
 numeric DataFrame addresses, and string column names. -/
 abbrev PaperLoc : Type := Loc String Nat String
@@ -102,10 +136,12 @@ example {nb : MiniNotebook} (hwf : WellFormed nb) (hclean : AllClean nb.cells) :
     Reproducible nb.erase :=
   output_consistency hwf hclean
 
-example {nb : MiniNotebook} (hwf : WellFormed nb) (F : List Nat) :
-    ∃ nb' F', RunToClean F nb nb' F' ∧
-      (Reproducible nb'.erase ∨ RunToCleanStuck nb' F') :=
-  progress_reproducible hwf F
+example {nb : MiniNotebook} (hwf : WellFormed nb) : Acc StrategyRel nb :=
+  progress_terminates hwf
+
+example {nb : MiniNotebook} (hwf : WellFormed nb) :
+    ∃ nb', StrategyStar nb nb' ∧ (Reproducible nb'.erase ∨ Stuck nb') :=
+  progress_reproducible hwf
 
 end Examples
 end FlowBook

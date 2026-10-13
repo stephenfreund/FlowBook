@@ -2,10 +2,15 @@
 
 ---
 
-[Emery Berger](https://emeryberger.com),
-[Cormac Flanagan](https://users.soe.ucsc.edu/~cormac/),
-[Stephen Freund](https://www.cs.williams.edu/~freund/),
-[Eunice Jun](http://eunicemjun.com/)
+# Contents
+
+This repository contains:
+1. The full source for FlowBook, and accompanying documentation, tutorials, and examples.
+2. A paper supplement containing FlowBook's [formal development and correctness proofs](FlowBookSupplementalMaterialsProof.pdf).
+3. A [Lean mechanization](lean-proofs/README.md) of the formal development and proofs.
+
+
+# FlowBook at a Glance
 
 **Output consistency for Jupyter notebooks.**
 
@@ -23,9 +28,6 @@ overwriting a value read by an earlier one) are rejected.
 When every cell is _clean_ — executed and rerun consistent —
 the notebook is guaranteed to be output consistent.
 
-For technical details and a complete evaluation, see our arXiv paper: [FlowBook: Enforcing Reproducibility in Computational Notebooks](https://arxiv.org/abs/2605.01560).
-
-(Note: we sometimes use reproducibility as a synonym for output consistency in parts of the code and developer docs.)
 
 ## Quick Start
 
@@ -41,7 +43,7 @@ For technical details and a complete evaluation, see our arXiv paper: [FlowBook:
    python3 -m pip install -e .
    ```
 
-2. You will need Python and node. More details on installation from source below.
+2. Installing from source requires Python 3.10+ and Node.js 20+. More details on installation from source below.
 
    Then launch jupyter lab
 
@@ -171,6 +173,13 @@ pip uninstall flowbook-python
 
 ## Source Installation
 
+Requirements:
+
+- Python 3.10 or later
+- Node.js 20 or later (needed to build the JupyterLab extension)
+
+Our development environment uses Python 3.11.4 and Node.js 22.22.0.
+
 Clone this repository and then install it as an editable package
 
 ```bash
@@ -182,8 +191,6 @@ Once JupyterLab opens, create or open a notebook and select the
 **FlowBook** kernel from the kernel picker. Start with
 `GettingStarted.ipynb`, then explore the `demos/` and `litmus/`
 directories.
-
-Note: You will need NodeJS to build the extension package.
 
 The `jlpm` command is JupyterLab's pinned version of
 [yarn](https://yarnpkg.com/) that is installed with JupyterLab. You may use
